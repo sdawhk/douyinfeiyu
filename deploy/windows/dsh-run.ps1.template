@@ -1,0 +1,43 @@
+# 运行 dsh web（前台阻塞，直到 dsh 退出）。
+# 启动输出逐行写入可并发读取的日志，供 bridge 取得新令牌。
+
+$ROOT = 'D:\deepseek'
+# IMPORTANT: must use DSH's OWN node runtime, not SnowLuma's node.
+# With SnowLuma's node (v22.13) dsh web exits immediately and 3090 never
+# binds (verified 2026-10-18: silent failure, no error output).
+$DSHNODE = if ($env:DSH_NODE_EXE) { $env:DSH_NODE_EXE } else { Join-Path $env:USERPROFILE '.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe' }
+if (-not (Test-Path -LiteralPath $DSHNODE)) {
+  Write-Error "DSH Node runtime not found: $DSHNODE"
+  exit 1
+}
+$NODE = $DSHNODE
+$DSH  = "$ROOT\dshcli\node_modules\@deepseek-ai\dsh\lib\bin.js"
+$LOGDIR = "$ROOT\logs"
+New-Item -ItemType Directory -Force -Path $LOGDIR | Out-Null
+
+$env:DSH_HOME = "$ROOT\dshhome"
+if ([string]::IsNullOrWhiteSpace($env:DEEPSEEK_API_KEY)) {
+  Write-Error "Set the DEEPSEEK_API_KEY environment variable before starting DSH."
+  exit 1
+}
+$env:DEEPSEEK_BASE_URL = 'http://127.0.0.1:18901'
+
+$logStream = [System.IO.File]::Open(
+  "$LOGDIR\dshweb.out",
+  [System.IO.FileMode]::Create,
+  [System.IO.FileAccess]::Write,
+  [System.IO.FileShare]::ReadWrite
+)
+$logWriter = [System.IO.StreamWriter]::new($logStream, [System.Text.UTF8Encoding]::new($false))
+$logWriter.AutoFlush = $true
+try {
+  & $NODE $DSH web --port 3090 --no-open --host 127.0.0.1 2>&1 | ForEach-Object {
+    $line = [string]$_
+    $logWriter.WriteLine($line)
+    Write-Output $line
+  }
+  $exitCode = $LASTEXITCODE
+} finally {
+  $logWriter.Dispose()
+}
+exit $exitCode
