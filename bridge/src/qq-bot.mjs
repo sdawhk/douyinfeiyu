@@ -718,7 +718,7 @@ async function onMessage(ev) {
     log('[error]', error.message);
     // 只对主人提示一次，且用人话；群里保持安静。
     if (!isGroup && isOwner(sender)) {
-      await sendText(target, '刚才卡了一下，再说一遍？', false).catch(() => {});
+      await sendText(target, '模型服务暂时没能回复，故障已记录；请稍后再发一次。', false).catch(() => {});
     }
   }
 }

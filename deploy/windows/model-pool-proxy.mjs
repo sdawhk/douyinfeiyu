@@ -21,7 +21,8 @@ const STATE_FILE = 'D:\\deepseek\\state\\keys.json';
 const COOLDOWN_MS = Number(process.env.KEY_COOLDOWN_MS || 60 * 60 * 1000); // 1h
 
 // 单个 key 最长等它多久
-const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 120000);
+const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 30_000);
+const MODEL_FALLBACK_BUDGET_MS = Number(process.env.MODEL_FALLBACK_BUDGET_MS || 240_000);
 
 // DSH 内部 model id -> 上游实际 id（沿用原 model-map-proxy 的映射）
 const MAP = new Map(Object.entries({
@@ -106,9 +107,9 @@ function markDead(key, reason) {
 }
 
 // ---------- 转发 ----------
-async function forward(entry, path, method, headers, body) {
+async function forward(entry, path, method, headers, body, timeoutMs = UPSTREAM_TIMEOUT_MS) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), UPSTREAM_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const up = await fetch(entry.upstream + path, {
       method,
@@ -135,6 +136,10 @@ function isQuotaFailure(status, text) {
 
 function isUnavailableModel(status, text) {
   return status === 404 && /(?:model|endpoint).*(?:not found|unavailable)|no endpoints|unknown model/i.test(String(text));
+}
+
+function isTransientUpstreamFailure(status) {
+  return status === 408 || status === 425 || status >= 500;
 }
 
 // ---------- Web 管理后台 ----------
@@ -332,6 +337,7 @@ const server = http.createServer((req, res) => {
     const modelCandidates = mayFallback
       ? [...new Set([model, ...FREE_MODEL_FALLBACKS])]
       : [model];
+    const modelDeadline = mayFallback ? Date.now() + MODEL_FALLBACK_BUDGET_MS : Infinity;
 
     const pool = availableKeys();
     if (pool.length === 0) {
@@ -353,6 +359,14 @@ const server = http.createServer((req, res) => {
       const candidate = modelCandidates[modelIndex];
       let shouldTryNextModel = false;
       for (const entry of activeKeys) {
+        const remainingMs = modelDeadline - Date.now();
+        if (remainingMs <= 0) {
+          lastModelFailure ??= {
+            status: 503,
+            text: JSON.stringify({ error: { message: 'model fallback time budget exceeded' } }),
+          };
+          break;
+        }
         let requestBody = body.length ? body : undefined;
         if (candidate && requestJson && candidate !== requestJson.model) {
           requestBody = Buffer.from(JSON.stringify({ ...requestJson, model: candidate }), 'utf8');
@@ -360,14 +374,25 @@ const server = http.createServer((req, res) => {
 
         let r;
         try {
-          r = await forward(entry, path, req.method, headers, requestBody);
+          r = await forward(entry, path, req.method, headers, requestBody,
+            Math.min(UPSTREAM_TIMEOUT_MS, remainingMs));
         } catch (err) {
-          // 网络/超时：换下一个 key，但不要把 key 标记为不可用。
-          console.log(`[keys] ${entry.name} network error: ${err.message}`);
+          // 网络/超时不代表 key 失效；换完 key 后也继续尝试下一个模型。
+          lastModelFailure = {
+            status: 503,
+            text: JSON.stringify({ error: { message: `upstream network error: ${err.message}` } }),
+          };
+          shouldTryNextModel = true;
+          console.log(`[models] ${candidate} network/timeout error; trying another key or model`);
           continue;
         }
 
         if (isQuotaFailure(r.status, r.text) || isUnavailableModel(r.status, r.text)) {
+          lastModelFailure = r;
+          shouldTryNextModel = true;
+          continue;
+        }
+        if (isTransientUpstreamFailure(r.status)) {
           lastModelFailure = r;
           shouldTryNextModel = true;
           continue;
@@ -383,13 +408,13 @@ const server = http.createServer((req, res) => {
         res.writeHead(r.status, { 'content-type': ct });
         res.end(r.text);
         if (candidate !== model) {
-          console.log(`[models] ${model} unavailable; served with fallback ${candidate}`);
+          console.log(`[models] ${model} served with fallback ${candidate}`);
         }
         return;
       }
 
       if (shouldTryNextModel && modelIndex + 1 < modelCandidates.length) {
-        console.log(`[models] ${candidate} hit quota/rate limit or is unavailable; trying next free model`);
+        console.log(`[models] ${candidate} failed; trying next fallback model`);
         continue;
       }
       if (activeKeys.length === 0) break;

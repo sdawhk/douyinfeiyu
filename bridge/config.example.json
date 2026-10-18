@@ -32,7 +32,7 @@
   "allowAllWhenEmpty": false,
   "ackMessage": "",
   "sendDelayMs": 300,
-  "questionTimeoutMs": 300000,
+  "questionTimeoutMs": 270000,
   "consolePort": 3100,
   "consoleToken": "",
   "security": {
