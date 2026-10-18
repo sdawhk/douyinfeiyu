@@ -129,7 +129,10 @@ const DSH_TOKEN_FILE = 'D:\\deepseek\\logs\\dshweb.out';
 
 function readDshToken() {
   try {
-    const txt = readFileSync(DSH_TOKEN_FILE, 'utf8');
+    const data = readFileSync(DSH_TOKEN_FILE);
+    // Windows PowerShell 5.1 的 Tee-Object 默认写 UTF-16LE。
+    const txt = data[0] === 0xff && data[1] === 0xfe
+      ? data.toString('utf16le') : data.toString('utf8');
     const m = txt.match(/token=([A-Za-z0-9_\-]+)/);
     return m ? m[1] : null;
   } catch { return null; }
@@ -138,12 +141,8 @@ function readDshToken() {
 const dsh = new NodeApiClient(cfg.dsh.baseUrl, { launchToken: cfg.dsh.launchToken ?? '' });
 
 /**
- * 连 DSH；连不上就自己把 DSH 拉起来（抓 token 到 dshweb.out），再重试。
- *
- * 为什么由 bridge 自己启动：bat 的 ">>file" 重定向在计划任务 session 0 下
- * 静默失败（0 字节），cmd /c 重定向会让 dsh 立刻退出，Start-Process /
- * .NET Process 在本机被挡。由 bridge（本身就是 Node 进程）spawn 最可靠，
- * 且能直接把输出落盘取 token。
+ * 连 DSH；一键启动通常会先拉起 DSH。若它确实没启动，备用拉起一次，
+ * dsh-run.ps1 将启动输出中的新令牌记录到 dshweb.out。
  */
 async function connectDsh() {
   for (let attempt = 1; attempt <= 12; attempt++) {
@@ -163,10 +162,14 @@ async function connectDsh() {
           return true;
         } catch { /* 继续等 */ }
       }
-      // 前两次先等（可能 DSH 正在冷启动），之后自己拉起
-      if (attempt >= 3) {
-        log(`[dsh] unreachable, starting dsh myself (attempt ${attempt})`);
-        await startDshMyself();
+      // 一键启动会先拉起 DSH；只在它确实未监听且等待较久后备用启动一次。
+      if (attempt === 6) {
+        const reachable = await fetch(cfg.dsh.baseUrl, { signal: AbortSignal.timeout(2000) })
+          .then(() => true, () => false);
+        if (!reachable) {
+          log('[dsh] unreachable, starting dsh myself once');
+          await startDshMyself();
+        }
       }
       log(`[dsh] not ready (attempt ${attempt}/12), retrying in 5s`);
       await sleep(5000);
@@ -180,7 +183,9 @@ async function connectDsh() {
 function startDshMyself() {
   return new Promise((resolve) => {
     try {
-      const child = spawn(process.execPath, ['D:\\deepseek\\dsh-launcher.mjs'], {
+      const child = spawn('powershell.exe', [
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'D:\\deepseek\\dsh-run.ps1'
+      ], {
         cwd: 'D:\\deepseek',
         detached: true,
         stdio: 'ignore',
