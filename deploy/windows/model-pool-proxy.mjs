@@ -18,11 +18,19 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 const PORT = Number(process.env.PORT || 18901);
 const KEYS_FILE = process.env.KEYS_FILE || 'D:\\deepseek\\keys.json';
 const STATE_FILE = 'D:\\deepseek\\state\\keys.json';
+const MODEL_STATE_FILE = process.env.MODEL_STATE_FILE || 'D:\\deepseek\\state\\models.json';
 const COOLDOWN_MS = Number(process.env.KEY_COOLDOWN_MS || 60 * 60 * 1000); // 1h
 
-// 单个 key 最长等它多久
+// 首字超时触发模型切换；已经开始输出的回答有更长的总时限。
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 30_000);
-const MODEL_FALLBACK_BUDGET_MS = Number(process.env.MODEL_FALLBACK_BUDGET_MS || 240_000);
+const MODEL_FIRST_TOKEN_TIMEOUT_MS = Number(process.env.MODEL_FIRST_TOKEN_TIMEOUT_MS || 12_000);
+const MODEL_STREAM_TOTAL_TIMEOUT_MS = Number(process.env.MODEL_STREAM_TOTAL_TIMEOUT_MS || 120_000);
+const MODEL_FALLBACK_BUDGET_MS = Number(process.env.MODEL_FALLBACK_BUDGET_MS || 45_000);
+// Try the requested free model plus every configured automatic free fallback.
+const MODEL_MAX_ATTEMPTS = Number(process.env.MODEL_MAX_ATTEMPTS || 7);
+const MODEL_COOLDOWN_MS = Number(process.env.MODEL_COOLDOWN_MS || 3 * 60 * 1000);
+const MODEL_QUOTA_COOLDOWN_MS = Number(process.env.MODEL_QUOTA_COOLDOWN_MS || 5 * 60 * 1000);
+const MODEL_UNAVAILABLE_COOLDOWN_MS = Number(process.env.MODEL_UNAVAILABLE_COOLDOWN_MS || 30 * 60 * 1000);
 
 // DSH 内部 model id -> 上游实际 id（沿用原 model-map-proxy 的映射）
 const MAP = new Map(Object.entries({
@@ -30,9 +38,10 @@ const MAP = new Map(Object.entries({
   'deepseek-v4-pro': 'buddy/deepseek-v4-pro',
 }));
 
-// Free models used when a request hits exhausted credits or a model rate limit.
-// The paid Trae/GLM model stays selectable, but is deliberately excluded here.
-const FREE_MODEL_FALLBACKS = [
+// Automatic fallback only uses free routes. Paid/uncertain models remain selectable
+// explicitly but are never chosen automatically.
+const MODEL_FALLBACKS = [
+  'space-bunny-free',
   'nvidia/nemotron-3.5-super-vl:free',
   'nvidia/nemotron-3.5-lightning:free',
   'thinkingmachines/inkling-small:free',
@@ -83,6 +92,43 @@ function saveState(s) {
 
 let KEYS = loadKeys();
 let state = loadState();
+let modelState = loadModelState();
+
+function loadModelState() {
+  try { return existsSync(MODEL_STATE_FILE) ? JSON.parse(readFileSync(MODEL_STATE_FILE, 'utf8')) : {}; }
+  catch { return {}; }
+}
+function saveModelState() {
+  try {
+    mkdirSync('D:\\deepseek\\state', { recursive: true });
+    writeFileSync(MODEL_STATE_FILE, JSON.stringify(modelState, null, 2), 'utf8');
+  } catch { /* health memory is best-effort */ }
+}
+function modelRouteKey(upstream, model) { return `${upstream}|${model}`; }
+function modelCooling(entry, model) {
+  const key = modelRouteKey(entry.upstream, model);
+  const record = modelState[key];
+  if (!record) return false;
+  if (Date.now() >= record.until) {
+    delete modelState[key];
+    saveModelState();
+    return false;
+  }
+  return true;
+}
+function coolModel(entry, model, reason, durationMs = MODEL_COOLDOWN_MS) {
+  const key = modelRouteKey(entry.upstream, model);
+  modelState[key] = { until: Date.now() + durationMs, reason: String(reason).slice(0, 160) };
+  saveModelState();
+  console.log(`[models] cooling ${model} for ${Math.round(durationMs / 1000)}s (${reason})`);
+}
+function markModelHealthy(entry, model) {
+  const key = modelRouteKey(entry.upstream, model);
+  if (modelState[key]) {
+    delete modelState[key];
+    saveModelState();
+  }
+}
 
 /** 当前可用的 key（冷却结束的会自动恢复） */
 function availableKeys() {
@@ -107,9 +153,33 @@ function markDead(key, reason) {
 }
 
 // ---------- 转发 ----------
-async function forward(entry, path, method, headers, body, timeoutMs = UPSTREAM_TIMEOUT_MS) {
+function hasStreamContent(text) {
+  for (const line of String(text).split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') continue;
+    try {
+      const frame = JSON.parse(data);
+      if (frame?.choices?.some((choice) =>
+        (typeof choice?.delta?.content === 'string' && choice.delta.content.length > 0)
+        || (typeof choice?.text === 'string' && choice.text.length > 0)
+        || (Array.isArray(choice?.delta?.tool_calls) && choice.delta.tool_calls.length > 0))) return true;
+      if (typeof frame?.delta === 'string' && frame.delta.length > 0) return true;
+      if (typeof frame?.output_text === 'string' && frame.output_text.length > 0) return true;
+      if (typeof frame?.type === 'string' && /\.delta$/.test(frame.type)) return true;
+    } catch { /* wait for a complete SSE frame */ }
+  }
+  return false;
+}
+
+async function forward(entry, path, method, headers, body, res, timeoutMs = UPSTREAM_TIMEOUT_MS) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const resetTimer = (ms) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => ctrl.abort(), ms);
+  };
+  let sentStream = false;
   try {
     const up = await fetch(entry.upstream + path, {
       method,
@@ -117,8 +187,77 @@ async function forward(entry, path, method, headers, body, timeoutMs = UPSTREAM_
       body,
       signal: ctrl.signal,
     });
+
+    const contentType = up.headers.get('content-type') || 'application/octet-stream';
+    const isSse = contentType.includes('text/event-stream') && up.body;
+    if (isSse && up.status >= 200 && up.status < 300) {
+      const reader = up.body.getReader();
+      const decoder = new TextDecoder();
+      const pendingChunks = [];
+      let pendingText = '';
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (res.destroyed) {
+            await reader.cancel().catch(() => {});
+            return { status: up.status, text: pendingText, contentType, streamed: true };
+          }
+          if (!sentStream) {
+            pendingChunks.push(Buffer.from(value));
+            pendingText += decoder.decode(value, { stream: true });
+            if (isStreamModelFailure(up.status, pendingText)) {
+              await reader.cancel().catch(() => {});
+              return { status: up.status, text: pendingText, contentType };
+            }
+            if (hasStreamContent(pendingText)) {
+              res.writeHead(up.status, { 'content-type': contentType });
+              for (const chunk of pendingChunks) res.write(chunk);
+              pendingChunks.length = 0;
+              sentStream = true;
+              resetTimer(MODEL_STREAM_TOTAL_TIMEOUT_MS);
+            }
+          } else {
+            res.write(value);
+          }
+        }
+        pendingText += decoder.decode();
+        if (!sentStream) {
+          if (isStreamModelFailure(up.status, pendingText)) {
+            return { status: up.status, text: pendingText, contentType };
+          }
+          if (!hasStreamContent(pendingText)) {
+            // Some upstreams signal a model failure as HTTP 200 with an empty
+            // SSE stream. Treat it as transient so the next free model can run.
+            return {
+              status: 502,
+              text: JSON.stringify({ error: { message: 'upstream stream ended without generated content' } }),
+              contentType,
+            };
+          }
+          res.writeHead(up.status, { 'content-type': contentType });
+          for (const chunk of pendingChunks) res.write(chunk);
+        }
+        res.end();
+        return { status: up.status, text: '', contentType, streamed: true };
+      } catch (error) {
+        if (sentStream) {
+          console.log(`[stream] ${entry.name} downstream stream ended early: ${error.message}`);
+          if (!res.destroyed) res.end();
+          return { status: up.status, text: '', contentType, streamed: true, interrupted: true };
+        }
+        throw error;
+      } finally {
+        reader.releaseLock();
+      }
+    }
+
     const text = await up.text();
-    return { status: up.status, text };
+    return {
+      status: up.status,
+      text,
+      contentType,
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -138,8 +277,33 @@ function isUnavailableModel(status, text) {
   return status === 404 && /(?:model|endpoint).*(?:not found|unavailable)|no endpoints|unknown model/i.test(String(text));
 }
 
+function isPermanentModelFailure(status, text) {
+  return isUnavailableModel(status, text)
+    || /OpenCode['’]s free tier can only be used from within OpenCode|only be used from within OpenCode/i.test(String(text));
+}
+
 function isTransientUpstreamFailure(status) {
   return status === 408 || status === 425 || status >= 500;
+}
+
+// Some gateways encode a terminal model failure inside a successful SSE
+// response (HTTP 200 + `data: {"error": ...}`), so status-only failover misses
+// it and clients see an empty turn. Detect structured SSE/JSON errors and the
+// OpenCode free-tier restriction returned by the local upstream.
+function isStreamModelFailure(status, text) {
+  if (status < 200 || status >= 300) return false;
+  if (/OpenCode['’]s free tier can only be used from within OpenCode|only be used from within OpenCode/i.test(text)) {
+    return true;
+  }
+  for (const line of String(text).split(/\r?\n/)) {
+    const data = line.startsWith('data:') ? line.slice(5).trim() : line.trim();
+    if (!data || data === '[DONE]') continue;
+    try {
+      const frame = JSON.parse(data);
+      if (frame?.error || frame?.type === 'error') return true;
+    } catch { /* ordinary text/SSE comments are not model failures */ }
+  }
+  return false;
 }
 
 // ---------- Web 管理后台 ----------
@@ -333,9 +497,12 @@ const server = http.createServer((req, res) => {
     const headers = { 'content-type': req.headers['content-type'] || 'application/json' };
     const path = req.url; // 已含 /v1
     const model = typeof requestJson?.model === 'string' ? requestJson.model : null;
+    if (path.includes('/chat/completions') || path.includes('/responses')) {
+      console.log(`[request] ${req.method} ${path} model=${model ?? 'unknown'} stream=${requestJson?.stream === true}`);
+    }
     const mayFallback = model && /\/(?:chat\/completions|responses)(?:\?|$)/.test(path);
     const modelCandidates = mayFallback
-      ? [...new Set([model, ...FREE_MODEL_FALLBACKS])]
+      ? [...new Set([model, ...MODEL_FALLBACKS])].slice(0, MODEL_MAX_ATTEMPTS)
       : [model];
     const modelDeadline = mayFallback ? Date.now() + MODEL_FALLBACK_BUDGET_MS : Infinity;
 
@@ -357,8 +524,13 @@ const server = http.createServer((req, res) => {
     let lastModelFailure = null;
     for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex++) {
       const candidate = modelCandidates[modelIndex];
+      const candidateKeys = activeKeys.filter((entry) => !modelCooling(entry, candidate));
+      if (candidateKeys.length === 0) {
+        console.log(`[models] ${candidate} skipped; every route is cooling down`);
+        continue;
+      }
       let shouldTryNextModel = false;
-      for (const entry of activeKeys) {
+      for (const entry of candidateKeys) {
         const remainingMs = modelDeadline - Date.now();
         if (remainingMs <= 0) {
           lastModelFailure ??= {
@@ -373,27 +545,43 @@ const server = http.createServer((req, res) => {
         }
 
         let r;
+        const attemptStarted = Date.now();
+        const timeoutMs = Math.min(
+          requestJson?.stream === true ? MODEL_FIRST_TOKEN_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS,
+          remainingMs
+        );
         try {
           r = await forward(entry, path, req.method, headers, requestBody,
-            Math.min(UPSTREAM_TIMEOUT_MS, remainingMs));
+            res, timeoutMs);
         } catch (err) {
-          // 网络/超时不代表 key 失效；换完 key 后也继续尝试下一个模型。
+          // 网络/首字超时不代表 key 失效；暂时冷却此模型路由，再继续尝试。
           lastModelFailure = {
             status: 503,
             text: JSON.stringify({ error: { message: `upstream network error: ${err.message}` } }),
           };
+          coolModel(entry, candidate, err.name === 'AbortError' ? 'first-token timeout' : 'network error');
           shouldTryNextModel = true;
           console.log(`[models] ${candidate} network/timeout error; trying another key or model`);
           continue;
         }
+        if (path.includes('/chat/completions') || path.includes('/responses')) {
+          console.log(`[response] ${candidate} HTTP ${r.status} ${r.contentType} ${Date.now() - attemptStarted}ms`);
+        }
 
-        if (isQuotaFailure(r.status, r.text) || isUnavailableModel(r.status, r.text)) {
+        if (isQuotaFailure(r.status, r.text) || isUnavailableModel(r.status, r.text) || isStreamModelFailure(r.status, r.text)) {
           lastModelFailure = r;
+          const duration = isQuotaFailure(r.status, r.text)
+            ? MODEL_QUOTA_COOLDOWN_MS
+            : isPermanentModelFailure(r.status, r.text)
+              ? MODEL_UNAVAILABLE_COOLDOWN_MS
+              : MODEL_COOLDOWN_MS;
+          coolModel(entry, candidate, isUnavailableModel(r.status, r.text) ? 'model unavailable' : 'model returned an error', duration);
           shouldTryNextModel = true;
           continue;
         }
         if (isTransientUpstreamFailure(r.status)) {
           lastModelFailure = r;
+          coolModel(entry, candidate, `HTTP ${r.status}`);
           shouldTryNextModel = true;
           continue;
         }
@@ -403,9 +591,16 @@ const server = http.createServer((req, res) => {
           continue;
         }
 
-        const ct = r.text.trimStart().startsWith('{') || r.text.trimStart().startsWith('[')
-          ? 'application/json' : 'text/plain';
-        res.writeHead(r.status, { 'content-type': ct });
+        markModelHealthy(entry, candidate);
+        if (r.streamed) {
+          if (candidate !== model) console.log(`[models] ${model} served with fallback ${candidate}`);
+          return;
+        }
+
+        // Preserve SSE for OpenAI-compatible streaming clients (including DSH's
+        // pi-ai adapter). Replacing text/event-stream with text/plain makes a
+        // successful upstream response look like an empty model turn to DSH.
+        res.writeHead(r.status, { 'content-type': r.contentType });
         res.end(r.text);
         if (candidate !== model) {
           console.log(`[models] ${model} served with fallback ${candidate}`);
