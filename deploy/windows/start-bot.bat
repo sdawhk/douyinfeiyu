@@ -28,7 +28,7 @@ echo.
 echo [%date% %time%] ==== one-click begin ==== >> "%LOGDIR%\autostart.log"
 
 rem ---- 1. SnowLuma (needs admin) ----
-echo [1/4] SnowLuma (QQ side)
+echo [1/5] SnowLuma (QQ side)
 netstat -ano | findstr /R /C:":5099 .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
   echo       already running, skip
@@ -50,7 +50,7 @@ if not errorlevel 1 (
 )
 
 rem ---- 2. model pool proxy ----
-echo [2/4] Model proxy (multi-key)
+echo [2/5] Model proxy (multi-key)
 netstat -ano | findstr /R /C:":18901 .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
   echo       already running, skip
@@ -61,7 +61,7 @@ if not errorlevel 1 (
 )
 
 rem ---- 3. dsh web ----
-echo [3/4] DSH backend
+echo [3/5] DSH backend
 netstat -ano | findstr /R /C:":3090 .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
   echo       already running, skip
@@ -73,7 +73,7 @@ if not errorlevel 1 (
 )
 
 rem ---- 4. bridge + watchdog ----
-echo [4/4] Bridge
+echo [4/5] Bridge
 tasklist /FI "WINDOWTITLE eq QQBridge*" 2>nul | find /I "cmd.exe" >nul 2>&1
 if not errorlevel 1 (
   echo       bridge watchdog already running, skip
@@ -83,12 +83,24 @@ if not errorlevel 1 (
   timeout /t 3 /nobreak >nul
 )
 
+rem ---- 5. local image library ----
+echo [5/5] Image library
+netstat -ano | findstr /R /C:":18902 .*LISTENING" >nul 2>&1
+if not errorlevel 1 (
+  echo       already running, skip
+) else (
+  echo       starting local image library...
+  start "ImageLibrary" /MIN /D "%ROOT%" "%NODE%" "%ROOT%\repo\bridge\src\image-library-server.mjs"
+  timeout /t 2 /nobreak >nul
+)
+
 echo.
 echo [%date% %time%] ==== one-click end ==== >> "%LOGDIR%\autostart.log"
 echo  ============================================
 echo   Done. Check status:
 echo     SnowLuma  : http://127.0.0.1:5099
 echo     Keys admin: http://127.0.0.1:18901
+echo     Image lib : http://127.0.0.1:18902
 echo  ============================================
 echo.
 echo  If the bot stays silent:

@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>机器人图片库</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #101410;
+      --panel: #191f19;
+      --panel-hi: #222a22;
+      --line: #343d33;
+      --paper: #f1f1df;
+      --muted: #a6afa2;
+      --acid: #d3f56a;
+      --acid-ink: #202814;
+      --orange: #f4a779;
+      --danger: #ff9285;
+      --mono: "Cascadia Code", Consolas, monospace;
+      --sans: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+      --serif: Georgia, "Noto Serif SC", "Songti SC", serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--paper);
+      background:
+        radial-gradient(ellipse at 78% 0%, rgba(211,245,106,.09), transparent 32rem),
+        linear-gradient(135deg, rgba(255,255,255,.018) 25%, transparent 25%) 0 0 / 7px 7px,
+        var(--ink);
+      font-family: var(--sans);
+    }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    .topbar { height: 62px; display:flex; align-items:center; justify-content:space-between; padding:0 clamp(18px,4vw,64px); border-bottom:1px solid var(--line); }
+    .brand { display:flex; gap:11px; align-items:center; color:var(--paper); text-decoration:none; letter-spacing:.08em; font-size:12px; font-weight:700; }
+    .brand-mark { display:grid; width:26px; height:26px; place-items:center; color:var(--acid-ink); background:var(--acid); border-radius:8px 8px 8px 2px; font:700 15px var(--serif); }
+    .top-note { color:var(--muted); font:11px var(--mono); letter-spacing:.12em; text-transform:uppercase; }
+    main { width:min(1440px, 100%); margin:auto; padding:34px clamp(18px,4vw,64px) 60px; }
+    .hero { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:24px; align-items:end; margin:12px 0 30px; }
+    .eyebrow { margin:0 0 12px; color:var(--acid); font:11px var(--mono); letter-spacing:.18em; text-transform:uppercase; }
+    h1 { margin:0; font:normal clamp(34px,5vw,66px)/1 var(--serif); letter-spacing:-.045em; }
+    .intro { max-width:560px; margin:14px 0 0; color:var(--muted); font-size:14px; line-height:1.75; }
+    .stats { display:flex; gap:10px; }
+    .stat { min-width:108px; padding:13px 15px; border:1px solid var(--line); background:rgba(25,31,25,.8); }
+    .stat strong { display:block; color:var(--acid); font:22px var(--mono); }
+    .stat span { color:var(--muted); font-size:11px; }
+    .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:12px; margin:0 0 18px; border:1px solid var(--line); background:var(--panel); }
+    .search-wrap { position:relative; flex:1 1 260px; }
+    .search-icon { position:absolute; left:13px; top:50%; transform:translateY(-50%); color:var(--muted); font-size:16px; pointer-events:none; }
+    .search, .select { height:42px; color:var(--paper); border:1px solid var(--line); border-radius:0; outline:none; background:#111711; }
+    .search { width:100%; padding:0 14px 0 39px; }
+    .select { min-width:148px; padding:0 12px; }
+    .search:focus, .select:focus, .tag-input:focus { border-color:var(--acid); box-shadow:0 0 0 2px rgba(211,245,106,.12); }
+    .toolbar-meta { color:var(--muted); font:11px var(--mono); white-space:nowrap; margin-left:auto; }
+    .gallery { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; }
+    .card { min-width:0; overflow:hidden; border:1px solid var(--line); background:var(--panel); transition:border-color .18s, transform .18s; }
+    .card:hover { border-color:#79866b; transform:translateY(-2px); }
+    .thumb { position:relative; display:grid; width:100%; aspect-ratio:1.18; place-items:center; overflow:hidden; background:#0b100c; border:0; padding:0; }
+    .thumb img { width:100%; height:100%; object-fit:contain; transition:transform .28s; }
+    .card:hover .thumb img { transform:scale(1.025); }
+    .thumb:after { content:"OPEN IMAGE ↗"; position:absolute; right:10px; bottom:9px; padding:5px 7px; color:#fff; background:rgba(8,12,8,.76); font:9px var(--mono); letter-spacing:.08em; opacity:0; transition:opacity .15s; }
+    .card:hover .thumb:after, .thumb:focus-visible:after { opacity:1; }
+    .card-body { padding:12px 13px 13px; }
+    .card-line { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font:10px var(--mono); }
+    .card-date { color:var(--acid); }
+    .file-id { overflow:hidden; margin:8px 0 10px; color:var(--paper); font:12px var(--mono); text-overflow:ellipsis; white-space:nowrap; }
+    .tag-row { display:flex; min-height:25px; flex-wrap:wrap; gap:5px; }
+    .tag { max-width:100%; padding:4px 7px; overflow:hidden; color:#d4dfcb; border:1px solid #424b3d; background:#232b21; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+    .no-tags { color:#828d7e; font-size:10px; }
+    .card-actions { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:12px; padding-top:10px; border-top:1px solid #2b332b; }
+    .size { color:var(--muted); font:10px var(--mono); }
+    .edit-button, .primary, .quiet, .danger-button, .pager button { border:1px solid var(--line); border-radius:0; color:var(--paper); background:transparent; transition:background .15s,color .15s,border-color .15s; }
+    .edit-button { padding:6px 9px; font-size:11px; }
+    .edit-button:hover, .quiet:hover, .pager button:hover { border-color:#859176; background:#2a3428; }
+    .primary { padding:10px 15px; color:var(--acid-ink); border-color:var(--acid); background:var(--acid); font-weight:700; }
+    .primary:hover { background:#e1ff87; }
+    .danger-button { padding:10px 14px; color:var(--danger); border-color:#75443e; }
+    .danger-button:hover { background:#482a27; }
+    .empty, .loading { grid-column:1/-1; padding:70px 20px; color:var(--muted); border:1px dashed var(--line); text-align:center; }
+    .empty-mark { color:var(--acid); font:48px var(--serif); }
+    .pager { display:flex; align-items:center; justify-content:center; gap:14px; margin-top:24px; }
+    .pager button { min-width:88px; padding:9px 12px; }
+    .pager button:disabled { opacity:.35; cursor:not-allowed; }
+    .page-count { color:var(--muted); font:11px var(--mono); }
+    dialog { color:var(--paper); }
+    .editor { position:fixed; inset:0 0 0 auto; width:min(510px,100vw); max-width:none; max-height:100vh; height:100vh; margin:0; padding:0; border:0; border-left:1px solid var(--line); background:#151b15; box-shadow:-24px 0 80px rgba(0,0,0,.45); }
+    .editor::backdrop { background:rgba(0,0,0,.62); backdrop-filter:blur(3px); }
+    .editor-inner { display:flex; height:100%; flex-direction:column; }
+    .editor-head { display:flex; align-items:flex-start; justify-content:space-between; padding:22px 24px 16px; border-bottom:1px solid var(--line); }
+    .editor-head h2 { margin:0; font:normal 25px var(--serif); }
+    .editor-head p { margin:6px 0 0; color:var(--muted); font:10px var(--mono); }
+    .close { width:34px; height:34px; color:var(--paper); border:1px solid var(--line); background:transparent; font-size:18px; }
+    .editor-scroll { flex:1; overflow:auto; padding:20px 24px; }
+    .preview { display:grid; min-height:190px; max-height:360px; place-items:center; margin-bottom:18px; overflow:hidden; background:#080c08; border:1px solid var(--line); }
+    .preview img { display:block; max-width:100%; max-height:360px; object-fit:contain; }
+    .meta-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:24px; }
+    .meta-cell { padding:10px; border:1px solid var(--line); }
+    .meta-cell span { display:block; margin-bottom:6px; color:var(--muted); font-size:10px; }
+    .meta-cell strong { font:11px var(--mono); overflow-wrap:anywhere; }
+    .field-label { display:block; margin:0 0 9px; font-size:12px; font-weight:700; }
+    .tag-help { margin:0 0 11px; color:var(--muted); font-size:11px; line-height:1.6; }
+    .tag-editor { display:flex; min-height:49px; flex-wrap:wrap; align-items:center; gap:7px; padding:8px; border:1px solid var(--line); background:#0e130e; }
+    .tag-pill { display:flex; align-items:center; gap:7px; padding:5px 7px; color:var(--acid-ink); background:var(--acid); font-size:11px; }
+    .tag-pill button { width:16px; height:16px; padding:0; color:var(--acid-ink); border:0; background:transparent; font-size:15px; line-height:1; }
+    .tag-input { flex:1 1 135px; min-width:120px; height:30px; padding:0 5px; color:var(--paper); border:1px solid transparent; outline:none; background:transparent; font-size:12px; }
+    .editor-foot { display:flex; justify-content:space-between; gap:10px; padding:16px 24px 20px; border-top:1px solid var(--line); background:#151b15; }
+    .foot-right { display:flex; gap:8px; }
+    .toast { position:fixed; left:50%; bottom:24px; z-index:5; max-width:min(600px,calc(100vw - 32px)); padding:12px 16px; color:var(--ink); background:var(--acid); box-shadow:0 8px 30px rgba(0,0,0,.3); font-size:12px; opacity:0; transform:translate(-50%,12px); pointer-events:none; transition:opacity .2s,transform .2s; }
+    .toast.show { opacity:1; transform:translate(-50%,0); }
+    .toast.error { color:#fff; background:#9a443c; }
+    .skeleton { background:linear-gradient(100deg,#1a211a 20%,#252f24 36%,#1a211a 52%); background-size:220% 100%; animation:shimmer 1.2s linear infinite; }
+    @keyframes shimmer { to { background-position-x:-220%; } }
+    @media (max-width:1100px) { .gallery { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+    @media (max-width:760px) { main { padding-top:24px; } .hero { grid-template-columns:1fr; align-items:start; } .stats { width:100%; } .stat { flex:1; min-width:0; } .gallery { grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; } .toolbar-meta { width:100%; margin-left:0; } }
+    @media (max-width:430px) { .gallery { grid-template-columns:1fr; } .thumb { aspect-ratio:1.25; } .top-note { display:none; } .editor-head,.editor-scroll { padding-left:16px; padding-right:16px; } .editor-foot { padding:12px 16px 16px; } }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important; } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark">D</span><span>DEEPSEEK · VISUAL ARCHIVE</span></a>
+    <div class="top-note">LOCAL LIBRARY / 01</div>
+  </header>
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">BOT MEMORY / IMAGE INDEX</p>
+        <h1>机器人图片库</h1>
+        <p class="intro">浏览机器人自动存下的图片，整理表情关键词，或删除不再需要的图片。图片只在本机查看和管理。</p>
+      </div>
+      <div class="stats" aria-label="图片库统计">
+        <div class="stat"><strong id="statImages">—</strong><span>张图片</span></div>
+        <div class="stat"><strong id="statTags">—</strong><span>个表情关键词</span></div>
+        <div class="stat"><strong id="statSize">—</strong><span>占用空间</span></div>
+      </div>
+    </section>
+    <section class="toolbar" aria-label="图片筛选">
+      <label class="search-wrap"><span class="search-icon" aria-hidden="true">⌕</span><input class="search" id="search" type="search" placeholder="搜索文件名或表情关键词" autocomplete="off" aria-label="搜索图片"></label>
+      <select class="select" id="dayFilter" aria-label="按日期筛选"><option value="">全部日期</option></select>
+      <select class="select" id="sortFilter" aria-label="排序方式"><option value="newest">最近存入</option><option value="largest">文件最大</option></select>
+      <span class="toolbar-meta" id="resultCount">读取图片索引…</span>
+    </section>
+    <section class="gallery" id="gallery" aria-live="polite"><div class="loading">正在读取本机图片索引…</div></section>
+    <nav class="pager" aria-label="图片分页"><button id="prevPage" type="button">← 上一页</button><span id="pageCount" class="page-count">—</span><button id="nextPage" type="button">下一页 →</button></nav>
+  </main>
+
+  <dialog class="editor" id="editor" aria-labelledby="editorTitle">
+    <div class="editor-inner">
+      <header class="editor-head"><div><h2 id="editorTitle">整理图片</h2><p id="editorId">—</p></div><button class="close" id="closeEditor" type="button" aria-label="关闭">×</button></header>
+      <div class="editor-scroll">
+        <div class="preview"><img id="previewImage" alt="图片预览"></div>
+        <div class="meta-grid"><div class="meta-cell"><span>存档日期</span><strong id="metaDay">—</strong></div><div class="meta-cell"><span>文件大小</span><strong id="metaSize">—</strong></div></div>
+        <label class="field-label" for="tagInput">表情关键词</label>
+        <p class="tag-help">添加、删除或改名关键词。删除全部关键词只会取消表情关联，原图仍保留在图库中。</p>
+        <div class="tag-editor" id="tagEditor"><input class="tag-input" id="tagInput" placeholder="输入关键词后按 Enter" maxlength="40" autocomplete="off"></div>
+      </div>
+      <footer class="editor-foot"><button class="danger-button" id="deleteImage" type="button">删除图片</button><div class="foot-right"><button class="quiet" id="cancelEdit" type="button">取消</button><button class="primary" id="saveTags" type="button">保存更改</button></div></footer>
+    </div>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script>
+    (() => {
+      const state = { page: 1, pages: 1, items: [], days: [], selected: null, tags: [], timer: null, controller: null };
+      const $ = (id) => document.getElementById(id);
+      const gallery = $('gallery');
+      const dialog = $('editor');
+
+      function bytes(value) {
+        if (value < 1024) return `${value} B`;
+        if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+        return `${(value / 1024 / 1024).toFixed(1)} MB`;
+      }
+      function mediaUrl(item) { return `/media/${encodeURIComponent(item.day)}/${encodeURIComponent(item.file)}`; }
+      function toast(message, error = false) {
+        const el = $('toast'); el.textContent = message; el.classList.toggle('error', error); el.classList.add('show');
+        clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove('show'), 3000);
+      }
+      async function api(url, options) {
+        const response = await fetch(url, { cache: 'no-store', ...options });
+        let data = {};
+        try { data = await response.json(); } catch { /* server may send an empty response */ }
+        if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
+        return data;
+      }
+      function buildDays(days) {
+        const select = $('dayFilter'), current = select.value;
+        select.replaceChildren(new Option('全部日期', ''));
+        for (const day of days) select.add(new Option(day, day));
+        if (days.includes(current)) select.value = current;
+      }
+      function renderStats(stats) {
+        $('statImages').textContent = stats.total.toLocaleString('zh-CN');
+        $('statTags').textContent = stats.aliases.toLocaleString('zh-CN');
+        $('statSize').textContent = bytes(stats.bytes);
+      }
+      function makeCard(item) {
+        const card = document.createElement('article'); card.className = 'card';
+        const thumb = document.createElement('button'); thumb.type = 'button'; thumb.className = 'thumb'; thumb.setAttribute('aria-label', `查看图片 ${item.day} ${item.file}`);
+        const img = document.createElement('img'); img.src = mediaUrl(item); img.alt = `${item.day} 保存的图片`; img.loading = 'lazy'; img.decoding = 'async';
+        img.addEventListener('error', () => { img.style.visibility = 'hidden'; thumb.dataset.broken = 'true'; }, { once: true });
+        thumb.append(img); thumb.addEventListener('click', () => openEditor(item));
+        const body = document.createElement('div'); body.className = 'card-body';
+        const line = document.createElement('div'); line.className = 'card-line';
+        const date = document.createElement('span'); date.className = 'card-date'; date.textContent = item.day;
+        const order = document.createElement('span'); order.textContent = item.modified.slice(11, 16);
+        line.append(date, order);
+        const id = document.createElement('div'); id.className = 'file-id'; id.textContent = item.file;
+        const tags = document.createElement('div'); tags.className = 'tag-row';
+        if (item.tags.length) for (const text of item.tags.slice(0, 4)) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = text; tags.append(tag); }
+        else { const empty = document.createElement('span'); empty.className = 'no-tags'; empty.textContent = '尚未绑定表情关键词'; tags.append(empty); }
+        if (item.tags.length > 4) { const extra = document.createElement('span'); extra.className = 'no-tags'; extra.textContent = `+${item.tags.length - 4}`; tags.append(extra); }
+        const actions = document.createElement('div'); actions.className = 'card-actions';
+        const size = document.createElement('span'); size.className = 'size'; size.textContent = bytes(item.bytes);
+        const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'edit-button'; edit.textContent = '整理关键词 ↗'; edit.addEventListener('click', () => openEditor(item));
+        actions.append(size, edit); body.append(line, id, tags, actions); card.append(thumb, body); return card;
+      }
+      function render(data) {
+        state.items = data.items; state.pages = data.pages; state.days = data.days;
+        renderStats(data.stats); buildDays(data.days);
+        $('resultCount').textContent = `${data.total.toLocaleString('zh-CN')} 张匹配图片`;
+        $('pageCount').textContent = `${data.page} / ${data.pages}`;
+        $('prevPage').disabled = data.page <= 1; $('nextPage').disabled = data.page >= data.pages;
+        gallery.replaceChildren();
+        if (!data.items.length) {
+          const empty = document.createElement('div'); empty.className = 'empty';
+          const mark = document.createElement('div'); mark.className = 'empty-mark'; mark.textContent = '∅';
+          const text = document.createElement('p'); text.textContent = '这里暂时没有匹配的图片。'; empty.append(mark, text); gallery.append(empty); return;
+        }
+        for (const item of data.items) gallery.append(makeCard(item));
+      }
+      async function load() {
+        state.controller?.abort(); state.controller = new AbortController();
+        gallery.replaceChildren(Object.assign(document.createElement('div'), { className: 'loading', textContent: '正在整理图片索引…' }));
+        const params = new URLSearchParams({ page: String(state.page), limit: '48', sort: $('sortFilter').value });
+        if ($('search').value.trim()) params.set('q', $('search').value.trim());
+        if ($('dayFilter').value) params.set('day', $('dayFilter').value);
+        try {
+          const response = await fetch(`/api/images?${params}`, { signal: state.controller.signal, cache: 'no-store' });
+          const data = await response.json(); if (!response.ok) throw new Error(data.error || '读取失败'); render(data);
+        } catch (error) {
+          if (error.name === 'AbortError') return;
+          gallery.replaceChildren(Object.assign(document.createElement('div'), { className: 'empty', textContent: `读取图片库失败：${error.message}` }));
+          $('resultCount').textContent = '图片库暂不可用';
+        }
+      }
+      function renderTags() {
+        const host = $('tagEditor'); host.querySelectorAll('.tag-pill').forEach((el) => el.remove());
+        const input = $('tagInput');
+        for (const [index, text] of state.tags.entries()) {
+          const pill = document.createElement('span'); pill.className = 'tag-pill';
+          const label = document.createElement('span'); label.textContent = text;
+          const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×'; remove.setAttribute('aria-label', `移除关键词 ${text}`);
+          remove.addEventListener('click', () => { state.tags.splice(index, 1); renderTags(); });
+          pill.append(label, remove); host.insertBefore(pill, input);
+        }
+      }
+      function openEditor(item) {
+        state.selected = item; state.tags = [...item.tags];
+        $('editorId').textContent = `${item.day} / ${item.file}`;
+        $('previewImage').src = mediaUrl(item); $('metaDay').textContent = item.day; $('metaSize').textContent = bytes(item.bytes);
+        $('tagInput').value = ''; renderTags(); dialog.showModal();
+      }
+      function addTag() {
+        const input = $('tagInput'); const tag = input.value.trim(); if (!tag) return;
+        if ([...tag].length > 40) { toast('关键词最多 40 个字符', true); return; }
+        if (!state.tags.some((item) => item.toLocaleLowerCase('zh-CN') === tag.toLocaleLowerCase('zh-CN'))) state.tags.push(tag);
+        input.value = ''; renderTags(); input.focus();
+      }
+      $('tagInput').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ',') { event.preventDefault(); addTag(); }
+      });
+      $('saveTags').addEventListener('click', async () => {
+        if (!state.selected) return; const button = $('saveTags'); button.disabled = true;
+        try {
+          await api(`/api/images/${encodeURIComponent(state.selected.day)}/${encodeURIComponent(state.selected.file)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tags: state.tags }) });
+          dialog.close(); toast('图片关键词已保存'); await load();
+        } catch (error) { toast(error.message, true); }
+        finally { button.disabled = false; }
+      });
+      $('deleteImage').addEventListener('click', async () => {
+        if (!state.selected) return;
+        const count = state.tags.length;
+        const detail = count ? `\n同时移除这张图关联的 ${count} 个表情关键词。` : '';
+        if (!confirm(`确定删除这张图片吗？\n${state.selected.file}${detail}\n此操作会删除本地原图。`)) return;
+        const button = $('deleteImage'); button.disabled = true;
+        try {
+          const result = await api(`/api/images/${encodeURIComponent(state.selected.day)}/${encodeURIComponent(state.selected.file)}`, { method: 'DELETE' });
+          dialog.close(); toast(result.reassignedAliases ? `图片已删除，${result.reassignedAliases} 个关键词已指向相同图片的存档副本` : '图片和关联关键词已删除'); await load();
+        } catch (error) { toast(error.message, true); }
+        finally { button.disabled = false; }
+      });
+      $('closeEditor').addEventListener('click', () => dialog.close());
+      $('cancelEdit').addEventListener('click', () => dialog.close());
+      $('prevPage').addEventListener('click', () => { state.page = Math.max(1, state.page - 1); load(); });
+      $('nextPage').addEventListener('click', () => { state.page = Math.min(state.pages, state.page + 1); load(); });
+      $('dayFilter').addEventListener('change', () => { state.page = 1; load(); });
+      $('sortFilter').addEventListener('change', () => { state.page = 1; load(); });
+      $('search').addEventListener('input', () => { clearTimeout(state.timer); state.timer = setTimeout(() => { state.page = 1; load(); }, 220); });
+      load();
+    })();
+  </script>
+</body>
+</html>
