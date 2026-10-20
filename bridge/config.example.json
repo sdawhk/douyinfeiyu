@@ -14,6 +14,15 @@
     "allowProcessControl": false
   },
   "ownerQQ": 123456789,
+  "ownerProactive": {
+    "enabled": true,
+    "idleMs": 7200000,
+    "checkIntervalMs": 900000,
+    "cooldownMs": 14400000,
+    "maxPerDay": 3,
+    "startHour": 9,
+    "endHour": 22
+  },
   "sessionCwd": "",
   "agentPreset": "qq-chat",
   "workspaceTitle": "QQ 聊天",
@@ -217,8 +226,10 @@
       ],
       "cadence": {
         "enabled": true,
-        "everyMessages": 3,
-        "probability": 0.5
+        "everyMessages": 6,
+        "probability": 0.2,
+        "cooldownMs": 300000,
+        "maxPerHour": 3
       }
     },
     "proactive": {

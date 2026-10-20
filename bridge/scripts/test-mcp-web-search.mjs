@@ -16,15 +16,23 @@ try {
   console.log('工具:', tools.tools.map((t) => t.name).join(', '));
 
   const search = await client.callTool({ name: 'web_search', arguments: { query: 'DeepSeek娘 萌娘百科' } });
-  console.log('✅ web_search:', search.content?.[0]?.text?.slice(0, 300));
+  const searchText = search.content?.[0]?.text ?? '';
+  const searchData = JSON.parse(searchText);
+  if (search.isError || !Array.isArray(searchData.results) || searchData.results.length === 0) {
+    throw new Error(`web_search returned no results: ${searchText.slice(0, 200)}`);
+  }
+  console.log(`✅ web_search: ${searchData.results.length} results via ${searchData.providersTried.join(' → ')}`);
 
   const fetch = await client.callTool({
     name: 'web_fetch',
-    arguments: { url: 'https://mobile.moegirl.org.cn/DeepSeek%E5%A8%98' }
+    arguments: { url: 'https://www.deepseek.com/' }
   });
-  const text = fetch.content?.[0]?.text ?? '';
-  console.log('✅ web_fetch:', text.slice(0, 500));
-  console.log('isError:', fetch.isError ? '是' : '否');
+  const fetchText = fetch.content?.[0]?.text ?? '';
+  const fetchData = JSON.parse(fetchText);
+  if (fetch.isError || fetchData.statusCode !== 200 || typeof fetchData.body !== 'string' || !fetchData.body.length) {
+    throw new Error(`web_fetch failed: ${fetchText.slice(0, 200)}`);
+  }
+  console.log(`✅ web_fetch: HTTP ${fetchData.statusCode}, ${fetchData.body.length} chars`);
 
   // 内网地址应被拒绝
   const bad = await client.callTool({ name: 'web_fetch', arguments: { url: 'http://127.0.0.1/' } });

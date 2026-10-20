@@ -142,7 +142,9 @@ export class NodeApiClient {
       rename: call('session/rename'),
       search: call('session/search'),
       projections: call('session/projections'),
-      selectModel: call('session/selectModel'),
+      // session/selectModel is one of the 0.2.x RPCs whose descriptor expects
+      // the full request object under args.request (same as session/create).
+      selectModel: call('session/selectModel', (a) => ({ request: a ?? {} })),
       history: call('session/page')
     };
 

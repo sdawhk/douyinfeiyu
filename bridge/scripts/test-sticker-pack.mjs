@@ -4,6 +4,7 @@
 // 3) 真实扫描「表情包集」目录，验证 id/标签/大小/mime 正确
 // 可选 live：QQ_BRIDGE_TEST_PACK_LIVE=1 时读取一张 GIF 并构造 base64 image 段（不发送）
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -20,7 +21,16 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const PACK_DIR = path.resolve(ROOT, '..', '表情包集1');
+const PACK_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-bridge-sticker-pack-'));
+const FIXTURE_CATEGORIES = [
+  '装可怜', '假装没伤心', '送花', '送情书', '小丑', '嘲笑', '装酷', '装萌', '喷漆',
+  '熬夜', '思考', '写日记', '记录', '拍照', '弹音乐', '摇铃', '被敲打', '探头'
+];
+for (const category of FIXTURE_CATEGORIES) {
+  const dir = path.join(PACK_DIR, `${category}表情包`);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${category}.gif`), Buffer.from('GIF89a-fixture'));
+}
 
 let pass = 0;
 let fail = 0;
@@ -60,7 +70,7 @@ const ctx = buildLocalPackContext(merged, 12);
 ok(ctx.includes('表情包集') && ctx.includes('18 个分类') && ctx.includes('qq_list_local_stickers'), 'buildLocalPackContext 含总数/工具名');
 ok(ctx.includes('小丑') || ctx.includes('装可怜'), 'buildLocalPackContext 列出实际分类');
 ok(buildLocalPackStrategyHint().includes('qq_send_local_sticker'), '策略提示包含发送工具');
-ok(buildLocalPackStrategyHint().includes('节奏提醒') && /50%/.test(buildLocalPackStrategyHint()), '策略提示包含“每3句50%”节奏');
+ok(buildLocalPackStrategyHint().includes('5 分钟内最多一张') && buildLocalPackStrategyHint().includes('每小时最多 3 张'), '策略提示包含低频上限');
 
 const used = markLocalPackUsed(merged, 'local:送花', '夸人');
 ok(used.entry.useCount === 1 && used.entry.lastContext === '夸人', 'markLocalPackUsed 记录使用');
@@ -76,8 +86,10 @@ console.log('## 配置文件');
   ok(cfg.socialV2?.stickerPack?.maxBytes > 0, 'config stickerPack.maxBytes 已设置');
   ok(Array.isArray(cfg.socialV2?.stickerPack?.allowedExt), 'config stickerPack.allowedExt 为数组');
   ok(cfg.socialV2?.stickerPack?.cadence?.enabled === true, 'config stickerPack.cadence.enabled=true');
-  ok(Number(cfg.socialV2?.stickerPack?.cadence?.probability) === 0.5, 'config stickerPack.cadence.probability=0.5');
-  ok(Number(cfg.socialV2?.stickerPack?.cadence?.everyMessages) === 3, 'config stickerPack.cadence.everyMessages=3');
+  ok(Number(cfg.socialV2?.stickerPack?.cadence?.probability) === 0.2, 'config stickerPack.cadence.probability=0.2');
+  ok(Number(cfg.socialV2?.stickerPack?.cadence?.everyMessages) === 6, 'config stickerPack.cadence.everyMessages=6');
+  ok(Number(cfg.socialV2?.stickerPack?.cadence?.cooldownMs) === 300000, '表情至少间隔 5 分钟');
+  ok(Number(cfg.socialV2?.stickerPack?.cadence?.maxPerHour) === 3, '每会话每小时最多 3 张');
 }
 
 console.log('## MCP 工具注册存在性');
@@ -132,4 +144,5 @@ if (process.env.QQ_BRIDGE_TEST_PACK_LIVE === '1') {
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
+fs.rmSync(PACK_DIR, { recursive: true, force: true });
 if (fail > 0) process.exit(1);

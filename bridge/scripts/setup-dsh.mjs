@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -93,6 +93,60 @@ function mcpBlock() {
   return out;
 }
 
+function presetRegistryBlock() {
+  const names = ['qq-chat', 'qq-chat-v2'];
+  let out = '# === qq-bridge agent presets BEGIN ===\n';
+  for (const name of names) {
+    const dir = path.join(REPO_ROOT, 'dsh', 'agent-presets', name);
+    const metaFile = path.join(dir, 'preset.yml');
+    const pluginsFile = path.join(dir, 'agent.cordis.yml');
+    if (!fs.existsSync(metaFile) || !fs.existsSync(pluginsFile)) fatal(`preset files missing: ${dir}`);
+
+    const metadata = Object.fromEntries(fs.readFileSync(metaFile, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/)
+      .filter((line) => /^[A-Za-z]+:\s*/.test(line))
+      .map((line) => {
+        const index = line.indexOf(':');
+        return [line.slice(0, index).trim(), line.slice(index + 1).trim()];
+      }));
+    const presetName = String(metadata.name || name).replace(/^['"]|['"]$/g, '');
+    const description = String(metadata.description || '').replace(/^['"]|['"]$/g, '');
+    const order = Number(metadata.order) || 10;
+    let plugins = fs.readFileSync(pluginsFile, 'utf8').trimEnd();
+    const restrictModule = pathToFileURL(path.join(dir, 'qq-tool-restrict.mjs')).href;
+    plugins = plugins.replace(/^  name: \.\/qq-tool-restrict\.mjs\s*$/m, `  name: ${yamlSingleQuote(restrictModule)}`);
+
+    const entry = `- id: qq-bridge-preset-${name}\n`
+      + `  name: '@deepseek-ai/dsh-agent-preset'\n`
+      + `  config:\n`
+      + `    id: ${name}\n`
+      + `    name: ${yamlSingleQuote(presetName)}\n`
+      + `    description: ${yamlSingleQuote(description)}\n`
+      + `    order: ${order}\n`
+      + `    plugins:\n`
+      + `${plugins.split(/\r?\n/).map((line) => `      ${line}`).join('\n')}\n`;
+    out += `- insert:\n${entry.split(/\r?\n/).filter(Boolean).map((line) => `    ${line}`).join('\n')}\n`;
+  }
+  out += '# === qq-bridge agent presets END ===\n';
+  return out;
+}
+
+function patchPresetRegistry() {
+  const profileDir = path.join(DSH_HOME, 'profiles', PROFILE);
+  const patchFile = path.join(profileDir, 'cordis.patch.yml');
+  ensureDir(profileDir);
+  let text = fs.existsSync(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '';
+  const beginMarker = '# === qq-bridge agent presets BEGIN ===';
+  const endMarker = '# === qq-bridge agent presets END ===';
+  const block = presetRegistryBlock();
+  if (text.includes(beginMarker) && text.includes(endMarker)) {
+    text = text.replace(/[ \t]*# === qq-bridge agent presets BEGIN ===[\s\S]*?# === qq-bridge agent presets END ===[ \t]*/, block.trimEnd());
+  } else {
+    text = `${block}\n${text}`;
+  }
+  fs.writeFileSync(patchFile, text, 'utf8');
+  log('cordis.patch.yml: qq-chat presets registered');
+}
+
 function patchCordis() {
   const profileDir = path.join(DSH_HOME, 'profiles', PROFILE);
   const patchFile = path.join(profileDir, 'cordis.patch.yml');
@@ -129,7 +183,7 @@ function patchCordis() {
 }
 
 function ensurePluginLink() {
-  const repoPlugin = path.join(REPO_ROOT, 'plugins', 'qq-mode-console');
+  const repoPlugin = path.join(REPO_ROOT, 'plugins-dsh', 'qq-mode-console');
   const pluginLink = path.join(DSH_HOME, 'plugins', 'qq-mode-console');
   if (!fs.existsSync(repoPlugin)) fatal(`plugin not found: ${repoPlugin}`);
   ensureDir(path.dirname(pluginLink));
@@ -240,6 +294,7 @@ function autoInstallProfileBundles() {
 
 copyPreset('qq-chat');
 copyPreset('qq-chat-v2');
+patchPresetRegistry();
 patchCordis();
 const pluginLink = ensurePluginLink();
 patchProfilePackage(pluginLink);

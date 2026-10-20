@@ -2,7 +2,7 @@
 setlocal
 rem Bridge watchdog: restart the bot 5 seconds after any crash, keeping it online.
 set "ROOT=D:\deepseek"
-set "NODE=%ROOT%\snowluma\app\node.exe"
+set "NODE=node"
 set "LOGDIR=%ROOT%\logs"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 

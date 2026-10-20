@@ -417,8 +417,10 @@ function loadConfig() {
         allowedExt: ['.gif', '.png', '.jpg', '.jpeg', '.webp'], // 允许的表情文件扩展名
         cadence: {
           enabled: true,            // 发表情节奏开关：每连发 N 句话按概率提醒发一张
-          everyMessages: 3,         // 每连续自发多少句文本后评估一次
-          probability: 0.5          // 到边界时发一次表情的概率（0~1）
+          everyMessages: 6,         // 每连续自发多少句文本后评估一次
+          probability: 0.2,         // 到边界时发一次表情的概率（0~1）
+          cooldownMs: 300000,       // 同一会话两张表情至少间隔 5 分钟
+          maxPerHour: 3             // 同一会话每小时最多 3 张
         }
       },
       proactive: {
@@ -511,13 +513,15 @@ function loadConfig() {
     includeInPrompt: true,
     promptMaxPacks: 12,
     allowedExt: ['.gif', '.png', '.jpg', '.jpeg', '.webp'],
+    ...(cfg.socialV2?.stickerPack ?? {}),
     cadence: {
       enabled: true,
-      everyMessages: 3,
-      probability: 0.5,
+      everyMessages: 6,
+      probability: 0.2,
+      cooldownMs: 300000,
+      maxPerHour: 3,
       ...((cfg.socialV2?.stickerPack?.cadence) ?? {})
-    },
-    ...(cfg.socialV2?.stickerPack ?? {})
+    }
   };
 
   return cfg;
@@ -3563,6 +3567,18 @@ async function main() {
               sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
               return;
             }
+            const stickerCadence = cfg.socialV2?.stickerPack?.cadence ?? {};
+            const cooldownMs = Math.max(0, Number(stickerCadence.cooldownMs) || 300000);
+            const maxStickersPerHour = Math.max(0, Number(stickerCadence.maxPerHour) || 3);
+            st.stickerSendTimes = (st.stickerSendTimes || []).filter((t) => now - t < 3600000);
+            const cooldownRemaining = cooldownMs - (now - (Number(st.lastStickerAt) || 0));
+            if (cooldownRemaining > 0 || (maxStickersPerHour > 0 && st.stickerSendTimes.length >= maxStickersPerHour)) {
+              const waitMs = cooldownRemaining > 0 ? cooldownRemaining : 3600000 - (now - st.stickerSendTimes[0]);
+              sendJson({ ok: false, error: `表情发送频率已限制，请约 ${Math.max(1, Math.ceil(waitMs / 60000))} 分钟后再试` }, 429);
+              return;
+            }
+            st.lastStickerAt = now;
+            st.stickerSendTimes.push(now);
             st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             const sent = await sendStickerV2(key, stickerId, {
@@ -3605,6 +3621,8 @@ async function main() {
             sendJson({ ok: true, key, sticker: sent.entry, sent: 1, failed: 0, quoted: quotedInfo });
           } catch (error) {
             const st = getSocialV2State(key);
+            if (st.lastStickerAt === now) st.lastStickerAt = st.stickerSendTimes?.at(-2) || 0;
+            st.stickerSendTimes = (st.stickerSendTimes || []).filter((t) => t !== now);
             const idx = st.sendTimes.indexOf(now);
             if (idx >= 0) st.sendTimes.splice(idx, 1);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
@@ -3793,6 +3811,18 @@ async function main() {
               sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
               return;
             }
+            const stickerCadence = cfg.socialV2?.stickerPack?.cadence ?? {};
+            const cooldownMs = Math.max(0, Number(stickerCadence.cooldownMs) || 300000);
+            const maxStickersPerHour = Math.max(0, Number(stickerCadence.maxPerHour) || 3);
+            st.stickerSendTimes = (st.stickerSendTimes || []).filter((t) => now - t < 3600000);
+            const cooldownRemaining = cooldownMs - (now - (Number(st.lastStickerAt) || 0));
+            if (cooldownRemaining > 0 || (maxStickersPerHour > 0 && st.stickerSendTimes.length >= maxStickersPerHour)) {
+              const waitMs = cooldownRemaining > 0 ? cooldownRemaining : 3600000 - (now - st.stickerSendTimes[0]);
+              sendJson({ ok: false, error: `表情发送频率已限制，请约 ${Math.max(1, Math.ceil(waitMs / 60000))} 分钟后再试` }, 429);
+              return;
+            }
+            st.lastStickerAt = now;
+            st.stickerSendTimes.push(now);
             st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             const sent = await sendLocalStickerV2(key, stickerId, {
@@ -3835,6 +3865,8 @@ async function main() {
             sendJson({ ok: true, key, sticker: sent.entry, sent: 1, failed: 0, quoted: quotedInfo });
           } catch (error) {
             const st = getSocialV2State(key);
+            if (st.lastStickerAt === now) st.lastStickerAt = st.stickerSendTimes?.at(-2) || 0;
+            st.stickerSendTimes = (st.stickerSendTimes || []).filter((t) => t !== now);
             const idx = st.sendTimes.indexOf(now);
             if (idx >= 0) st.sendTimes.splice(idx, 1);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
@@ -5807,6 +5839,8 @@ async function main() {
         wakeTimes: [],
         sendTimes: [],
         stickerCollectTimes: [],
+        stickerSendTimes: [],
+        lastStickerAt: 0,
         pendingWakeTimer: null,
         sleepTimer: null,
         replyCheckTimer: null,
@@ -5859,6 +5893,8 @@ async function main() {
             wakeTimes: Array.isArray(val.wakeTimes) ? val.wakeTimes : [],
             sendTimes: Array.isArray(val.sendTimes) ? val.sendTimes : [],
             stickerCollectTimes: Array.isArray(val.stickerCollectTimes) ? val.stickerCollectTimes : [],
+            stickerSendTimes: Array.isArray(val.stickerSendTimes) ? val.stickerSendTimes : [],
+            lastStickerAt: Number(val.lastStickerAt) || 0,
             pendingWakeTimer: null,
             sleepTimer: null,
             replyCheckTimer: null,
@@ -5935,6 +5971,8 @@ async function main() {
           wakeTimes: st.wakeTimes.slice(-200),
           sendTimes: st.sendTimes.slice(-500),
           stickerCollectTimes: Array.isArray(st.stickerCollectTimes) ? st.stickerCollectTimes.slice(-500) : [],
+          stickerSendTimes: Array.isArray(st.stickerSendTimes) ? st.stickerSendTimes.slice(-100) : [],
+          lastStickerAt: st.lastStickerAt || 0,
           lastIncomingAt: st.lastIncomingAt || 0,
           preSleepWaitSatisfiedAt: st.preSleepWaitSatisfiedAt || 0,
           preSleepWaitObservedAt: st.preSleepWaitObservedAt || 0,
