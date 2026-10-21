@@ -1138,12 +1138,24 @@ async function onMessage(ev) {
       return;
     }
     await queueChatTurn(chatKey, async () => {
+      // A busy group can queue turns faster than the model can answer. Old
+      // replies refer to a conversation that has already moved on.
+      if (isGroup && Date.now() - imageReceivedAt > 45_000) {
+        log('[skip] stale queued group turn', target);
+        return;
+      }
       // The ordinary chat model is text-only. Use the vision caption as context
       // instead of sending image bytes that make its entire prompt fail.
       const inspected = imageInspection
         ? await Promise.race([imageInspection, sleep(20_000).then(() => null)]) : null;
+      if (firstImage && !inspected?.caption) {
+        log('[vision] image received but visual description unavailable', target);
+        if (isGroup && (!text.trim() || Date.now() - imageReceivedAt > 45_000)) return;
+        await sendText(target, '图片收到了，但识图服务暂时不可用，稍后再发一次或用文字告诉我图里的内容。', isGroup);
+        return;
+      }
       const imageContext = firstImage
-        ? (inspected?.caption ? `【图片内容】${inspected.caption}` : '【图片内容】识图暂时不可用，请不要猜测画面。')
+        ? `【图片内容】${inspected.caption}`
         : '';
       if (!isGroup && inspected?.caption) {
         recentPrivateImages.set(chatKey, { caption: inspected.caption, at: Date.now() });
@@ -1153,6 +1165,10 @@ async function onMessage(ev) {
       const context = [messageReferences.context, imageContext, followupImageContext].filter(Boolean).join('\n');
       let reply = await ask(`${isGroup ? 'g' : 'p'}${target}`, promptMessage,
         media.filter((item) => item.type !== 'image'), sender, context);
+      if (isGroup && Date.now() - imageReceivedAt > 45_000) {
+        log('[skip] stale completed group turn', target);
+        return;
+      }
       if ((imageContext && inspected?.caption || followupImageContext)
         && falselyClaimsImageIsUnavailable(reply)) {
         log('[vision] model ignored available image description; retrying');
