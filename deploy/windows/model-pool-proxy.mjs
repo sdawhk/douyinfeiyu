@@ -19,6 +19,8 @@ const PORT = Number(process.env.PORT || 18901);
 const KEYS_FILE = process.env.KEYS_FILE || 'D:\\deepseek\\keys.json';
 const STATE_FILE = 'D:\\deepseek\\state\\keys.json';
 const MODEL_STATE_FILE = process.env.MODEL_STATE_FILE || 'D:\\deepseek\\state\\models.json';
+const MODEL_POLICY_FILE = process.env.MODEL_POLICY_FILE || 'D:\\deepseek\\state\\model-policy.json';
+const MODEL_ACTIVITY_FILE = process.env.MODEL_ACTIVITY_FILE || 'D:\\deepseek\\state\\model-activity.json';
 const COOLDOWN_MS = Number(process.env.KEY_COOLDOWN_MS || 60 * 60 * 1000); // 1h
 
 // 首字超时触发模型切换；已经开始输出的回答有更长的总时限。
@@ -41,11 +43,11 @@ const MAP = new Map(Object.entries({
 // Free routes first; a working non-free route is the final chat fallback.
 const CHAT_MODEL_FALLBACKS = [
   'space-bunny-free',
+  'reflection/beam-free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
   'nvidia/nemotron-3.5-super-vl:free',
   'nvidia/nemotron-3.5-lightning:free',
   'thinkingmachines/inkling-small:free',
-  'nvidia/nemotron-3-ultra-550b-a55b:free',
-  'reflection/beam-free',
   'deepseek-v4.1-flash-free',
   'trae/glm-5.3-flash',
 ];
@@ -104,6 +106,25 @@ function saveState(s) {
 let KEYS = loadKeys();
 let state = loadState();
 let modelState = loadModelState();
+let activityHistory = null;
+try { activityHistory = JSON.parse(readFileSync(MODEL_ACTIVITY_FILE, 'utf8')); } catch {}
+let lastActivity = activityHistory?.lastActivity ?? activityHistory ?? null;
+let lastSuccess = activityHistory?.lastSuccess ?? (lastActivity?.outcome === 'success' ? lastActivity : null);
+
+function activePolicy() {
+  try {
+    const value = JSON.parse(readFileSync(MODEL_POLICY_FILE, 'utf8'));
+    if (typeof value.primary === 'string' && Array.isArray(value.fallbacks)) return value;
+  } catch { /* no saved policy yet */ }
+  return null;
+}
+
+function recordActivity(value) {
+  lastActivity = { ...value, at: new Date().toISOString() };
+  if (value.outcome === 'success') lastSuccess = lastActivity;
+  try { writeFileSync(MODEL_ACTIVITY_FILE, JSON.stringify({ lastActivity, lastSuccess }, null, 2), 'utf8'); }
+  catch { /* runtime status is best effort */ }
+}
 
 function loadModelState() {
   try { return existsSync(MODEL_STATE_FILE) ? JSON.parse(readFileSync(MODEL_STATE_FILE, 'utf8')) : {}; }
@@ -486,6 +507,18 @@ const server = http.createServer((req, res) => {
     if (req.url.startsWith('/_keys') || req.url === '/' || req.url.startsWith('/admin')) {
       return await handleAdmin(req, res);
     }
+    if (req.method === 'GET' && req.url === '/_models') {
+      if (!clientIsLocal(req)) { res.writeHead(403); res.end('forbidden'); return; }
+      const policy = activePolicy();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({
+        policy: policy && { version: policy.version, primary: policy.primary, fallbacks: policy.fallbacks,
+          firstTokenTimeoutMs: policy.firstTokenTimeoutMs, fallbackBudgetMs: policy.fallbackBudgetMs },
+        lastActivity, lastSuccess, cooling: modelState,
+        keys: { total: KEYS.length, available: availableKeys().length }
+      }));
+      return;
+    }
     if (req.url.startsWith('/_reload')) {
       KEYS = loadKeys();
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -512,11 +545,12 @@ const server = http.createServer((req, res) => {
       console.log(`[request] ${req.method} ${path} model=${model ?? 'unknown'} stream=${requestJson?.stream === true}`);
     }
     const mayFallback = model && /\/(?:chat\/completions|responses)(?:\?|$)/.test(path);
-    const fallbacks = hasImageInput(requestJson) ? VISION_MODEL_FALLBACKS : CHAT_MODEL_FALLBACKS;
+    const policy = activePolicy();
+    const fallbacks = hasImageInput(requestJson) ? VISION_MODEL_FALLBACKS : (policy?.fallbacks ?? CHAT_MODEL_FALLBACKS);
     const modelCandidates = mayFallback
-      ? [...new Set([model, ...fallbacks])].slice(0, MODEL_MAX_ATTEMPTS)
+      ? [...new Set([model, ...fallbacks])].slice(0, Math.max(MODEL_MAX_ATTEMPTS, policy ? policy.fallbacks.length + 1 : 0))
       : [model];
-    const modelDeadline = mayFallback ? Date.now() + MODEL_FALLBACK_BUDGET_MS : Infinity;
+    const modelDeadline = mayFallback ? Date.now() + (policy?.fallbackBudgetMs ?? MODEL_FALLBACK_BUDGET_MS) : Infinity;
 
     const pool = availableKeys();
     if (pool.length === 0) {
@@ -559,7 +593,7 @@ const server = http.createServer((req, res) => {
         let r;
         const attemptStarted = Date.now();
         const timeoutMs = Math.min(
-          requestJson?.stream === true ? MODEL_FIRST_TOKEN_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS,
+          requestJson?.stream === true ? (policy?.firstTokenTimeoutMs ?? MODEL_FIRST_TOKEN_TIMEOUT_MS) : UPSTREAM_TIMEOUT_MS,
           remainingMs
         );
         try {
@@ -572,6 +606,7 @@ const server = http.createServer((req, res) => {
             text: JSON.stringify({ error: { message: `upstream network error: ${err.message}` } }),
           };
           coolModel(entry, candidate, err.name === 'AbortError' ? 'first-token timeout' : 'network error');
+          recordActivity({ requested: model, attempted: candidate, outcome: 'failed', reason: err.message });
           shouldTryNextModel = true;
           console.log(`[models] ${candidate} network/timeout error; trying another key or model`);
           continue;
@@ -588,12 +623,14 @@ const server = http.createServer((req, res) => {
               ? MODEL_UNAVAILABLE_COOLDOWN_MS
               : MODEL_COOLDOWN_MS;
           coolModel(entry, candidate, isUnavailableModel(r.status, r.text) ? 'model unavailable' : 'model returned an error', duration);
+          recordActivity({ requested: model, attempted: candidate, outcome: 'failed', reason: `HTTP ${r.status}: ${String(r.text).slice(0, 180)}` });
           shouldTryNextModel = true;
           continue;
         }
         if (isTransientUpstreamFailure(r.status)) {
           lastModelFailure = r;
           coolModel(entry, candidate, `HTTP ${r.status}`);
+          recordActivity({ requested: model, attempted: candidate, outcome: 'failed', reason: `HTTP ${r.status}` });
           shouldTryNextModel = true;
           continue;
         }
@@ -604,6 +641,7 @@ const server = http.createServer((req, res) => {
         }
 
         markModelHealthy(entry, candidate);
+        if (r.status >= 200 && r.status < 300) recordActivity({ requested: model, actual: candidate, outcome: 'success', fallback: candidate !== model });
         if (r.streamed) {
           if (candidate !== model) console.log(`[models] ${model} served with fallback ${candidate}`);
           return;

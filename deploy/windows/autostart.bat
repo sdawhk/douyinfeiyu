@@ -50,6 +50,14 @@ if errorlevel 1 (
   echo [%date% %time%] model-pool already up, skip >> "%LOGDIR%\autostart.log"
 )
 
+rem ---- 2b. editable conversation model router ----
+rem Editable conversation model router (separate from the keys admin on 18901).
+netstat -ano | findstr /R /C:":18903 .*LISTENING" >nul 2>&1
+if errorlevel 1 (
+  echo [%date% %time%] starting model router >> "%LOGDIR%\autostart.log"
+  start "ModelRouter" /MIN /D "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
+)
+
 rem ---- 3. dsh watchdog (token captured to dshweb.out by dsh-run.ps1) ----
 echo [%date% %time%] ensuring dsh watchdog >> "%LOGDIR%\autostart.log"
 start "DSHWatchdog" /MIN /D "%ROOT%" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\repo\deploy\windows\dsh-watchdog.ps1"

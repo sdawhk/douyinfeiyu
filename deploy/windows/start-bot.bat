@@ -51,6 +51,15 @@ if not errorlevel 1 (
   timeout /t 2 /nobreak >nul
 )
 
+rem ---- 2b. editable conversation model router ----
+rem The editable conversation model policy runs on its own local proxy.
+netstat -ano | findstr /R /C:":18903 .*LISTENING" >nul 2>&1
+if errorlevel 1 (
+  echo       starting conversation model router...
+  start "ModelRouter" /MIN /D "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
+  timeout /t 2 /nobreak >nul
+)
+
 rem ---- 3. dsh web + persistent watchdog ----
 echo [3/5] DSH backend
 echo       ensuring watchdog is running...

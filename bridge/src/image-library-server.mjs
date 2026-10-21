@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readSettingsDocument, saveSettingsDocument } from './bot-settings.mjs';
+import { modelStatus, modelCatalog, testModel, saveModelPolicy } from './model-management.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.IMAGE_LIBRARY_PORT || 18902);
@@ -11,6 +12,7 @@ const IMAGE_ROOT = path.resolve(process.env.IMAGE_LIBRARY_ROOT || 'D:\\deepseek\
 const STICKER_INDEX = path.resolve(process.env.STICKER_INDEX_PATH || 'D:\\deepseek\\stickers\\index.json');
 const PAGE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'image-library.html');
 const SETTINGS_PAGE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'bot-settings.html');
+const MODELS_PAGE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'model-settings.html');
 const SETTINGS_HEARTBEAT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'state', 'settings-heartbeat.json');
 const QZONE_STATE = 'D:\\deepseek\\state\\qzone-daily.json';
 const OWNER_STATE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'state', 'owner-proactive.json');
@@ -231,6 +233,36 @@ async function handle(req, res) {
   const localPort = server.address()?.port ?? PORT;
   if (!new RegExp(`^(?:127\\.0\\.0\\.1|localhost):${localPort}$`, 'i').test(req.headers.host || '')) {
     return json(res, 403, { error: '仅允许本机访问' });
+  }
+  if (req.method === 'GET' && url.pathname === '/models') {
+    if (!existsSync(MODELS_PAGE)) return json(res, 500, { error: '模型管理页面文件不存在' });
+    const body = readFileSync(MODELS_PAGE);
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8', 'content-length': body.length,
+      'cache-control': 'no-cache', 'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    });
+    return res.end(body);
+  }
+  if (req.method === 'GET' && url.pathname === '/api/models/status') {
+    try { return json(res, 200, await modelStatus()); }
+    catch (error) { return json(res, 500, { error: error.message }); }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/models/catalog') {
+    try { return json(res, 200, await modelCatalog()); }
+    catch (error) { return json(res, 503, { error: error.message }); }
+  }
+  if ((req.method === 'POST' && url.pathname === '/api/models/test')
+      || (req.method === 'PUT' && url.pathname === '/api/models/policy')) {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机管理页面修改模型配置' });
+    let body;
+    try { body = await readBody(req); }
+    catch (error) { return json(res, error.status || 400, { error: error.message }); }
+    try {
+      if (url.pathname.endsWith('/test')) return json(res, 200, await testModel(body.model));
+      return await serialMutation(async () => json(res, 200, await saveModelPolicy(body)));
+    } catch (error) { return json(res, error.status || 500, { error: error.message, tests: error.tests }); }
   }
   if (req.method === 'GET' && url.pathname === '/settings') {
     if (!existsSync(SETTINGS_PAGE)) return json(res, 500, { error: '设置页面文件不存在' });

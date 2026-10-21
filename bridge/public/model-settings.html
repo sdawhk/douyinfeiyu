@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>对话模型 · 小鲸鱼</title>
+  <style>
+    :root{color-scheme:dark;--bg:#101410;--panel:#191f19;--raised:#222a22;--line:#354033;--paper:#f1f1df;--muted:#a6afa2;--lime:#d3f56a;--orange:#f4a779;--red:#ff9285;--mono:"Cascadia Code",Consolas,monospace;--sans:"Microsoft YaHei UI","Segoe UI",sans-serif;--serif:Georgia,"Noto Serif SC","Songti SC",serif}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;color:var(--paper);font-family:var(--sans);background:radial-gradient(ellipse at 80% 0%,rgba(211,245,106,.09),transparent 34rem),linear-gradient(135deg,rgba(255,255,255,.018) 25%,transparent 25%) 0 0/7px 7px,var(--bg)}button,input{font:inherit}button{cursor:pointer}a{color:inherit}
+    .bar{height:64px;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 clamp(18px,4vw,64px);border-bottom:1px solid var(--line)}.brand{display:flex;align-items:center;gap:10px;text-decoration:none;font-size:12px;letter-spacing:.07em;font-weight:700}.mark{display:grid;place-items:center;width:27px;height:27px;border-radius:8px 8px 8px 2px;background:var(--lime);color:#202814;font:700 16px var(--serif)}.links{display:flex;gap:22px;white-space:nowrap}.links a{text-decoration:none;color:var(--muted);font-size:12px}.links a:hover,.links a.active{color:var(--lime)}
+    main{width:min(1280px,100%);margin:auto;padding:36px clamp(18px,4vw,64px) 115px}.hero{display:flex;justify-content:space-between;align-items:end;gap:24px;margin:8px 0 28px}.eyebrow,.tag{color:var(--lime);font:11px var(--mono);letter-spacing:.16em}.hero h1{font:normal clamp(36px,5vw,64px)/1.08 var(--serif);letter-spacing:-.045em;margin:12px 0}.hero p{max-width:650px;color:var(--muted);line-height:1.7;font-size:14px;margin:0}.version{border:1px solid var(--line);padding:12px 17px;min-width:132px}.version span{display:block;color:var(--muted);font:10px var(--mono)}.version strong{display:block;color:var(--lime);font:23px var(--mono);margin-top:5px}
+    .grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(290px,.75fr);gap:18px}.stack{display:grid;gap:18px;align-content:start}.card{border:1px solid var(--line);background:rgba(25,31,25,.94)}.head{padding:24px 26px 18px;border-bottom:1px solid var(--line)}.head h2{font:normal 27px var(--serif);margin:8px 0 6px}.head p{font-size:12px;line-height:1.6;color:var(--muted);margin:0}.body{padding:22px 26px 26px}.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line)}.stat{min-width:0;padding:16px;background:var(--panel)}.stat span{display:block;color:var(--muted);font-size:11px;margin-bottom:8px}.stat strong{display:block;font:12px/1.5 var(--mono);overflow-wrap:anywhere}.stat.wide{grid-column:1/-1}.status{display:inline-flex;align-items:center;gap:7px;border:1px solid #566844;background:#25331f;padding:5px 9px;color:var(--lime);font-size:11px}.status.warn{border-color:#8b6445;background:#34291e;color:var(--orange)}.status.bad{border-color:#804741;background:#34221f;color:var(--red)}.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+    .field-label{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:12px;font-weight:700;margin-bottom:9px}.field-label small{font:10px var(--mono);color:var(--muted);font-weight:400}.model-row{display:flex;gap:9px}.model-input,input[type=number]{min-width:0;min-height:44px;border:1px solid #465144;background:#111711;color:var(--paper);outline:0}.model-input{width:100%;padding:0 13px;font:12px var(--mono)}.model-input:focus,input[type=number]:focus{border-color:var(--lime);box-shadow:0 0 0 2px rgba(211,245,106,.12)}button{min-height:40px;padding:8px 13px;border:1px solid #566251;background:transparent;color:var(--paper);font-size:12px;white-space:nowrap}#testPrimary{min-width:66px}button:hover{background:#303b2b;border-color:#829172}button:disabled{opacity:.46;cursor:not-allowed}button.primary{background:var(--lime);border-color:var(--lime);color:#202814;font-weight:700}button.primary:hover{background:#e5ff92}.hint{font-size:11px;line-height:1.6;color:var(--muted);margin:10px 0 0}.test-result{min-height:19px;color:var(--muted);font:11px var(--mono);margin-top:10px}.test-result.ok{color:var(--lime)}.test-result.error{color:var(--red)}.fallback-row{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:8px;align-items:center;margin:0 0 9px}.fallback-row .index{color:var(--lime);font:11px var(--mono)}.fallback-row .controls{display:flex;gap:5px}.fallback-row .controls button{min-height:40px;min-width:38px;padding:5px}.add{width:100%;margin-top:9px;border-style:dashed;color:var(--lime)}.rule-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.rule-grid input{width:100%;padding:0 12px}.rule-grid label span{display:block;margin-bottom:8px;font-size:12px}.callout{margin-top:18px;padding:13px 15px;border-left:2px solid var(--lime);background:#252e20;color:#c8d4be;font-size:11px;line-height:1.7}.activity{padding:17px;border:1px solid var(--line);background:#101711;word-break:break-word}.activity strong{color:var(--lime);font:12px var(--mono)}.activity p{color:var(--muted);font-size:11px;line-height:1.6;margin:8px 0 0}.cooling{list-style:none;margin:0;padding:0}.cooling li{padding:11px 0;border-bottom:1px solid var(--line);font-size:11px;line-height:1.6}.cooling li:last-child{border:0}.cooling strong{font:11px var(--mono);color:var(--paper)}.cooling span{display:block;color:var(--orange)}.empty{color:var(--muted);font-size:11px}.savebar{position:fixed;bottom:0;left:0;right:0;background:rgba(16,20,16,.96);border-top:1px solid var(--line);backdrop-filter:blur(12px)}.save-inner{width:min(1280px,100%);margin:auto;padding:13px clamp(18px,4vw,64px);display:flex;justify-content:space-between;align-items:center;gap:16px}.save-note{font-size:12px;color:var(--muted)}.save-note.error{color:var(--red)}.actions{display:flex;gap:8px}
+    @media(max-width:880px){.grid{grid-template-columns:1fr}.hero{align-items:start}}@media(max-width:600px){.bar{height:auto;min-height:64px;align-items:start;padding-top:13px;padding-bottom:13px;flex-direction:column}.links{gap:15px}.hero{display:block}.version{display:inline-block;margin-top:20px}.head,.body{padding-left:18px;padding-right:18px}.fallback-row{grid-template-columns:20px minmax(0,1fr)}.fallback-row .controls{grid-column:2}.rule-grid{grid-template-columns:1fr}.save-inner{align-items:stretch;flex-direction:column}.actions button{flex:1}}
+    /* Warm daylight palette for the model console. */
+    :root{color-scheme:light;--bg:#f5f8f3;--panel:#fff;--raised:#eff5ee;--line:#d9e4da;--paper:#20352c;--muted:#65786b;--lime:#176d50;--orange:#9a6229;--red:#b64149}
+    body{background:radial-gradient(ellipse at 82% 0%,rgba(153,204,164,.23),transparent 36rem),linear-gradient(180deg,#fbfcf8 0%,var(--bg) 62%,#f1f6ee 100%)}
+    .bar{background:rgba(255,255,255,.84);backdrop-filter:blur(14px)}
+    .mark{color:#fff;box-shadow:0 4px 10px rgba(23,109,80,.18)}
+    .links a:hover,.links a.active{color:var(--lime)}
+    .version{background:#fff;border-radius:12px;box-shadow:0 8px 26px rgba(32,71,46,.06)}
+    .card{background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 16px 42px rgba(42,83,54,.055)}
+    .stat-grid{border-radius:9px;overflow:hidden}
+    .stat{background:#f8fbf7}
+    .status{border-color:#bbdac7;background:#e9f5ec;color:#176d50}
+    .status.warn{border-color:#e9d3b1;background:#fff7e9;color:#9a6229}
+    .status.bad{border-color:#ecc6c7;background:#fff0f0;color:#b64149}
+    .model-input,input[type=number]{border-color:#c7d8ca;background:#fbfdfb;color:var(--paper);border-radius:8px}
+    .model-input:focus,input[type=number]:focus{box-shadow:0 0 0 3px rgba(23,109,80,.11)}
+    button{border-color:#c8d8ca;background:#fff;color:var(--paper);border-radius:8px}
+    button:hover{background:#eaf3ec;border-color:#80b096}
+    button.primary{color:#fff}
+    button.primary:hover{background:#0f5b41}
+    .callout{background:#edf6ee;color:#3c6550}
+    .activity{background:#f8fbf7;border-radius:9px}
+    .savebar{background:rgba(255,255,255,.95);box-shadow:0 -10px 30px rgba(35,72,46,.055)}
+    .fallback-entry{min-width:0}
+    .fallback-health{display:block;padding:5px 2px 1px;color:var(--muted);font:11px/1.5 var(--sans)}
+    .fallback-health.ok{color:var(--lime)}
+    .fallback-health.error{color:var(--red)}
+  </style>
+</head>
+<body>
+  <header class="bar"><a class="brand" href="/settings"><span class="mark">鲸</span> 小鲸鱼 / CONTROL</a><nav class="links"><a href="/settings">运行设置</a><a class="active" href="/models">对话模型</a><a href="/">图片库 ↗</a></nav></header>
+  <main>
+    <div class="hero"><div><div class="eyebrow">LOCAL MODEL ROUTING · 18902</div><h1>决定小鲸鱼怎么思考。</h1><p>选择日常对话的主模型，按顺序安排备用模型。保存时测试每个模型，暂不可用的备用模型会保留并标记；右侧显示实际命中的模型。</p></div><div class="version"><span>策略版本</span><strong id="version">—</strong></div></div>
+    <div class="grid"><div class="stack">
+      <section class="card"><div class="head"><div class="tag">01 / PRIMARY</div><h2>主模型</h2><p>机器人新会话及现有 QQ 会话的下一轮对话优先使用它。</p></div><div class="body"><label class="field-label" for="primary"><span>选择或输入模型 ID</span><small id="catalogCount">正在读取目录…</small></label><div class="model-row"><input class="model-input" id="primary" list="modelCatalog" autocomplete="off" spellcheck="false"><button id="testPrimary" type="button">测试</button></div><div id="primaryTest" class="test-result">—</div><p class="hint">目录来自当前上游。未列出的模型 ID 可以手填，但必须通过实际回复测试才能保存。</p></div></section>
+      <section class="card"><div class="head"><div class="tag">02 / FALLBACK CHAIN</div><h2>备用模型</h2><p>主模型出错、超时或返回空流时，按下方顺序逐个尝试。</p></div><div class="body"><div id="fallbacks"></div><button id="addFallback" class="add" type="button">＋ 添加备用模型</button><div class="callout">只有对话请求经过本地模型代理时，备用链才会生效。视觉识图模型仍由独立设置管理。</div></div></section>
+      <section class="card"><div class="head"><div class="tag">03 / SWITCHING RULES</div><h2>切换规则</h2><p>过短会频繁切换；过长则让 QQ 回复等待过久。</p></div><div class="body"><div class="rule-grid"><label><span>单模型首字超时 · 秒</span><input id="firstToken" type="number" min="3" max="30" step="1"></label><label><span>整轮备用预算 · 秒</span><input id="budget" type="number" min="3" max="120" step="1"></label></div><p class="hint">HTTP 502、429、空流和首字超时会触发切换。已经开始输出的回复若中途断开，不会把另一模型的内容拼到同一条回复里。</p></div></section>
+    </div><aside class="stack">
+      <section class="card"><div class="head"><div class="tag">LIVE STATUS</div><h2>当前运行</h2><p>这里读取服务实际状态，不以输入框内容推测。</p></div><div class="body"><div id="effective" class="status warn"><span class="dot"></span>读取中</div><div class="stat-grid" style="margin-top:16px"><div class="stat"><span>DSH 默认模型</span><strong id="defaultModel">—</strong></div><div class="stat"><span>请求线路</span><strong id="route">—</strong></div><div class="stat"><span>上轮实际模型</span><strong id="actual">—</strong></div><div class="stat"><span>备用链</span><strong id="chain">—</strong></div><div class="stat wide"><span>最近请求</span><strong id="recent">—</strong></div></div><p class="hint" id="statusHint"></p></div></section>
+      <section class="card"><div class="head"><div class="tag">ROUTE HEALTH</div><h2>最近活动</h2><p>失败和冷却会显示在这里；不会展示密钥内容。</p></div><div class="body"><div id="activity" class="activity"><strong>等待请求</strong><p>尚无代理活动</p></div><h3 style="font:12px var(--sans);margin:23px 0 8px">冷却中的模型</h3><ul id="cooling" class="cooling"><li class="empty">当前没有</li></ul><p class="hint" id="credentials">凭据状态：读取中</p></div></section>
+    </aside></div>
+    <datalist id="modelCatalog"></datalist>
+  </main>
+  <div class="savebar"><div class="save-inner"><span id="message" class="save-note">正在读取模型状态…</span><div class="actions"><button id="reload" type="button">重新读取</button><button id="save" class="primary" type="button" disabled>测试并保存</button></div></div></div>
+  <script>
+    (()=>{
+      const $=id=>document.getElementById(id);let version=0, original='', busy=false, checks=new Map();
+      const note=(message,error=false)=>{$('message').textContent=message;$('message').classList.toggle('error',error)};
+      const date=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—';
+      const policy=()=>({version,primary:$('primary').value.trim(),fallbacks:[...$('fallbacks').querySelectorAll('.model-input')].map(el=>el.value.trim()),firstTokenTimeoutMs:Number($('firstToken').value)*1000,fallbackBudgetMs:Number($('budget').value)*1000});
+      const changed=()=>JSON.stringify(policy())!==original;
+      function refreshSave(){ $('save').disabled=busy||!changed(); }
+      async function request(url,options){const r=await fetch(url,{cache:'no-store',...options});const body=await r.json();if(!r.ok)throw Object.assign(new Error(body.error||`HTTP ${r.status}`),{body});return body}
+      function makeFallback(value='',index=0){
+        const row=document.createElement('div');row.className='fallback-row';
+        const number=document.createElement('span');number.className='index';number.textContent=String(index+1).padStart(2,'0');
+        const entry=document.createElement('div');entry.className='fallback-entry';
+        const input=document.createElement('input');input.className='model-input';input.setAttribute('list','modelCatalog');input.setAttribute('aria-label',`备用模型 ${index+1}`);input.autocomplete='off';input.spellcheck=false;input.value=value;
+        const health=document.createElement('small');health.className='fallback-health';const check=checks.get(value);health.textContent=check?(check.ok?'最近测试通过':`最近测试未通过：${check.reason||'模型暂不可用'}`):'尚未测试';health.classList.toggle(check?.ok?'ok':'error',Boolean(check));
+        input.addEventListener('input',()=>{health.textContent='待测试';health.className='fallback-health';refreshSave()});entry.append(input,health);
+        const controls=document.createElement('div');controls.className='controls';
+        for(const [label,action,title] of [['测','test','测试模型'],['↑','up','上移'],['↓','down','下移'],['×','remove','移除']]){const button=document.createElement('button');button.type='button';button.textContent=label;button.title=title;button.setAttribute('aria-label',title);button.onclick=()=>{
+          const inputs=[...$('fallbacks').querySelectorAll('.model-input')],i=inputs.indexOf(input);
+          if(action==='test')return test(input.value.trim(),button,health);
+          const values=inputs.map(el=>el.value);
+          if(action==='remove')values.splice(i,1);
+          if(action==='up'&&i>0)[values[i-1],values[i]]=[values[i],values[i-1]];
+          if(action==='down'&&i<values.length-1)[values[i+1],values[i]]=[values[i],values[i+1]];
+          drawFallbacks(values);refreshSave();};controls.append(button)}
+        row.append(number,entry,controls);return row;
+      }
+      function drawFallbacks(values){$('fallbacks').replaceChildren(...values.map(makeFallback));$('addFallback').disabled=values.length>=12;}
+      function showStatus(data){
+        const saved=data.saved||{};version=saved.version||0;$('version').textContent=`v${version}`;
+        checks=new Map((saved.checks||[]).map(check=>[check.model,check]));
+        $('primary').value=saved.primary||'';drawFallbacks(saved.fallbacks||[]);$('firstToken').value=(saved.firstTokenTimeoutMs||12000)/1000;$('budget').value=(saved.fallbackBudgetMs||45000)/1000;original=JSON.stringify(policy());refreshSave();
+        $('defaultModel').textContent=data.dsh?.defaultModel||'未知';$('route').textContent=data.route==='proxy'?'本地模型代理':'直连上游';$('chain').textContent=data.route==='proxy'?`${data.proxy?.policy?.fallbacks?.length||0} 个备用`:'未启用';
+        $('effective').className=`status ${data.effective?'':'warn'}`;$('effective').innerHTML='<span class="dot"></span>'+(data.effective?'配置已生效':'配置尚未完全生效');
+        $('statusHint').textContent=data.route==='proxy'?`当前代理：${data.dsh.baseURL}`:`当前 DSH 线路：${data.dsh?.baseURL||'未知'}。保存时会切换到统一代理。`;
+        const activity=data.proxy?.lastActivity;$('actual').textContent=data.proxy?.lastSuccess?.actual||'暂无成功记录';$('recent').textContent=activity?`${date(activity.at)} · ${activity.outcome==='success'?'成功':'失败'}`:'暂无代理请求';
+        $('activity').replaceChildren();const strong=document.createElement('strong');strong.textContent=activity?.outcome==='success'?(activity.fallback?`已切换：${activity.requested} → ${activity.actual}`:`命中：${activity.actual}`):(activity?`失败：${activity.attempted||activity.requested}`:'等待请求');const p=document.createElement('p');p.textContent=activity?.reason||`记录时间：${date(activity?.at)}`;$('activity').append(strong,p);
+        const cooling=Object.entries(data.proxy?.cooling||{}).filter(([,v])=>v?.until>Date.now());$('cooling').replaceChildren();if(!cooling.length){const li=document.createElement('li');li.className='empty';li.textContent='当前没有';$('cooling').append(li)}else for(const [key,value] of cooling){const li=document.createElement('li'),name=document.createElement('strong'),reason=document.createElement('span');name.textContent=key.split('|').at(-1);reason.textContent=`${value.reason||'故障'} · 恢复 ${date(value.until)}`;li.append(name,reason);$('cooling').append(li)}
+        $('credentials').textContent=data.proxy?`凭据状态：${data.proxy.keys?.available||0}/${data.proxy.keys?.total||0} 可用`:'模型代理未在线';
+      }
+      async function load(){if(busy)return;note('正在读取模型状态…');try{const [status,catalog]=await Promise.all([request('/api/models/status'),request('/api/models/catalog').catch(error=>({error:error.message,models:[]}))]);showStatus(status);$('modelCatalog').replaceChildren(...catalog.models.map(row=>{const option=document.createElement('option');option.value=row.id;option.label=`${row.cost==='free'?'免费':'费用未知'} · ${row.name}`;return option}));$('catalogCount').textContent=catalog.error?`目录暂不可用：${catalog.error}`:`目录 ${catalog.models.length} 个模型`;note(status.effective?'当前策略已生效':'当前尚未启用统一代理，可测试并保存模型策略');}catch(error){note(error.message,true)}}
+      async function test(model,button,health){if(!model){note('请先输入模型 ID',true);return}button.disabled=true;const old=button.textContent;button.textContent='测试中…';note(`正在测试 ${model} 的完整流式回复…`);try{const result=await request('/api/models/test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model})});note(result.ok?`${model} 测试通过 · ${result.elapsedMs} ms`:`${model} 测试失败：${result.reason}`,!result.ok);if(health){health.textContent=result.ok?'刚刚测试通过':`刚刚测试未通过：${result.reason}`;health.className=`fallback-health ${result.ok?'ok':'error'}`}if(button===$('testPrimary')){const target=$('primaryTest');target.textContent=result.ok?`完整回复 · ${result.elapsedMs} ms`:result.reason;target.className=`test-result ${result.ok?'ok':'error'}`}}catch(error){note(error.message,true);if(health){health.textContent=`测试失败：${error.message}`;health.className='fallback-health error'}}finally{button.disabled=false;button.textContent=old}}
+      async function save(){if(busy||!changed())return;busy=true;refreshSave();note('正在测试模型并应用设置，可能需要几十秒…');try{const result=await request('/api/models/policy',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(policy())});showStatus(result.status);const passed=result.tests.filter(item=>item.ok).length;note(`已保存 v${result.saved.version}；${passed} 个测试通过，${result.tests.length-passed} 个备用模型暂不可用；${result.sessions.updated}/${result.sessions.total} 个 QQ 会话已更新`)}catch(error){note(error.message,true)}finally{busy=false;refreshSave()}}
+      $('primary').addEventListener('input',refreshSave);$('firstToken').addEventListener('input',refreshSave);$('budget').addEventListener('input',refreshSave);$('testPrimary').onclick=()=>test($('primary').value.trim(),$('testPrimary'));$('addFallback').onclick=()=>{if($('fallbacks').children.length>=12)return;drawFallbacks([...$('fallbacks').querySelectorAll('.model-input')].map(el=>el.value).concat(''));refreshSave()};$('reload').onclick=load;$('save').onclick=save;load();
+    })();
+  </script>
+</body>
+</html>
