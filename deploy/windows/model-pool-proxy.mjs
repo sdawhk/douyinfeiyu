@@ -17,7 +17,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 
 const PORT = Number(process.env.PORT || 18901);
 const KEYS_FILE = process.env.KEYS_FILE || 'D:\\deepseek\\keys.json';
-const STATE_FILE = 'D:\\deepseek\\state\\keys.json';
+const STATE_FILE = process.env.KEYS_STATE_FILE || 'D:\\deepseek\\state\\keys.json';
 const MODEL_STATE_FILE = process.env.MODEL_STATE_FILE || 'D:\\deepseek\\state\\models.json';
 const MODEL_POLICY_FILE = process.env.MODEL_POLICY_FILE || 'D:\\deepseek\\state\\model-policy.json';
 const MODEL_ACTIVITY_FILE = process.env.MODEL_ACTIVITY_FILE || 'D:\\deepseek\\state\\model-activity.json';
@@ -31,6 +31,7 @@ const MODEL_FALLBACK_BUDGET_MS = Number(process.env.MODEL_FALLBACK_BUDGET_MS || 
 // Try the requested free model plus every configured automatic free fallback.
 const MODEL_MAX_ATTEMPTS = Number(process.env.MODEL_MAX_ATTEMPTS || 8);
 const MODEL_COOLDOWN_MS = Number(process.env.MODEL_COOLDOWN_MS || 3 * 60 * 1000);
+const MODEL_RECOVERY_PROBE_INTERVAL_MS = Number(process.env.MODEL_RECOVERY_PROBE_INTERVAL_MS || 15_000);
 const MODEL_QUOTA_COOLDOWN_MS = Number(process.env.MODEL_QUOTA_COOLDOWN_MS || 5 * 60 * 1000);
 const MODEL_UNAVAILABLE_COOLDOWN_MS = Number(process.env.MODEL_UNAVAILABLE_COOLDOWN_MS || 30 * 60 * 1000);
 
@@ -106,6 +107,8 @@ function saveState(s) {
 let KEYS = loadKeys();
 let state = loadState();
 let modelState = loadModelState();
+let lastRecoveryProbeAt = 0;
+let recoveryProbeInFlight = false;
 let activityHistory = null;
 try { activityHistory = JSON.parse(readFileSync(MODEL_ACTIVITY_FILE, 'utf8')); } catch {}
 let lastActivity = activityHistory?.lastActivity ?? activityHistory ?? null;
@@ -568,9 +571,34 @@ const server = http.createServer((req, res) => {
 
     let activeKeys = tryList.slice();
     let lastModelFailure = null;
+    // When a temporary upstream outage cools every route, allow one bounded
+    // recovery probe instead of rejecting every chat until the full cooldown ends.
+    let recoveryProbeRoute = null;
+    if (mayFallback && !modelCandidates.some((candidate) =>
+      activeKeys.some((entry) => !modelCooling(entry, candidate)))) {
+      if (!recoveryProbeInFlight && Date.now() - lastRecoveryProbeAt >= MODEL_RECOVERY_PROBE_INTERVAL_MS) {
+        for (const candidate of modelCandidates) {
+          for (const entry of activeKeys) {
+            const route = modelRouteKey(entry.upstream, candidate);
+            const cooling = modelState[route];
+            if (cooling && /^(first-token timeout|network error|HTTP 5\d\d)$/.test(cooling.reason)
+              && (!recoveryProbeRoute || cooling.until < recoveryProbeRoute.until)) {
+              recoveryProbeRoute = { route, until: cooling.until };
+            }
+          }
+        }
+        if (recoveryProbeRoute) {
+          lastRecoveryProbeAt = Date.now();
+          recoveryProbeInFlight = true;
+          console.log(`[models] all routes cooling; probing ${recoveryProbeRoute.route.split('|').at(-1)}`);
+        }
+      }
+    }
+    try {
     for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex++) {
       const candidate = modelCandidates[modelIndex];
-      const candidateKeys = activeKeys.filter((entry) => !modelCooling(entry, candidate));
+      const candidateKeys = activeKeys.filter((entry) => !modelCooling(entry, candidate)
+        || modelRouteKey(entry.upstream, candidate) === recoveryProbeRoute?.route);
       if (candidateKeys.length === 0) {
         console.log(`[models] ${candidate} skipped; every route is cooling down`);
         continue;
@@ -664,6 +692,9 @@ const server = http.createServer((req, res) => {
       }
       if (activeKeys.length === 0) break;
     }
+    } finally {
+      if (recoveryProbeRoute) recoveryProbeInFlight = false;
+    }
 
     if (lastModelFailure) {
       const ct = lastModelFailure.text.trimStart().startsWith('{') ? 'application/json' : 'text/plain';
@@ -673,7 +704,7 @@ const server = http.createServer((req, res) => {
     }
     res.writeHead(503, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
-      error: { message: 'all api keys failed or out of quota' }
+      error: { message: activeKeys.length ? 'all model routes are cooling down' : 'all api keys failed or out of quota' }
     }));
   });
 });
