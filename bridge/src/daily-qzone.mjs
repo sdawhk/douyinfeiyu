@@ -29,12 +29,12 @@ export function isPostIntervalElapsed(lastPostAt, now = Date.now(), intervalMs =
 }
 
 /** 现在是否允许再发一条。 */
-export function canPostNow(now = Date.now()) {
+export function canPostNow(now = Date.now(), intervalMs = 60 * 60 * 1000) {
   ensureDir();
   try {
     if (!existsSync(STATE)) return true;
     const j = JSON.parse(readFileSync(STATE, 'utf8'));
-    return isPostIntervalElapsed(j?.lastPostAtMs ?? j?.at, now);
+    return isPostIntervalElapsed(j?.lastPostAtMs ?? j?.at, now, intervalMs);
   } catch {
     return true;
   }

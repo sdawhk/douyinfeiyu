@@ -6,9 +6,8 @@ rem  ASCII-only on purpose: Chinese in .bat becomes mojibake
 rem  under GBK consoles and breaks parsing.
 rem
 rem  What it does:
-rem   1) SnowLuma  - needs ADMIN. This script cannot elevate
-rem      itself reliably for injection, so it OPENS an elevated
-rem      window and asks you to press Enter there.
+rem   1) SnowLuma  - an elevated health watchdog checks the real
+rem      QQ API and restarts SnowLuma if its HTTP server stalls.
 rem   2) dsh web   - the model backend (auto)
 rem   3) model-pool- multi-key proxy (auto)
 rem   4) bridge    - the bot + crash-restart watchdog (auto)
@@ -27,26 +26,18 @@ echo.
 
 echo [%date% %time%] ==== one-click begin ==== >> "%LOGDIR%\autostart.log"
 
-rem ---- 1. SnowLuma (needs admin) ----
+rem ---- 1. SnowLuma watchdog (needs admin) ----
 echo [1/5] SnowLuma (QQ side)
-netstat -ano | findstr /R /C:":5099 .*LISTENING" >nul 2>&1
+powershell.exe -NoProfile -Command "if ((Test-Path '%ROOT%\state\snowluma-watchdog-heartbeat.txt') -and ((Get-Date) - (Get-Item '%ROOT%\state\snowluma-watchdog-heartbeat.txt').LastWriteTime).TotalSeconds -lt 45) { exit 0 } else { exit 1 }" >nul 2>&1
 if not errorlevel 1 (
-  echo       already running, skip
-  echo [%date% %time%] SnowLuma already up >> "%LOGDIR%\autostart.log"
+  echo       health watchdog already running
+  echo [%date% %time%] SnowLuma watchdog already up >> "%LOGDIR%\autostart.log"
 ) else (
-  netstat -ano | findstr /R /C:":5100 .*LISTENING" >nul 2>&1
-  if not errorlevel 1 (
-    echo       running on 5100, skip
-    echo [%date% %time%] SnowLuma up on 5100 >> "%LOGDIR%\autostart.log"
-  ) else (
-    echo       NOT running - opening an elevated window...
-    echo       In that new window: press any key, then log in to QQ.
-    echo [%date% %time%] launching elevated SnowLuma >> "%LOGDIR%\autostart.log"
-    rem NOTE: no parentheses in the window title - cmd chokes on them.
-    start "SnowLumaADMIN" powershell.exe -NoProfile -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','\"%ROOT%\snowluma\app\start-admin.bat\"' -Verb RunAs"
-    echo       waiting 12s for it to come up...
-    timeout /t 12 /nobreak >nul
-  )
+  echo       starting elevated health watchdog...
+  echo [%date% %time%] launching elevated SnowLuma watchdog >> "%LOGDIR%\autostart.log"
+  start "SnowLumaWatchdogADMIN" powershell.exe -NoProfile -Command "Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"%ROOT%\repo\deploy\windows\snowluma-watchdog.ps1\"' -Verb RunAs -WindowStyle Hidden"
+  echo       waiting 12s for it to come up...
+  timeout /t 12 /nobreak >nul
 )
 
 rem ---- 2. model pool proxy ----
@@ -60,14 +51,12 @@ if not errorlevel 1 (
   timeout /t 2 /nobreak >nul
 )
 
-rem ---- 3. dsh web ----
+rem ---- 3. dsh web + persistent watchdog ----
 echo [3/5] DSH backend
+echo       ensuring watchdog is running...
+start "DSHWatchdog" /MIN /D "%ROOT%" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\repo\deploy\windows\dsh-watchdog.ps1"
 netstat -ano | findstr /R /C:":3090 .*LISTENING" >nul 2>&1
-if not errorlevel 1 (
-  echo       already running, skip
-) else (
-  echo       starting...
-  start "DSHWeb" /MIN /D "%ROOT%" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\dsh-run.ps1"
+if errorlevel 1 (
   echo       waiting 15s for token...
   timeout /t 15 /nobreak >nul
 )

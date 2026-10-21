@@ -89,11 +89,17 @@ export function describeMessageReferences(message, botSelf, quotedMessage = null
 export function explicitGroupReplyDecision({ botSelf, text, references = {}, isOwner = false, keywords = [] }) {
   if (references.hasBotMention) return true;
   if (references.replyId && references.quotedUserId === String(botSelf)) return true;
+
+  // An actual QQ @ target is authoritative. A rendered name such as
+  // "@小鲸鱼" may belong to another account with the same nickname.
+  if ((references.mentions || []).some((qq) => qq !== String(botSelf))) return false;
   if (isOwner) return true;
 
-  const lower = String(text ?? '').toLowerCase();
+  const originalText = String(text ?? '');
+  const textWithoutDisplayMentions = originalText.replace(/@[\p{L}\p{N}_\-]+/gu, '');
+  const lower = textWithoutDisplayMentions.toLowerCase();
   const namedBot = keywords.some((word) => lower.includes(String(word).toLowerCase()));
-  if ((references.mentions?.length ?? 0) > 0 || references.replyId) return namedBot;
+  if (references.replyId || textWithoutDisplayMentions !== originalText) return namedBot;
   if (namedBot) return true;
   return null;
 }

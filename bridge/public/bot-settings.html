@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>小鲸鱼 · 运行设置</title>
+  <style>
+    :root { color-scheme:dark; --bg:#101410; --panel:#1b211b; --panel2:#222b22; --line:#354035; --ink:#f3f2e4; --muted:#acb6a5; --lime:#d2f36d; --amber:#efb985; --danger:#ff9b8d; --mono:"Cascadia Code",Consolas,monospace; --body:"Microsoft YaHei UI","Segoe UI",sans-serif; --serif:Georgia,"Noto Serif SC","Songti SC",serif; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; color:var(--ink); font-family:var(--body); background:radial-gradient(ellipse at 85% 3%,#3446284a,transparent 38rem),linear-gradient(135deg,#ffffff05 25%,transparent 25%) 0 0/8px 8px,var(--bg); }
+    button,input,textarea { font:inherit; }
+    button { cursor:pointer; }
+    a { color:inherit; }
+    .bar { min-height:64px; display:flex; align-items:center; justify-content:space-between; gap:20px; border-bottom:1px solid var(--line); padding:12px clamp(20px,4vw,64px); }
+    .brand { display:flex; align-items:center; gap:11px; text-decoration:none; font-weight:700; letter-spacing:.06em; font-size:13px; }
+    .mark { display:grid; place-items:center; width:29px; height:29px; border-radius:8px 8px 8px 2px; background:var(--lime); color:#192318; font:700 18px var(--serif); }
+    .links { display:flex; flex-wrap:wrap; gap:22px; color:var(--muted); font-size:12px; }
+    .links a { text-decoration:none; }
+    .links a:hover,.links .active { color:var(--lime); }
+    main { max-width:1280px; margin:auto; padding:36px clamp(20px,4vw,64px) 110px; }
+    .eyebrow,.tag { font:11px var(--mono); letter-spacing:.16em; color:var(--lime); text-transform:uppercase; }
+    .hero { display:flex; justify-content:space-between; gap:28px; align-items:end; padding:8px 0 32px; border-bottom:1px solid var(--line); }
+    h1 { margin:12px 0; font:normal clamp(38px,5.5vw,70px)/1.04 var(--serif); letter-spacing:-.045em; }
+    .hero p { margin:0; color:var(--muted); line-height:1.7; font-size:14px; }
+    .version { min-width:185px; border-left:1px solid var(--line); padding-left:18px; color:var(--muted); font:11px/1.8 var(--mono); }
+    .version strong { display:block; color:var(--ink); font:600 15px var(--body); }
+    .layout { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(270px,.68fr); gap:18px; margin-top:24px; align-items:start; }
+    .stack { display:grid; gap:18px; }
+    section { border:1px solid var(--line); background:rgba(27,33,27,.94); }
+    .section-head { display:flex; align-items:start; justify-content:space-between; gap:12px; padding:23px 25px 19px; border-bottom:1px solid var(--line); }
+    .section-head h2 { margin:7px 0 5px; font:normal 26px var(--serif); }
+    .section-head p { margin:0; font-size:12px; color:var(--muted); line-height:1.6; }
+    .number { color:#6d806b; font:23px var(--mono); }
+    .section-body { padding:20px 25px 24px; }
+    .field-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 22px; }
+    label.field { display:block; min-width:0; }
+    .field-name { display:block; margin-bottom:9px; color:#d9dfd2; font-size:12px; }
+    .input-wrap { display:flex; align-items:center; border:1px solid #465146; background:#111711; }
+    .input-wrap:focus-within { border-color:var(--lime); box-shadow:0 0 0 2px #d2f36d20; }
+    .input-wrap input { width:100%; min-width:0; height:43px; border:0; outline:0; padding:0 13px; background:transparent; color:var(--ink); font:15px var(--mono); }
+    .input-wrap span { padding:0 13px; color:var(--muted); font-size:11px; white-space:nowrap; }
+    textarea { display:block; width:100%; min-height:88px; resize:vertical; padding:12px 13px; border:1px solid #465146; outline:0; background:#111711; color:var(--ink); font:13px/1.6 var(--body); }
+    textarea:focus { border-color:var(--lime); box-shadow:0 0 0 2px #d2f36d20; }
+    .hint { display:block; margin-top:7px; color:#849181; font-size:11px; line-height:1.5; }
+    .switch-row { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:4px 0 18px; margin-bottom:19px; border-bottom:1px dashed var(--line); }
+    .switch-row strong { display:block; font-size:13px; }
+    .switch-row small { display:block; margin-top:4px; color:var(--muted); font-size:11px; }
+    input[type=checkbox] { appearance:none; width:43px; height:24px; flex:none; border:1px solid #647063; border-radius:20px; background:#303a30; position:relative; cursor:pointer; }
+    input[type=checkbox]:before { content:""; position:absolute; left:3px; top:3px; width:16px; height:16px; background:#adb7a8; border-radius:50%; transition:transform .2s,background .2s; }
+    input[type=checkbox]:checked { background:#9ebf47; border-color:var(--lime); }
+    input[type=checkbox]:checked:before { transform:translateX(19px); background:#172113; }
+    .group-list { display:grid; gap:8px; margin-top:18px; }
+    .group-row { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border:1px solid var(--line); background:#141b14; font:12px var(--mono); }
+    .group-row small { display:block; color:var(--muted); font:10px var(--body); margin-top:3px; }
+    .callout { margin-top:18px; padding:13px 15px; border-left:2px solid var(--lime); color:#bbc7b3; background:#d2f36d0a; line-height:1.6; font-size:11px; }
+    .status-card { padding:24px; }
+    .status-card h2 { margin:0 0 20px; font:normal 25px var(--serif); }
+    .state { display:inline-flex; align-items:center; gap:8px; font-size:12px; color:var(--lime); }
+    .state:before { content:""; width:8px; height:8px; border-radius:50%; background:currentColor; box-shadow:0 0 10px currentColor; }
+    .state.waiting { color:var(--amber); }
+    .facts { display:grid; gap:0; margin:22px 0 0; }
+    .fact { display:flex; justify-content:space-between; gap:12px; padding:12px 0; border-top:1px solid var(--line); font-size:12px; }
+    .fact span { color:var(--muted); }
+    .fact strong { font-weight:500; text-align:right; }
+    .events { padding:24px; }
+    .events h2 { margin:0 0 14px; font:normal 23px var(--serif); }
+    .event { display:flex; gap:13px; padding:10px 0; border-top:1px solid var(--line); font-size:11px; }
+    .event time { color:var(--lime); font-family:var(--mono); flex:none; }
+    .event span { color:#cbd3c5; }
+    .empty { color:var(--muted); font-size:12px; line-height:1.6; }
+    .savebar { position:fixed; left:0; right:0; bottom:0; z-index:5; padding:12px clamp(20px,4vw,64px); background:#101610ed; border-top:1px solid var(--line); backdrop-filter:blur(14px); }
+    .save-inner { max-width:1152px; margin:auto; display:flex; align-items:center; justify-content:space-between; gap:20px; }
+    .save-note { color:var(--muted); font-size:12px; }
+    .save-note.error { color:var(--danger); }
+    .actions { display:flex; gap:8px; }
+    .actions button { padding:10px 18px; border:1px solid var(--line); background:transparent; color:var(--ink); font-size:12px; }
+    .actions .primary { border-color:var(--lime); color:#1c2914; background:var(--lime); font-weight:700; }
+    .actions button:disabled { opacity:.48; cursor:not-allowed; }
+    @media(max-width:900px) { .layout { grid-template-columns:1fr; } .hero { align-items:start; } }
+    @media(max-width:600px) { .hero { display:block; } .version { margin-top:22px; } .field-grid { grid-template-columns:1fr; } .section-head,.section-body,.status-card,.events { padding-left:18px; padding-right:18px; } .links { gap:12px; } }
+  </style>
+</head>
+<body>
+  <header class="bar"><a class="brand" href="/settings"><span class="mark">鲸</span> 小鲸鱼 / CONTROL</a><nav class="links"><a class="active" href="/settings">运行设置</a><a href="/">图片库 ↗</a></nav></header>
+  <main>
+    <div class="hero"><div><div class="eyebrow">LOCAL CONTROL PANEL · 18902</div><h1>把节奏交给你。</h1><p>管理群聊插话、QQ 动态、主动私聊和戳一戳互动。保存后，运行中的 QQBridge 会在约 5 秒内应用设置。</p></div><div class="version"><span>当前配置</span><strong id="version">读取中…</strong><span id="loadedAt">—</span></div></div>
+    <div class="layout">
+      <div class="stack">
+        <section><div class="section-head"><div><div class="tag">01 / GROUP CHAT</div><h2>群聊发言</h2><p>未点名消息不再抽签；只按冷却时间决定何时插话。</p></div><div class="number">01</div></div><div class="section-body"><div class="field-grid"><label class="field"><span class="field-name">同群插话冷却</span><div class="input-wrap"><input id="groupCooldown" type="number" min="0" max="300" step="1"><span>秒</span></div><small class="hint">0 表示不冷却。被 @、点名和主人消息不受此限制。</small></label></div><div id="groupList" class="group-list"></div><div class="callout">群聊开关只影响未点名的自然插话；有人明确叫小鲸鱼时仍会回复。</div></div></section>
+        <section><div class="section-head"><div><div class="tag">02 / QZONE</div><h2>QQ 动态</h2><p>从真实聊天素材中选取一件小事，按设置的节奏尝试发布。</p></div><div class="number">02</div></div><div class="section-body"><label class="switch-row"><span><strong>自动发布动态</strong><small>关闭后不会自动尝试，主人手动命令仍可使用</small></span><input id="qzoneEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">每小时的检查分钟</span><div class="input-wrap"><input id="qzoneMinute" type="number" min="0" max="59" step="1"><span>分</span></div><small class="hint">例如 0 为每小时整点检查；有素材才可能发布。</small></label><label class="field"><span class="field-name">两次发布最短间隔</span><div class="input-wrap"><input id="qzoneInterval" type="number" min="60" max="1440" step="1"><span>分钟</span></div><small class="hint">至少 60 分钟；发布成功后才开始计时。</small></label></div></div></section>
+        <section><div class="section-head"><div><div class="tag">03 / OWNER DM</div><h2>主动私聊主人</h2><p>安静一段时间后发起自然的问候或话题。</p></div><div class="number">03</div></div><div class="section-body"><label class="switch-row"><span><strong>主动发起私聊</strong><small>只发送给主人；模型没有自然话题时会跳过</small></span><input id="ownerEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">主人未互动多久后尝试</span><div class="input-wrap"><input id="ownerIdle" type="number" min="30" max="10080" step="1"><span>分钟</span></div></label><label class="field"><span class="field-name">检查间隔</span><div class="input-wrap"><input id="ownerCheck" type="number" min="5" max="1440" step="1"><span>分钟</span></div></label><label class="field"><span class="field-name">两次尝试最短间隔</span><div class="input-wrap"><input id="ownerCooldown" type="number" min="60" max="10080" step="1"><span>分钟</span></div></label><label class="field"><span class="field-name">每天最多发送</span><div class="input-wrap"><input id="ownerMax" type="number" min="1" max="20" step="1"><span>条</span></div></label><label class="field"><span class="field-name">开始时间</span><div class="input-wrap"><input id="ownerStart" type="number" min="0" max="23" step="1"><span>点</span></div></label><label class="field"><span class="field-name">结束时间</span><div class="input-wrap"><input id="ownerEnd" type="number" min="1" max="24" step="1"><span>点前</span></div></label></div></div></section>
+        <section><div class="section-head"><div><div class="tag">04 / POKE</div><h2>戳一戳互动</h2><p>按 QQ 事件里的目标账号判断是谁被戳，回复和回戳都受频率限制。</p></div><div class="number">04</div></div><div class="section-body"><label class="switch-row"><span><strong>启用戳一戳互动</strong><small>关闭后不回复戳一戳通知</small></span><input id="pokeEnabled" type="checkbox"></label><label class="switch-row"><span><strong>群聊被戳时回复</strong><small>仅别人戳机器人自己的 QQ 号</small></span><input id="pokeGroup" type="checkbox"></label><label class="switch-row"><span><strong>私聊被戳时回复</strong><small>只回应允许私聊的联系人</small></span><input id="pokePrivate" type="checkbox"></label><label class="switch-row"><span><strong>群友互戳时插话</strong><small>默认关闭；开启后可能参与别人之间的戳一戳</small></span><input id="pokeOthers" type="checkbox"></label><label class="switch-row"><span><strong>被戳后自动回戳</strong><small>只回戳刚才戳机器人的人</small></span><input id="pokeBack" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">同会话回复冷却</span><div class="input-wrap"><input id="pokeCooldown" type="number" min="0" max="60" step="1"><span>分钟</span></div></label><label class="field"><span class="field-name">同会话每小时上限</span><div class="input-wrap"><input id="pokeHourly" type="number" min="1" max="30" step="1"><span>次</span></div></label></div><div class="field-grid" style="margin-top:18px"><label class="field"><span class="field-name">被戳时的回复</span><textarea id="pokeReplies" rows="4" maxlength="1200"></textarea><small class="hint">每行一句，随机选择；最多 12 行，每行不超过 100 字。</small></label><label class="field"><span class="field-name">群友互戳时的回复</span><textarea id="pokeOthersReplies" rows="4" maxlength="1200"></textarea><small class="hint">仅开启“群友互戳时插话”后使用。</small></label></div><div class="callout">群聊禁言仍优先：禁言的群不会回复或回戳。</div></div></section>
+      </div>
+      <aside class="stack"><section class="status-card"><div class="tag">LIVE STATUS</div><h2>运行状态</h2><div id="applied" class="state waiting">读取中</div><div class="facts"><div class="fact"><span>上次 QQ 动态</span><strong id="lastQzone">—</strong></div><div class="fact"><span>下次动态检查</span><strong id="nextQzone">—</strong></div><div class="fact"><span>上次主动私聊</span><strong id="lastOwner">—</strong></div><div class="fact"><span>最早可再尝试</span><strong id="nextOwner">—</strong></div><div class="fact"><span>今日主动私聊</span><strong id="ownerCount">—</strong></div><div class="fact"><span>桥接心跳</span><strong id="heartbeat">—</strong></div></div></section><section class="events"><div class="tag">RECENT ACTIVITY</div><h2>最近记录</h2><div id="events" class="empty">读取中…</div></section></aside>
+    </div>
+  </main>
+  <div class="savebar"><div class="save-inner"><span id="message" class="save-note">正在读取设置…</span><div class="actions"><button id="reload" type="button">重新读取</button><button id="save" class="primary" type="button" disabled>保存设置</button></div></div></div>
+  <script>
+    (() => {
+      const $ = (id) => document.getElementById(id);
+      let version = '', groups = [], otherDisabled = [], original = '', busy = false;
+      const date = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12:false }) : '暂无';
+      const number = (id) => { const raw = $(id).value.trim(); return raw === '' ? NaN : Number(raw); };
+      const note = (message, error = false) => { $('message').textContent = message; $('message').classList.toggle('error', error); };
+      function values() {
+        return {
+          groupReplyCooldownMs: number('groupCooldown') * 1000,
+          groupInterjectionDisabled: [...otherDisabled, ...groups.filter((id) => !$('group-' + id).checked)],
+          dailyQzone: { enabled:$('qzoneEnabled').checked, minute:number('qzoneMinute'), minIntervalMs:number('qzoneInterval') * 60000 },
+          ownerProactive: { enabled:$('ownerEnabled').checked, idleMs:number('ownerIdle') * 60000,
+            checkIntervalMs:number('ownerCheck') * 60000, cooldownMs:number('ownerCooldown') * 60000,
+            maxPerDay:number('ownerMax'), startHour:number('ownerStart'), endHour:number('ownerEnd') },
+          pokeInteraction: { enabled:$('pokeEnabled').checked, replyInGroup:$('pokeGroup').checked,
+            replyInPrivate:$('pokePrivate').checked, replyToOthers:$('pokeOthers').checked,
+            pokeBack:$('pokeBack').checked, cooldownMs:number('pokeCooldown') * 60000,
+            maxPerHour:number('pokeHourly'), replies:$('pokeReplies').value.trim(),
+            othersReplies:$('pokeOthersReplies').value.trim() }
+        };
+      }
+      function changed() { $('save').disabled = busy || !version || JSON.stringify(values()) === original; if (!busy && !$('save').disabled) note('有未保存的修改'); }
+      function drawStatus(status) {
+        const applied = $('applied'); applied.classList.toggle('waiting', !status.applied);
+        applied.textContent = status.applied ? '设置已在 QQBridge 生效' : '等待 QQBridge 启动或刷新';
+        $('lastQzone').textContent = date(status.lastQzoneAt);
+        $('nextQzone').textContent = status.nextQzoneCheckAt ? date(status.nextQzoneCheckAt) : '已关闭';
+        $('lastOwner').textContent = date(status.lastOwnerMessageAt);
+        $('nextOwner').textContent = status.nextOwnerEligibleAt ? date(status.nextOwnerEligibleAt) : '已关闭';
+        $('ownerCount').textContent = String(status.ownerMessagesToday ?? 0) + ' 条';
+        $('heartbeat').textContent = date(status.lastHeartbeatAt);
+        const events = $('events'); events.replaceChildren();
+        if (!status.recentEvents.length) { events.className = 'empty'; events.textContent = '暂时没有任务或频率记录'; return; }
+        events.className = '';
+        for (const item of status.recentEvents) {
+          const row = document.createElement('div'); row.className = 'event';
+          const time = document.createElement('time'); time.textContent = item.time;
+          const label = document.createElement('span'); label.textContent = item.event;
+          row.append(time, label); events.append(row);
+        }
+      }
+      function draw(data) {
+        version = data.version; groups = data.groups || [];
+        const s = data.settings, q = s.dailyQzone, o = s.ownerProactive, p = s.pokeInteraction;
+        otherDisabled = s.groupInterjectionDisabled.filter((id) => !groups.includes(id));
+        $('groupCooldown').value = s.groupReplyCooldownMs / 1000;
+        $('qzoneEnabled').checked = q.enabled; $('qzoneMinute').value = q.minute; $('qzoneInterval').value = q.minIntervalMs / 60000;
+        $('ownerEnabled').checked = o.enabled; $('ownerIdle').value = o.idleMs / 60000; $('ownerCheck').value = o.checkIntervalMs / 60000;
+        $('ownerCooldown').value = o.cooldownMs / 60000; $('ownerMax').value = o.maxPerDay; $('ownerStart').value = o.startHour; $('ownerEnd').value = o.endHour;
+        $('pokeEnabled').checked = p.enabled; $('pokeGroup').checked = p.replyInGroup; $('pokePrivate').checked = p.replyInPrivate;
+        $('pokeOthers').checked = p.replyToOthers; $('pokeBack').checked = p.pokeBack;
+        $('pokeCooldown').value = p.cooldownMs / 60000; $('pokeHourly').value = p.maxPerHour;
+        $('pokeReplies').value = p.replies; $('pokeOthersReplies').value = p.othersReplies;
+        const list = $('groupList'); list.replaceChildren();
+        if (!groups.length) { const text = document.createElement('small'); text.className = 'hint'; text.textContent = '暂无已观察到的群聊；目前所有群共用上方的冷却时间。'; list.append(text); }
+        for (const id of groups) { const label = document.createElement('label'); label.className = 'group-row'; const text = document.createElement('span'); text.textContent = id; const small = document.createElement('small'); small.textContent = '允许自然插话'; text.append(small); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = 'group-' + id; checkbox.checked = !s.groupInterjectionDisabled.includes(id); checkbox.addEventListener('change', changed); label.append(text, checkbox); list.append(label); }
+        original = JSON.stringify(values()); $('version').textContent = data.version.slice(0, 10); $('loadedAt').textContent = '读取于 ' + new Date().toLocaleTimeString('zh-CN');
+        if (data.status) drawStatus(data.status); changed();
+      }
+      async function api(path, options) { const response = await fetch(path, { cache:'no-store', ...options }); const data = await response.json(); if (!response.ok) throw new Error(data.error || '请求失败'); return data; }
+      async function load() { busy = true; $('save').disabled = true; note('正在读取设置…'); let error = null; try { draw(await api('/api/settings')); } catch (e) { error = e; } finally { busy = false; changed(); note(error ? error.message : '设置已读取', Boolean(error)); } }
+      async function save() { busy = true; $('save').disabled = true; note('正在保存…'); let error = null; try { const data = await api('/api/settings', { method:'PUT', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ version, settings:values() }) }); draw({ ...data, status:{ applied:false, lastQzoneAt:null, lastOwnerMessageAt:null, ownerMessagesToday:0, lastHeartbeatAt:null, recentEvents:[] } }); setTimeout(load, 6000); } catch (e) { error = e; } finally { busy = false; changed(); note(error ? error.message : '已保存；约 5 秒后生效', Boolean(error)); } }
+      document.querySelectorAll('input,textarea').forEach((input) => input.addEventListener('input', changed));
+      $('reload').addEventListener('click', load); $('save').addEventListener('click', save);
+      setInterval(() => { if (!busy && version && JSON.stringify(values()) === original) load(); }, 30_000);
+      load();
+    })();
+  </script>
+</body>
+</html>

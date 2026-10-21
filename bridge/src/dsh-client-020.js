@@ -19,7 +19,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 
 /** 用启动令牌换取会话 Cookie。 */
 async function acquireCookie(baseUrl, launchToken) {
-  const res = await fetch(`${baseUrl}/?token=${encodeURIComponent(launchToken)}`, { redirect: 'manual' });
+  const res = await fetch(`${baseUrl}/?token=${encodeURIComponent(launchToken)}`, {
+    redirect: 'manual', signal: AbortSignal.timeout(5000)
+  });
   const raw = typeof res.headers.getSetCookie === 'function'
     ? res.headers.getSetCookie()
     : [res.headers.get('set-cookie')];
@@ -72,6 +74,7 @@ export class NodeApiClient {
       signal: signal ?? AbortSignal.timeout(this.timeoutMs)
     });
     const text = await res.text();
+    if (!res.ok) throw new Error(`dsh: ${endpoint}: HTTP ${res.status}: ${text.slice(0, 120)}`);
     let parsed;
     try { parsed = JSON.parse(text); } catch { throw new Error(`dsh: ${endpoint}: non-JSON response: ${text.slice(0, 200)}`); }
     if (parsed?.type === 'server-response' && parsed.result?.ok === false) {
@@ -130,7 +133,9 @@ export class NodeApiClient {
 
     this.host = {
       // 0.2.x 不再暴露 host.describe；用会话列表作为连通性探针。
-      describe: () => this.call('session/list', { _request: {} }).then(() => ({ ok: true }))
+      describe: () => this.call('session/list', { _request: {} }, {
+        signal: AbortSignal.timeout(5000)
+      }).then(() => ({ ok: true }))
     };
 
     this.sessions = {

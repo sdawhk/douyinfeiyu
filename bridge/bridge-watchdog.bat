@@ -5,10 +5,12 @@ set "ROOT=D:\deepseek"
 set "NODE=node"
 set "LOGDIR=%ROOT%\logs"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+set /a RESTARTS=0
 
 :loop
-echo [%date% %time%] bridge starting >> "%LOGDIR%\bridge.log"
+set /a RESTARTS+=1
+echo [%date% %time%] bridge starting attempt %RESTARTS% >> "%LOGDIR%\bridge.log"
 "%NODE%" "%ROOT%\repo\bridge\src\qq-bot.mjs" >> "%LOGDIR%\bridge.log" 2>&1
-echo [%date% %time%] bridge exited, restarting in 5s >> "%LOGDIR%\bridge.log"
+echo [%date% %time%] bridge exited with code %errorlevel%, restarting in 5s >> "%LOGDIR%\bridge.log"
 timeout /t 5 /nobreak >nul
 goto loop

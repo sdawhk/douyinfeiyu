@@ -27,7 +27,7 @@ const MODEL_FIRST_TOKEN_TIMEOUT_MS = Number(process.env.MODEL_FIRST_TOKEN_TIMEOU
 const MODEL_STREAM_TOTAL_TIMEOUT_MS = Number(process.env.MODEL_STREAM_TOTAL_TIMEOUT_MS || 120_000);
 const MODEL_FALLBACK_BUDGET_MS = Number(process.env.MODEL_FALLBACK_BUDGET_MS || 45_000);
 // Try the requested free model plus every configured automatic free fallback.
-const MODEL_MAX_ATTEMPTS = Number(process.env.MODEL_MAX_ATTEMPTS || 7);
+const MODEL_MAX_ATTEMPTS = Number(process.env.MODEL_MAX_ATTEMPTS || 8);
 const MODEL_COOLDOWN_MS = Number(process.env.MODEL_COOLDOWN_MS || 3 * 60 * 1000);
 const MODEL_QUOTA_COOLDOWN_MS = Number(process.env.MODEL_QUOTA_COOLDOWN_MS || 5 * 60 * 1000);
 const MODEL_UNAVAILABLE_COOLDOWN_MS = Number(process.env.MODEL_UNAVAILABLE_COOLDOWN_MS || 30 * 60 * 1000);
@@ -38,9 +38,8 @@ const MAP = new Map(Object.entries({
   'deepseek-v4-pro': 'buddy/deepseek-v4-pro',
 }));
 
-// Automatic fallback only uses free routes. Paid/uncertain models remain selectable
-// explicitly but are never chosen automatically.
-const MODEL_FALLBACKS = [
+// Free routes first; a working non-free route is the final chat fallback.
+const CHAT_MODEL_FALLBACKS = [
   'space-bunny-free',
   'nvidia/nemotron-3.5-super-vl:free',
   'nvidia/nemotron-3.5-lightning:free',
@@ -48,7 +47,19 @@ const MODEL_FALLBACKS = [
   'nvidia/nemotron-3-ultra-550b-a55b:free',
   'reflection/beam-free',
   'deepseek-v4.1-flash-free',
+  'trae/glm-5.3-flash',
 ];
+const VISION_MODEL_FALLBACKS = [
+  'nvidia/nemotron-3.5-super-vl:free',
+  'trae/multimodal_image_kimi-k2.5',
+];
+
+function hasImageInput(request) {
+  const inputs = request?.messages ?? request?.input ?? [];
+  return Array.isArray(inputs) && inputs.some((item) =>
+    Array.isArray(item?.content) && item.content.some((part) =>
+      ['image_url', 'input_image', 'image'].includes(part?.type)));
+}
 
 const KEY_FAIL_STATUS = new Set([401, 403]);
 const QUOTA_FAIL_STATUS = new Set([402, 429]);
@@ -501,8 +512,9 @@ const server = http.createServer((req, res) => {
       console.log(`[request] ${req.method} ${path} model=${model ?? 'unknown'} stream=${requestJson?.stream === true}`);
     }
     const mayFallback = model && /\/(?:chat\/completions|responses)(?:\?|$)/.test(path);
+    const fallbacks = hasImageInput(requestJson) ? VISION_MODEL_FALLBACKS : CHAT_MODEL_FALLBACKS;
     const modelCandidates = mayFallback
-      ? [...new Set([model, ...MODEL_FALLBACKS])].slice(0, MODEL_MAX_ATTEMPTS)
+      ? [...new Set([model, ...fallbacks])].slice(0, MODEL_MAX_ATTEMPTS)
       : [model];
     const modelDeadline = mayFallback ? Date.now() + MODEL_FALLBACK_BUDGET_MS : Infinity;
 

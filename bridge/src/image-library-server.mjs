@@ -1,14 +1,20 @@
 import http from 'node:http';
-import { createReadStream, existsSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { readSettingsDocument, saveSettingsDocument } from './bot-settings.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.IMAGE_LIBRARY_PORT || 18902);
 const IMAGE_ROOT = path.resolve(process.env.IMAGE_LIBRARY_ROOT || 'D:\\deepseek\\images');
 const STICKER_INDEX = path.resolve(process.env.STICKER_INDEX_PATH || 'D:\\deepseek\\stickers\\index.json');
 const PAGE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'image-library.html');
+const SETTINGS_PAGE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'bot-settings.html');
+const SETTINGS_HEARTBEAT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'state', 'settings-heartbeat.json');
+const QZONE_STATE = 'D:\\deepseek\\state\\qzone-daily.json';
+const OWNER_STATE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'state', 'owner-proactive.json');
+const BRIDGE_LOG = 'D:\\deepseek\\logs\\bridge.log';
 const PAGE_SIZE_MAX = 72;
 const IMAGE_NAME = /^[a-f0-9]{16}\.(?:jpg|jpeg|png|gif|webp)$/i;
 let mutationQueue = Promise.resolve();
@@ -144,8 +150,119 @@ function requireLocalOrigin(req) {
   return origin === `http://${host}`;
 }
 
+function readJsonFile(file) {
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+function recentLogText(limit = 160_000) {
+  const size = statSync(BRIDGE_LOG).size;
+  const buffer = Buffer.alloc(Math.min(size, limit));
+  const fd = openSync(BRIDGE_LOG, 'r');
+  try { readSync(fd, buffer, 0, buffer.length, size - buffer.length); }
+  finally { closeSync(fd); }
+  return buffer.toString('utf8');
+}
+
+function knownGroups(configured, disabled) {
+  const ids = new Set([...configured, ...disabled]);
+  try {
+    for (const match of recentLogText(2_000_000).matchAll(/\[msg\] group (\d{5,20}) from /g)) ids.add(match[1]);
+  } catch { /* first launch may have no log */ }
+  return [...ids].sort();
+}
+
+function settingsStatus(version, settings) {
+  const heartbeat = readJsonFile(SETTINGS_HEARTBEAT);
+  const qzone = readJsonFile(QZONE_STATE);
+  const owner = readJsonFile(OWNER_STATE);
+  const now = Date.now();
+  const today = new Date(now).toLocaleDateString('en-CA');
+  const ownerMessagesToday = Array.isArray(owner?.sentDates) ? owner.sentDates.filter((day) => day === today).length : 0;
+  const qzoneNext = new Date(now);
+  qzoneNext.setMinutes(settings.dailyQzone.minute, 0, 0);
+  if (qzoneNext.getTime() <= now) qzoneNext.setHours(qzoneNext.getHours() + 1);
+  const ownerSettings = settings.ownerProactive;
+  let ownerNext = Math.max(now, Number(owner?.lastOwnerActivityAt || 0) + ownerSettings.idleMs,
+    Number(owner?.lastAttemptAt || owner?.lastSentAt || 0) + ownerSettings.cooldownMs);
+  const nextDate = new Date(ownerNext);
+  if (ownerMessagesToday >= ownerSettings.maxPerDay || nextDate.getHours() >= ownerSettings.endHour) {
+    nextDate.setDate(nextDate.getDate() + 1);
+    nextDate.setHours(ownerSettings.startHour, 0, 0, 0);
+  } else if (nextDate.getHours() < ownerSettings.startHour) {
+    nextDate.setHours(ownerSettings.startHour, 0, 0, 0);
+  }
+  ownerNext = nextDate.getTime();
+  const recentEvents = [];
+  try {
+    const log = recentLogText().split(/\r?\n/);
+    for (const line of log.slice(-500)) {
+      let event = '';
+      if (/\[qzone\] posted:|\[qzone\] owner-requested post published/.test(line)) event = 'QQ 动态发布成功';
+      else if (/\[qzone\] (owner history|group list) fetch failed/.test(line)) event = '聊天记录接口不可用，动态素材读取失败';
+      else if (/\[qzone\] not enough material/.test(line)) event = 'QQ 动态：素材不足';
+      else if (/\[qzone\] failed:/.test(line)) event = 'QQ 动态执行失败';
+      else if (/\[owner-proactive\] sent/.test(line)) event = '主动私聊已发送';
+      else if (/\[owner-proactive\] skipped/.test(line)) event = '主动私聊：本次跳过';
+      else if (/\[owner-proactive\] failed/.test(line)) event = '主动私聊执行失败';
+      else if (/\[poke\] replied/.test(line)) event = '戳一戳：已发送回复';
+      else if (/\[poke\] poked back/.test(line)) event = '戳一戳：已回戳';
+      else if (/\[poke\] (reply|poke-back) failed/.test(line)) event = '戳一戳：操作失败';
+      else if (/\[poke\] observed/.test(line)) event = '收到戳一戳事件';
+      else if (/\[skip\] not replying \(frequency control\)/.test(line)) event = '群聊消息被冷却规则跳过';
+      else if (/\[error\] dsh: timeout/.test(line)) event = '模型回复超时';
+      else if (/\[warn\] OneBot HTTP did not respond/.test(line)) event = 'QQ 接口未响应，收发消息可能受影响';
+      if (event) recentEvents.push({ time: `${line.slice(0, 8)} UTC`, event });
+    }
+  } catch { /* no log yet */ }
+  return {
+    applied: Boolean(heartbeat?.version === version && Date.now() - Number(heartbeat.at) < 90_000),
+    lastHeartbeatAt: heartbeat?.at || null,
+    lastQzoneAt: qzone?.lastPostAtMs || null,
+    nextQzoneCheckAt: settings.dailyQzone.enabled ? qzoneNext.getTime() : null,
+    lastOwnerMessageAt: owner?.lastSentAt || null,
+    nextOwnerEligibleAt: ownerSettings.enabled ? ownerNext : null,
+    ownerMessagesToday,
+    recentEvents: recentEvents.slice(-16).reverse()
+  };
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
+  const localPort = server.address()?.port ?? PORT;
+  if (!new RegExp(`^(?:127\\.0\\.0\\.1|localhost):${localPort}$`, 'i').test(req.headers.host || '')) {
+    return json(res, 403, { error: '仅允许本机访问' });
+  }
+  if (req.method === 'GET' && url.pathname === '/settings') {
+    if (!existsSync(SETTINGS_PAGE)) return json(res, 500, { error: '设置页面文件不存在' });
+    const body = readFileSync(SETTINGS_PAGE);
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8', 'content-length': body.length,
+      'cache-control': 'no-cache', 'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    });
+    return res.end(body);
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/settings') {
+    try {
+      const document = readSettingsDocument();
+      return json(res, 200, { ...document,
+        groups: knownGroups(document.groups, document.settings.groupInterjectionDisabled),
+        status: settingsStatus(document.version, document.settings) });
+    } catch (error) { return json(res, 500, { error: error.message }); }
+  }
+
+  if (req.method === 'PUT' && url.pathname === '/api/settings') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机管理页面保存设置' });
+    let body;
+    try { body = await readBody(req); }
+    catch (error) { return json(res, error.status || 400, { error: error.message }); }
+    try {
+      return await serialMutation(() => json(res, 200, saveSettingsDocument(body.version, body.settings)));
+    } catch (error) { return json(res, error.status || 500, { error: error.message || '保存设置失败' }); }
+  }
+
   if (req.method === 'GET' && url.pathname === '/') {
     if (!existsSync(PAGE)) return json(res, 500, { error: '图片管理页面文件不存在' });
     const body = readFileSync(PAGE);

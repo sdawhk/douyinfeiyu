@@ -50,14 +50,9 @@ if errorlevel 1 (
   echo [%date% %time%] model-pool already up, skip >> "%LOGDIR%\autostart.log"
 )
 
-rem ---- 3. dsh web (token captured to dshweb.out by dsh-run.ps1) ----
-netstat -ano | findstr /R /C:":3090 .*LISTENING" >nul 2>&1
-if errorlevel 1 (
-  echo [%date% %time%] starting dsh web >> "%LOGDIR%\autostart.log"
-  start "DSHWebCore" /MIN /D "%ROOT%" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\dsh-run.ps1"
-) else (
-  echo [%date% %time%] dsh web already up, skip >> "%LOGDIR%\autostart.log"
-)
+rem ---- 3. dsh watchdog (token captured to dshweb.out by dsh-run.ps1) ----
+echo [%date% %time%] ensuring dsh watchdog >> "%LOGDIR%\autostart.log"
+start "DSHWatchdog" /MIN /D "%ROOT%" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\repo\deploy\windows\dsh-watchdog.ps1"
 
 rem ---- 4. bridge watchdog (it waits for dsh, then patches token + runs bot) ----
 tasklist /FI "WINDOWTITLE eq QQBridge*" 2>nul | find /I "cmd.exe" >nul 2>&1
