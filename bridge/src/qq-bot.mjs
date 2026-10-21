@@ -61,6 +61,7 @@ const OWNER = String(cfg.ownerQQ ?? [...OWNERS][0] ?? ''); // 兼容旧引用
 const BOT_SELF = cfg.selfQQ ? String(cfg.selfQQ) : null; // 机器人自身账号：用于过滤自己发出的回显
 const ALLOW_PRIVATE = new Set((cfg.allow?.private ?? []).map(String));
 const ALLOW_GROUPS = new Set((cfg.allow?.groups ?? []).map(String));
+const DENY_PRIVATE = new Set((cfg.deny?.private ?? []).map(String));
 const CWD = cfg.sessionCwd || process.cwd();
 const OWNER_DM_TARGET = [...OWNERS].find((uid) => uid !== BOT_SELF && (!ALLOW_PRIVATE.size || ALLOW_PRIVATE.has(uid))) ?? null;
 const OWNER_PROACTIVE_STATE_PATH = new URL('../state/owner-proactive.json', import.meta.url);
@@ -1003,6 +1004,7 @@ function isOwner(sender) {
 
 function allowed(isGroup, id, sender) {
   if (isOwner(sender)) return true;
+  if (!isGroup && cfg.allow?.privateOpen === true) return !DENY_PRIVATE.has(String(sender));
   const set = isGroup ? ALLOW_GROUPS : ALLOW_PRIVATE;
   if (set.size === 0 && isGroup) return true;
   return set.has(String(id));

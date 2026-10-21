@@ -50,6 +50,7 @@
   "agentPreset": "qq-chat",
   "workspaceTitle": "QQ 聊天",
   "allow": {
+    "privateOpen": false,
     "private": [
       123456789
     ],
