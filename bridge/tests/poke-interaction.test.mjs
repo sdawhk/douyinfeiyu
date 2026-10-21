@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizePokeNotice, choosePokeReply } from '../src/poke-interaction.mjs';
+import { normalizePokeNotice, choosePokeReply, registerDirectPoke } from '../src/poke-interaction.mjs';
 
 const self = '2427256325';
 
@@ -20,4 +20,14 @@ test('private pokes are routed to the peer and replies use configured lines', ()
   assert.equal(poke.chatId, '1668389572');
   assert.equal(poke.isGroup, false);
   assert.equal(choosePokeReply('第一句\n第二句', () => 0.99), '第二句');
+});
+
+test('the second poke from the same person in one minute triggers one poke back', () => {
+  const pairs = new Map();
+  assert.equal(registerDirectPoke(pairs, 'g839367702', '111', 1000), false);
+  assert.equal(registerDirectPoke(pairs, 'g839367702', '222', 2000), false);
+  assert.equal(registerDirectPoke(pairs, 'g839367702', '111', 3000), true);
+  assert.equal(registerDirectPoke(pairs, 'g839367702', '111', 4000), false);
+  assert.equal(registerDirectPoke(pairs, 'p111', '111', 5000), false);
+  assert.equal(registerDirectPoke(pairs, 'g839367702', '222', 63001), false);
 });

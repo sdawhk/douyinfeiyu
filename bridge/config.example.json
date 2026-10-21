@@ -40,7 +40,7 @@
     "replyInGroup": true,
     "replyInPrivate": true,
     "replyToOthers": false,
-    "pokeBack": false,
+    "pokeBack": true,
     "cooldownMs": 120000,
     "maxPerHour": 6,
     "replies": "戳到我啦？\n在呢，怎么啦？\n再戳就要反击啦。",

@@ -29,7 +29,7 @@ import { searchWeb } from './web-search-engine.mjs';
 import { readSettingsDocument } from './bot-settings.mjs';
 import { isOwnerImageReplyRequest, resolveGroupMention, latestOwnerImage, recentGroupSummary } from './owner-group-request.mjs';
 import { recentImageFollowupContext, falselyClaimsImageIsUnavailable } from './recent-image-context.mjs';
-import { normalizePokeNotice, choosePokeReply } from './poke-interaction.mjs';
+import { normalizePokeNotice, choosePokeReply, registerDirectPoke } from './poke-interaction.mjs';
 import { parseStickerSaveIntent, isStickerName } from './sticker-save-intent.mjs';
 
 const CFG_PATH = new URL('../config.json', import.meta.url);
@@ -1352,6 +1352,8 @@ async function inspectAndArchiveSticker(image, sender, chatKey, receivedAt) {
 
 // ---------- WebSocket（接收侧） ----------
 const pokeSendHistory = new Map();
+const pokePairs = new Map();
+const pokeBackHistory = new Map();
 
 async function handlePokeNotice(event) {
   const poke = normalizePokeNotice(event, BOT_SELF ?? event.self_id);
@@ -1365,6 +1367,29 @@ async function handlePokeNotice(event) {
   const chatKey = poke.isGroup ? groupKey(poke.chatId) : privateKey(poke.chatId);
   if (isMuted(chatKey)) { log('[poke] skipped (muted)', chatKey); return; }
   const now = Date.now();
+  if (poke.targetIsSelf && settings.pokeBack
+      && registerDirectPoke(pokePairs, chatKey, poke.senderId, now)) {
+    const backKey = `${chatKey}:${poke.senderId}`;
+    const backRecent = (pokeBackHistory.get(backKey) || []).filter((time) => now - time < 3_600_000);
+    if (backRecent.length < settings.maxPerHour
+        && (!backRecent.length || now - backRecent.at(-1) >= settings.cooldownMs)) {
+      backRecent.push(now);
+      pokeBackHistory.set(backKey, backRecent);
+      try {
+        const action = poke.isGroup ? 'group_poke' : 'send_poke';
+        const params = poke.isGroup
+          ? { group_id: Number(poke.chatId), user_id: Number(poke.senderId) }
+          : { user_id: Number(poke.senderId) };
+        await onebot(action, params);
+        log('[poke] poked back after two', chatKey, poke.senderId);
+      } catch (error) {
+        pokeBackHistory.set(backKey, backRecent.filter((time) => time !== now));
+        log('[poke] poke-back failed:', error?.message ?? error);
+      }
+    } else {
+      log('[poke] poke-back skipped (rate limit)', backKey);
+    }
+  }
   const recent = (pokeSendHistory.get(chatKey) || []).filter((time) => now - time < 3_600_000);
   if (recent.length >= settings.maxPerHour ||
       (recent.length && now - recent.at(-1) < settings.cooldownMs)) {
@@ -1383,18 +1408,6 @@ async function handlePokeNotice(event) {
     return;
   }
   log('[poke] replied', chatKey, `from=${poke.senderId}`, poke.targetIsSelf ? 'target=self' : 'target=other');
-  if (poke.targetIsSelf && settings.pokeBack) {
-    try {
-      const action = poke.isGroup ? 'group_poke' : 'send_poke';
-      const params = poke.isGroup
-        ? { group_id: Number(poke.chatId), user_id: Number(poke.senderId) }
-        : { user_id: Number(poke.senderId) };
-      await onebot(action, params);
-      log('[poke] poked back', chatKey, poke.senderId);
-    } catch (error) {
-      log('[poke] poke-back failed:', error?.message ?? error);
-    }
-  }
 }
 
 function connect() {

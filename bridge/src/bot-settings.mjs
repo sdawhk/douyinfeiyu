@@ -42,7 +42,7 @@ export function publicSettings(config) {
       replyInGroup: poke.replyInGroup !== false,
       replyInPrivate: poke.replyInPrivate !== false,
       replyToOthers: poke.replyToOthers === true,
-      pokeBack: poke.pokeBack === true,
+      pokeBack: poke.pokeBack !== false,
       cooldownMs: poke.cooldownMs ?? 120_000,
       maxPerHour: poke.maxPerHour ?? 6,
       replies: poke.replies ?? '戳到我啦？\n在呢，怎么啦？\n再戳就要反击啦。',
