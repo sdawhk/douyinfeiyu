@@ -70,6 +70,7 @@
     .file-id { overflow:hidden; margin:8px 0 10px; color:var(--paper); font:12px var(--mono); text-overflow:ellipsis; white-space:nowrap; }
     .tag-row { display:flex; min-height:25px; flex-wrap:wrap; gap:5px; }
     .tag { max-width:100%; padding:4px 7px; overflow:hidden; color:#d4dfcb; border:1px solid #424b3d; background:#232b21; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+    .theme-tag { color:#b9e8ff; border-color:#3a6578; background:#183240; }
     .no-tags { color:#828d7e; font-size:10px; }
     .card-actions { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:12px; padding-top:10px; border-top:1px solid #2b332b; }
     .size { color:var(--muted); font:10px var(--mono); }
@@ -107,6 +108,11 @@
     .tag-pill { display:flex; align-items:center; gap:7px; padding:5px 7px; color:var(--acid-ink); background:var(--acid); font-size:11px; }
     .tag-pill button { width:16px; height:16px; padding:0; color:var(--acid-ink); border:0; background:transparent; font-size:15px; line-height:1; }
     .tag-input { flex:1 1 135px; min-width:120px; height:30px; padding:0 5px; color:var(--paper); border:1px solid transparent; outline:none; background:transparent; font-size:12px; }
+    .semantic-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:22px; }
+    .semantic-grid label:first-child { grid-column:1/-1; }
+    .semantic-grid span { display:block; margin-bottom:8px; color:var(--muted); font-size:11px; }
+    .semantic-grid select,.semantic-grid input { width:100%; height:40px; padding:0 10px; color:var(--paper); border:1px solid var(--line); background:#0e130e; }
+    .semantic-grid select:focus,.semantic-grid input:focus { outline:1px solid var(--acid); }
     .editor-foot { display:flex; justify-content:space-between; gap:10px; padding:16px 24px 20px; border-top:1px solid var(--line); background:#151b15; }
     .foot-right { display:flex; gap:8px; }
     .toast { position:fixed; left:50%; bottom:24px; z-index:5; max-width:min(600px,calc(100vw - 32px)); padding:12px 16px; color:var(--ink); background:var(--acid); box-shadow:0 8px 30px rgba(0,0,0,.3); font-size:12px; opacity:0; transform:translate(-50%,12px); pointer-events:none; transition:opacity .2s,transform .2s; }
@@ -157,6 +163,11 @@
         <label class="field-label" for="tagInput">表情关键词</label>
         <p class="tag-help">添加、删除或改名关键词。删除全部关键词只会取消表情关联，原图仍保留在图库中。</p>
         <div class="tag-editor" id="tagEditor"><input class="tag-input" id="tagInput" placeholder="输入关键词后按 Enter" maxlength="40" autocomplete="off"></div>
+        <div class="semantic-grid" aria-label="图片自动识别信息">
+          <label><span>DeepSeek 主题识别（可手动纠正）</span><select id="deepseekTheme"><option value="">尚未识别</option><option value="yes">是 DeepSeek 主题</option><option value="no">不是 DeepSeek 主题</option></select></label>
+          <label><span>画面动作</span><input id="semanticAction" maxlength="24" placeholder="例如：挥手打招呼"></label>
+          <label><span>表达情绪</span><input id="semanticEmotion" maxlength="24" placeholder="例如：开心、期待"></label>
+        </div>
       </div>
       <footer class="editor-foot"><button class="danger-button" id="deleteImage" type="button">删除图片</button><div class="foot-right"><button class="quiet" id="cancelEdit" type="button">取消</button><button class="primary" id="saveTags" type="button">保存更改</button></div></footer>
     </div>
@@ -212,6 +223,8 @@
         const tags = document.createElement('div'); tags.className = 'tag-row';
         if (item.tags.length) for (const text of item.tags.slice(0, 4)) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = text; tags.append(tag); }
         else { const empty = document.createElement('span'); empty.className = 'no-tags'; empty.textContent = '尚未绑定表情关键词'; tags.append(empty); }
+        if (item.semantics?.deepseek && item.semantics.confidence >= .65) { const theme = document.createElement('span'); theme.className = 'tag theme-tag'; theme.textContent = 'DeepSeek'; tags.prepend(theme); }
+        if (item.semantics?.action) { const action = document.createElement('span'); action.className = 'tag'; action.textContent = `动作：${item.semantics.action}`; tags.append(action); }
         if (item.tags.length > 4) { const extra = document.createElement('span'); extra.className = 'no-tags'; extra.textContent = `+${item.tags.length - 4}`; tags.append(extra); }
         const actions = document.createElement('div'); actions.className = 'card-actions';
         const size = document.createElement('span'); size.className = 'size'; size.textContent = bytes(item.bytes);
@@ -262,7 +275,11 @@
         state.selected = item; state.tags = [...item.tags];
         $('editorId').textContent = `${item.day} / ${item.file}`;
         $('previewImage').src = mediaUrl(item); $('metaDay').textContent = item.day; $('metaSize').textContent = bytes(item.bytes);
-        $('tagInput').value = ''; renderTags(); dialog.showModal();
+        $('tagInput').value = '';
+        $('deepseekTheme').value = item.semantics ? (item.semantics.deepseek ? 'yes' : 'no') : '';
+        $('semanticAction').value = item.semantics?.action || '';
+        $('semanticEmotion').value = item.semantics?.emotion || '';
+        renderTags(); dialog.showModal();
       }
       function addTag() {
         const input = $('tagInput'); const tag = input.value.trim(); if (!tag) return;
@@ -276,8 +293,15 @@
       $('saveTags').addEventListener('click', async () => {
         if (!state.selected) return; const button = $('saveTags'); button.disabled = true;
         try {
-          await api(`/api/images/${encodeURIComponent(state.selected.day)}/${encodeURIComponent(state.selected.file)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tags: state.tags }) });
-          dialog.close(); toast('图片关键词已保存'); await load();
+          const theme = $('deepseekTheme').value;
+          const action = $('semanticAction').value.trim(), emotion = $('semanticEmotion').value.trim();
+          const original = state.selected.semantics;
+          const oldTheme = original ? (original.deepseek ? 'yes' : 'no') : '';
+          const changed = theme !== oldTheme || action !== (original?.action || '') || emotion !== (original?.emotion || '');
+          if (changed && !theme) throw new Error('请先选择是否属于 DeepSeek 主题');
+          const semantics = changed ? { deepseek: theme === 'yes', action, emotion } : null;
+          await api(`/api/images/${encodeURIComponent(state.selected.day)}/${encodeURIComponent(state.selected.file)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tags: state.tags, semantics }) });
+          dialog.close(); toast('图片关键词和识别信息已保存'); await load();
         } catch (error) { toast(error.message, true); }
         finally { button.disabled = false; }
       });

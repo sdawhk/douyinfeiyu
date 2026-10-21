@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readSettingsDocument, saveSettingsDocument } from './bot-settings.mjs';
+import { readStickerSemantics, setStickerSemantics } from './sticker-semantics.mjs';
 import { modelStatus, modelCatalog, testModel, saveModelPolicy } from './model-management.mjs';
 
 const HOST = '127.0.0.1';
@@ -60,6 +61,7 @@ function writeIndexAtomic(index) {
 function archiveFiles() {
   if (!existsSync(IMAGE_ROOT)) return { rows: [], index: readIndex() };
   const index = readIndex();
+  const semantics = readStickerSemantics();
   const tagsByImage = new Map();
   for (const [tag, record] of Object.entries(index)) {
     if (!record || typeof record.ref !== 'string' || !IMAGE_NAME.test(record.ref)) continue;
@@ -83,7 +85,8 @@ function archiveFiles() {
         file: entry.name,
         bytes: stat.size,
         modified: stat.mtime.toISOString(),
-        tags: tagsByImage.get(`${folder.name}/${entry.name}`) || []
+        tags: tagsByImage.get(`${folder.name}/${entry.name}`) || [],
+        semantics: semantics[entry.name] || null
       });
     }
   }
@@ -316,7 +319,7 @@ async function handle(req, res) {
       const day = url.searchParams.get('day') || '';
       const sort = url.searchParams.get('sort') || 'newest';
       let filtered = rows.filter((row) => (!day || row.day === day)
-        && (!q || `${row.file} ${row.day} ${row.tags.join(' ')}`.toLocaleLowerCase('zh-CN').includes(q)));
+        && (!q || `${row.file} ${row.day} ${row.tags.join(' ')} ${row.semantics?.deepseek ? 'DeepSeek 小鲸鱼' : ''} ${row.semantics?.action || ''} ${row.semantics?.emotion || ''}`.toLocaleLowerCase('zh-CN').includes(q)));
       if (sort === 'largest') filtered.sort((a, b) => b.bytes - a.bytes || b.day.localeCompare(a.day));
       const total = filtered.length;
       const pageSize = Math.max(1, Math.min(PAGE_SIZE_MAX, Number(url.searchParams.get('limit')) || 48));
@@ -372,6 +375,12 @@ async function handle(req, res) {
     catch (error) { return json(res, error.status || 400, { error: error.message }); }
     const tags = validTags(body.tags);
     if (!tags) return json(res, 400, { error: '关键词需为文本，且每个不超过 40 个字符' });
+    const classification = body.semantics;
+    if (classification && (typeof classification.deepseek !== 'boolean'
+      || typeof classification.action !== 'string' || typeof classification.emotion !== 'string'
+      || classification.action.length > 24 || classification.emotion.length > 24)) {
+      return json(res, 400, { error: '主题和动作信息格式无效' });
+    }
 
     try {
       return await serialMutation(() => {
@@ -388,7 +397,11 @@ async function handle(req, res) {
         const bytes = statSync(target).size;
         for (const tag of tags) index[tag] = { ref: file, day, mime, bytes, at: new Date().toISOString() };
         writeIndexAtomic(index);
-        return json(res, 200, { ok: true, tags });
+        if (classification) {
+          const previous = readStickerSemantics()[file] || {};
+          setStickerSemantics(file, { ...previous, ...classification, confidence: 1, overridden: true });
+        }
+        return json(res, 200, { ok: true, tags, semantics: classification || null });
       });
     } catch (error) {
       return json(res, 500, { error: error.message || '保存图片关键词失败' });

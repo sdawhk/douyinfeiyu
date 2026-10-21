@@ -20,11 +20,14 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
   try {
     const before = readSettingsDocument(file);
     assert.deepEqual(before.groups, ['839367702']);
+    assert.equal(before.settings.pokeInteraction.pokeBack, true);
     assert.equal(JSON.stringify(before).includes('private-token'), false);
     const next = structuredClone(before.settings);
     next.groupReplyCooldownMs = 12_000;
     next.groupInterjectionDisabled = ['839367702'];
     next.dailyQzone.minIntervalMs = 7_200_000;
+    next.stickerCooldown.privateMs = 60_000;
+    next.stickerCooldown.privateRequestMs = 0;
     next.pokeInteraction.pokeBack = true;
     next.pokeInteraction.replies = '戳到啦\n在呢';
     const after = saveSettingsDocument(before.version, next, file);
@@ -33,11 +36,14 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.equal(saved.snowluma.accessToken, 'private-token');
     assert.equal(saved.dailyQzone.ownerQQ, '1668389572');
     assert.equal(saved.dailyQzone.minIntervalMs, 7_200_000);
+    assert.equal(saved.stickerCooldown.privateMs, 60_000);
+    assert.equal(saved.stickerCooldown.privateRequestMs, 0);
     assert.deepEqual(saved.groupInterjectionDisabled, ['839367702']);
     assert.equal(saved.pokeInteraction.pokeBack, true);
     assert.equal(saved.pokeInteraction.replies, '戳到啦\n在呢');
     assert.throws(() => saveSettingsDocument(before.version, next, file), { status: 409 });
     assert.throws(() => validateSettings({ ...next, groupReplyCooldownMs: -1 }), { status: 400 });
+    assert.throws(() => validateSettings({ ...next, stickerCooldown: { ...next.stickerCooldown, privateMs: -1 } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, pokeInteraction: { ...next.pokeInteraction, replies: '' } }), { status: 400 });
   } finally {
     unlinkSync(file);

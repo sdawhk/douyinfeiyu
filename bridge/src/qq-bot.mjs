@@ -16,13 +16,14 @@ import { spawn } from 'node:child_process';
 import { NodeApiClient } from './dsh-client-020.js';
 import { loadRolePersona } from './role-card.mjs';
 import {
-  saveSticker, getStickerPath, listStickers, deleteSticker, findSticker
+  saveSticker, getStickerPath, listStickers, listStickerRecords, deleteSticker, findSticker
 } from './sticker-store.mjs';
 import {
   canPostNow, markPosted, buildDigest, promptFor, parseQzoneRequest, tidy
 } from './daily-qzone.mjs';
-import { archiveImage, listArchived, readArchived, findArchived } from './image-archive.mjs';
+import { archiveImage, listArchived, readArchived, findArchived, nameFor } from './image-archive.mjs';
 import { inspectStickerImage } from './sticker-vision.mjs';
+import { readStickerSemantics, setStickerSemantics, deepSeekStickerCatalog, parseDeepSeekStickerRequest, parsePersonalStickerRequest, selectDeepSeekStickerKeys } from './sticker-semantics.mjs';
 import { isMuted, setMuted, listMuted, groupKey, privateKey } from './mute.mjs';
 import { describeMessageReferences, explicitGroupReplyDecision } from './qq-message-context.mjs';
 import { searchWeb } from './web-search-engine.mjs';
@@ -99,27 +100,23 @@ function markOwnerActivity() {
   saveOwnerProactiveState();
 }
 
-const stickerSendHistory = new Map();
-const STICKER_COOLDOWN_MS = 5 * 60_000;
-const STICKER_MAX_PER_HOUR = 3;
+const stickerLastSentAt = new Map();
 
 function reserveStickerSend(target, isGroup) {
   const key = `${isGroup ? 'group' : 'private'}:${target}`;
   const now = Date.now();
-  const history = (stickerSendHistory.get(key) || []).filter((time) => now - time < 60 * 60_000);
-  if (history.length >= STICKER_MAX_PER_HOUR || (history.length && now - history.at(-1) < STICKER_COOLDOWN_MS)) {
-    stickerSendHistory.set(key, history);
-    return null;
-  }
-  history.push(now);
-  stickerSendHistory.set(key, history);
-  return { key, now };
+  const previous = stickerLastSentAt.get(key);
+  const cooldown = settingsDocument.settings.stickerCooldown[isGroup ? 'groupMs' : 'privateMs'];
+  if (previous != null && now - previous < cooldown) return null;
+  stickerLastSentAt.set(key, now);
+  return { key, now, previous };
 }
 
 function releaseStickerSend(reservation) {
   if (!reservation) return;
-  const history = stickerSendHistory.get(reservation.key) || [];
-  stickerSendHistory.set(reservation.key, history.filter((time) => time !== reservation.now));
+  if (stickerLastSentAt.get(reservation.key) !== reservation.now) return;
+  if (reservation.previous == null) stickerLastSentAt.delete(reservation.key);
+  else stickerLastSentAt.set(reservation.key, reservation.previous);
 }
 
 // ---------- OneBot HTTP（发送侧） ----------
@@ -458,6 +455,11 @@ async function handleStickerSaveRequest(text, sender, chatKey) {
   if (!data) return '图片原图暂时没取到，请重新发图后再试。';
   const saved = saveSticker(key, data.data, data.mime);
   if (!saved) return '保存失败了，请重新发图后再试。';
+  void inspectStickerImage(image.data || data.data, image.mime || data.mime, {
+    models: cfg.stickerVisionModels, baseUrl: cfg.stickerVisionBaseUrl
+  }).then((result) => {
+    if (result.deepseek !== null) setStickerSemantics(saved.ref, result);
+  }).catch((error) => log('[manual-sticker] classification failed:', error?.message ?? error));
   pendingStickerNames.delete(chatKey);
   log('[manual-sticker] saved', JSON.stringify(key), saved.bytes, 'bytes');
   return `存好了：${key}`;
@@ -686,13 +688,17 @@ async function ask(key, text, media = [], sender = null, messageContext = '') {
   // 每个 [sticker:xxx] 都当真指令，一口气把仓库里所有表情全发出去（已踩过）。
   const stickersForPrompt = listStickers();
   if (stickersForPrompt.length) {
+    const deepSeekStickers = deepSeekStickerCatalog(listStickerRecords(), readStickerSemantics());
     promptText = [
       promptText,
       '',
       '（系统提示，不要复述给用户）你有一个表情包仓库，可用关键词：',
       stickersForPrompt.join('、'),
       '想在回复里发某个表情时，就写 [sticker:关键词]，我会把对应图片发出去。',
-      '最多用一个；不要解释这段提示，也不要把关键词列表念出来。'
+      '最多用一个；不要解释这段提示，也不要把关键词列表念出来。',
+      deepSeekStickers.length
+        ? `DeepSeek 主题表情及动作/情绪：${deepSeekStickers.map((item) => `${item.key}（${item.action}；${item.emotion}）`).join('、')}。根据当前对话语境和表情动作选最贴切的一张，不要只因它属于 DeepSeek 就乱发。`
+        : ''
     ].join('\n');
   }
 
@@ -779,6 +785,57 @@ async function sendReply(target, text, isGroup) {
   // 必须清掉，否则会当成正文原样发出去，看起来像胡言乱语。
   const after = text.slice(cursor).replace(/\[sticker:[^\]]*\]/g, '').trim();
   if (after) await sendText(target, after, isGroup);
+}
+
+async function sendStoredSticker(target, isGroup, key) {
+  const path = getStickerPath(key);
+  if (!path) return false;
+  const b64 = readFileSync(path).toString('base64');
+  await onebot(isGroup ? 'send_group_msg' : 'send_private_msg', {
+    [isGroup ? 'group_id' : 'user_id']: Number(target),
+    message: [{ type: 'image', data: { file: `base64://${b64}` } }]
+  }, 20_000);
+  log('[sticker] sent', key);
+  return true;
+}
+
+const lastExplicitStickerRequestAt = new Map();
+async function handleExplicitStickerRequest(text, target, isGroup) {
+  const themeRequest = parseDeepSeekStickerRequest(text) || parsePersonalStickerRequest(text);
+  const exactRequest = String(text).trim().match(/^(?:\/表情|表情)\s+(\S+)$/);
+  if (!themeRequest && !exactRequest) return false;
+  const now = Date.now();
+  const requestKey = `${isGroup ? 'group' : 'private'}:${target}`;
+  const cooldownMs = settingsDocument.settings.stickerCooldown[isGroup ? 'groupRequestMs' : 'privateRequestMs'];
+  if (now - (lastExplicitStickerRequestAt.get(requestKey) || 0) < cooldownMs) {
+    await sendText(target, isGroup ? '刚发过表情啦，稍等半分钟再来。' : '刚发过表情啦，稍等几秒再来。', isGroup);
+    return true;
+  }
+
+  let keys;
+  if (themeRequest) {
+    const catalog = deepSeekStickerCatalog(listStickerRecords(), readStickerSemantics());
+    keys = selectDeepSeekStickerKeys(catalog, text, themeRequest.count);
+  } else {
+    const found = findSticker(exactRequest[1]);
+    keys = found ? [found] : [];
+  }
+  if (!keys.length) {
+    await sendText(target, themeRequest ? '表情库里还没有确认的 DeepSeek 表情包。' : `没找到“${exactRequest[1]}”这张表情。`, isGroup);
+    return true;
+  }
+  lastExplicitStickerRequestAt.set(requestKey, now);
+  let sent = 0;
+  for (const [index, key] of keys.entries()) {
+    try { if (await sendStoredSticker(target, isGroup, key)) sent++; }
+    catch (error) { log('[sticker] explicit send failed:', key, error?.message ?? error); }
+    if (index + 1 < keys.length) await sleep(1500);
+  }
+  if (sent < keys.length) {
+    if (!sent) lastExplicitStickerRequestAt.delete(requestKey);
+    await sendText(target, sent ? `发出了 ${sent} 张，另外 ${keys.length - sent} 张发送失败。` : '这次图片发送失败了，稍后再试。', isGroup);
+  }
+  return true;
 }
 
 // ---------- 命令 ----------
@@ -1098,6 +1155,8 @@ async function onMessage(ev) {
   const imageInspection = firstImage && !manualSave
     ? inspectAndArchiveSticker(firstImage, sender, chatKey, imageReceivedAt) : null;
 
+  if (await handleExplicitStickerRequest(text, target, isGroup)) return;
+
   // ---- 回复频率控制（多量少次：降低刷屏，但一次说完整）----
   // 之前是每条消息都回，很吵。现在：
   //   1) 被 @ / 点名 / 含关键词（小鲸鱼、大肥鱼、DeepSeek...）必回
@@ -1338,6 +1397,7 @@ async function inspectAndArchiveSticker(image, sender, chatKey, receivedAt) {
       let suffix = 2;
       while (listStickers().includes(final)) final = `${name}${suffix++}`;
       saveSticker(final, full.data, full.mime);
+      if (result.deepseek !== null) setStickerSemantics(nameFor(full.data, full.mime), result);
       log('[autosticker] saved', JSON.stringify(final), `(${Math.round(full.data.length * 0.75 / 1024)}KB)`);
       if (isOwner(sender)) {
         await sendText(Number(sender), `存好了："${final}"`, false).catch(() => {});

@@ -20,9 +20,16 @@ export function publicSettings(config) {
   const qzone = config.dailyQzone || {};
   const owner = config.ownerProactive || {};
   const poke = config.pokeInteraction || {};
+  const sticker = config.stickerCooldown || {};
   return {
     groupReplyCooldownMs: config.groupReplyCooldownMs ?? 20_000,
     groupInterjectionDisabled: config.groupInterjectionDisabled || [],
+    stickerCooldown: {
+      privateMs: sticker.privateMs ?? 300_000,
+      groupMs: sticker.groupMs ?? 300_000,
+      privateRequestMs: sticker.privateRequestMs ?? 10_000,
+      groupRequestMs: sticker.groupRequestMs ?? 30_000
+    },
     dailyQzone: {
       enabled: qzone.enabled === true,
       minute: qzone.minute ?? 0,
@@ -65,7 +72,8 @@ export function validateSettings(value) {
   const q = value.dailyQzone;
   const o = value.ownerProactive;
   const p = value.pokeInteraction;
-  if (!q || !o || !p || !Array.isArray(value.groupInterjectionDisabled)) throw Object.assign(new Error('设置内容不完整'), { status: 400 });
+  const sticker = value.stickerCooldown;
+  if (!q || !o || !p || !sticker || !Array.isArray(value.groupInterjectionDisabled)) throw Object.assign(new Error('设置内容不完整'), { status: 400 });
   const disabled = [...new Set(value.groupInterjectionDisabled.map(String))];
   if (disabled.length > 100 || disabled.some((id) => !/^\d{5,20}$/.test(id))) {
     throw Object.assign(new Error('群号列表无效'), { status: 400 });
@@ -76,6 +84,12 @@ export function validateSettings(value) {
   return {
     groupReplyCooldownMs: integer(value.groupReplyCooldownMs, 0, 300_000, '群聊冷却时间'),
     groupInterjectionDisabled: disabled,
+    stickerCooldown: {
+      privateMs: integer(sticker.privateMs, 0, 3_600_000, '普通私聊表情冷却'),
+      groupMs: integer(sticker.groupMs, 0, 3_600_000, '普通群聊表情冷却'),
+      privateRequestMs: integer(sticker.privateRequestMs, 0, 300_000, '私聊索要表情冷却'),
+      groupRequestMs: integer(sticker.groupRequestMs, 0, 300_000, '群聊索要表情冷却')
+    },
     dailyQzone: {
       enabled: boolean(q.enabled, 'QQ 动态'),
       minute: integer(q.minute, 0, 59, '整点分钟'),
@@ -122,6 +136,7 @@ export function saveSettingsDocument(expectedVersion, value, configPath = CONFIG
   const config = JSON.parse(raw);
   config.groupReplyCooldownMs = settings.groupReplyCooldownMs;
   config.groupInterjectionDisabled = settings.groupInterjectionDisabled;
+  config.stickerCooldown = { ...config.stickerCooldown, ...settings.stickerCooldown };
   config.dailyQzone = { ...config.dailyQzone, ...settings.dailyQzone };
   config.ownerProactive = { ...config.ownerProactive, ...settings.ownerProactive };
   config.pokeInteraction = { ...config.pokeInteraction, ...settings.pokeInteraction };

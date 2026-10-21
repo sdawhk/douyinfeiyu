@@ -34,6 +34,12 @@
     "endHour": 22
   },
   "groupReplyCooldownMs": 20000,
+  "stickerCooldown": {
+    "privateMs": 300000,
+    "groupMs": 300000,
+    "privateRequestMs": 10000,
+    "groupRequestMs": 30000
+  },
   "groupInterjectionDisabled": [],
   "pokeInteraction": {
     "enabled": true,

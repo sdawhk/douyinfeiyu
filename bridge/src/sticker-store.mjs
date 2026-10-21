@@ -114,6 +114,10 @@ export function listStickers() {
   return Object.keys(readIndex()).sort();
 }
 
+export function listStickerRecords() {
+  return readIndex();
+}
+
 export function deleteSticker(key) {
   const idx = readIndex();
   if (!idx[key]) return false;
