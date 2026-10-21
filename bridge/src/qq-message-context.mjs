@@ -86,6 +86,17 @@ export function describeMessageReferences(message, botSelf, quotedMessage = null
   };
 }
 
+export function groupTurnPrompt({ groupId, botSelf, senderId, senderName, text, isOwner = false }) {
+  const displayName = String(senderName ?? '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 80);
+  const speaker = displayName ? `${JSON.stringify(displayName)}（QQ ${senderId}）` : `QQ ${senderId}`;
+  return [
+    '【QQ 群聊本轮发言归属，由桥接标记】',
+    `群号：${groupId}；机器人 QQ：${botSelf}；发言人：${speaker}${isOwner ? '，管理员' : '，群友'}。`,
+    '同一个群会有不同人轮流发言。原话中的“我”和自称、身份、亲属称谓属于本轮发言人；不要当作机器人自己的身份或称呼。群友之间说的“你”也不自动指机器人，须结合 QQ @、引用对象和语义判断。',
+    `【本轮发言人原话】${JSON.stringify(String(text ?? ''))}`
+  ].join('\n');
+}
+
 export function explicitGroupReplyDecision({ botSelf, text, references = {}, isOwner = false, keywords = [] }) {
   if (references.hasBotMention) return true;
   if (references.replyId && references.quotedUserId === String(botSelf)) return true;

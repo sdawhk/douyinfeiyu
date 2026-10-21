@@ -25,7 +25,7 @@ import { archiveImage, listArchived, readArchived, findArchived, nameFor } from 
 import { inspectStickerImage } from './sticker-vision.mjs';
 import { readStickerSemantics, setStickerSemantics, deepSeekStickerCatalog, parseDeepSeekStickerRequest, parsePersonalStickerRequest, selectDeepSeekStickerKeys } from './sticker-semantics.mjs';
 import { isMuted, setMuted, listMuted, groupKey, privateKey } from './mute.mjs';
-import { describeMessageReferences, explicitGroupReplyDecision } from './qq-message-context.mjs';
+import { describeMessageReferences, explicitGroupReplyDecision, groupTurnPrompt } from './qq-message-context.mjs';
 import { searchWeb } from './web-search-engine.mjs';
 import { readSettingsDocument } from './bot-settings.mjs';
 import { isOwnerImageReplyRequest, resolveGroupMention, latestOwnerImage, recentGroupSummary } from './owner-group-request.mjs';
@@ -657,7 +657,7 @@ async function freshSearchContext(text, key) {
 }
 
 /** 发一条消息给 DSH，等它回复并取回文本。media 为图片/表情附件。 */
-async function ask(key, text, media = [], sender = null, messageContext = '') {
+async function ask(key, text, media = [], sender = null, messageContext = '', groupSpeaker = null) {
   const liveSearch = await freshSearchContext(text, key);
   if (liveSearch?.directReply) {
     log('[web-search] sent search digest directly from retrieved results');
@@ -681,7 +681,9 @@ async function ask(key, text, media = [], sender = null, messageContext = '') {
   if (firstPersonaTurn) promptText += '---\n以下是你要回应的消息：\n';
   if (messageContext) promptText += `${messageContext}\n\n`;
   if (liveSearch?.context) promptText += `${liveSearch.context}\n\n`;
-  promptText += ownerTurn ? `【管理员】${text}` : text;
+  promptText += groupSpeaker
+    ? groupTurnPrompt({ ...groupSpeaker, text, isOwner: ownerTurn })
+    : ownerTurn ? `【管理员】${text}` : text;
 
   // 把表情库清单作为【系统指令】附加到角色卡前缀，而不是混进用户消息。
   // 之前挂在用户消息里，模型会把整段说明原样复述出来，而且解析器会把清单里的
@@ -1104,6 +1106,12 @@ async function onMessage(ev) {
     }
   }
   const messageReferences = describeMessageReferences(ev.message, currentBotQQ, quotedMessage, quoteLookupFailed);
+  const groupSpeaker = isGroup ? {
+    groupId: target,
+    botSelf: currentBotQQ,
+    senderId: sender,
+    senderName: ev.sender?.card || ev.sender?.nickname || ''
+  } : null;
   const promptMessage = text || (messageReferences.mentions.length
     ? '（只发送了 @ 提及）'
     : messageReferences.replyId ? '（只引用了这条消息）' : '[图片]');
@@ -1225,7 +1233,7 @@ async function onMessage(ev) {
         ? recentImageFollowupContext(recentPrivateImages.get(chatKey), text) : '';
       const context = [messageReferences.context, imageContext, followupImageContext].filter(Boolean).join('\n');
       let reply = await ask(`${isGroup ? 'g' : 'p'}${target}`, promptMessage,
-        media.filter((item) => item.type !== 'image'), sender, context);
+        media.filter((item) => item.type !== 'image'), sender, context, groupSpeaker);
       if (isGroup && Date.now() - imageReceivedAt > 45_000) {
         log('[skip] stale completed group turn', target);
         return;
