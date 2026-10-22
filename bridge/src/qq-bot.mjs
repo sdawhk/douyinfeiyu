@@ -36,11 +36,12 @@ import { parseStickerSaveIntent, isStickerName } from './sticker-save-intent.mjs
 const CFG_PATH = new URL('../config.json', import.meta.url);
 const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
 let settingsDocument = readSettingsDocument();
-const SETTINGS_HEARTBEAT = new URL('../state/settings-heartbeat.json', import.meta.url);
+const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+const SETTINGS_HEARTBEAT = 'D:\\deepseek\\state\\settings-heartbeat.json';
 function refreshSettings() {
   try {
     settingsDocument = readSettingsDocument();
-    mkdirSync(new URL('../state/', import.meta.url), { recursive: true });
+    mkdirSync('D:\\deepseek\\state', { recursive: true });
     writeFileSync(SETTINGS_HEARTBEAT, JSON.stringify({ version: settingsDocument.version, at: Date.now() }));
   } catch (error) { log('[settings] refresh failed:', error.message); }
 }
@@ -68,8 +69,6 @@ const OWNER_DM_TARGET = [...OWNERS].find((uid) => uid !== BOT_SELF && (!ALLOW_PR
 const OWNER_PROACTIVE_STATE_PATH = new URL('../state/owner-proactive.json', import.meta.url);
 const OWNER_PROACTIVE_STATE_DIR = new URL('../state/', import.meta.url);
 const SEARCH_RETRY_STATE_FILE = 'D:\\deepseek\\state\\search-retry.json';
-
-const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 function loadOwnerProactiveState() {
   try {
