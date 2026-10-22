@@ -19,12 +19,12 @@ import {
   saveSticker, getStickerPath, listStickers, listStickerRecords, deleteSticker, findSticker
 } from './sticker-store.mjs';
 import {
-  canPostNow, markPosted, buildDigest, promptFor, parseQzoneRequest, tidy
+  canPostNow, markPosted, buildDigest, promptFor, parseQzoneRequest, tidy, getRecentPosts, repeatsRecentTopic
 } from './daily-qzone.mjs';
 import { archiveImage, listArchived, readArchived, findArchived, nameFor } from './image-archive.mjs';
 import { inspectStickerImage } from './sticker-vision.mjs';
 import { readStickerSemantics, setStickerSemantics, deepSeekStickerCatalog, parseDeepSeekStickerRequest, parsePersonalStickerRequest, selectDeepSeekStickerKeys } from './sticker-semantics.mjs';
-import { isMuted, setMuted, listMuted, groupKey, privateKey } from './mute.mjs';
+import { isMuted, setMuted, listMuted, groupKey, privateKey, allGroupsKey } from './mute.mjs';
 import { describeMessageReferences, explicitGroupReplyDecision, groupTurnPrompt } from './qq-message-context.mjs';
 import { searchWeb } from './web-search-engine.mjs';
 import { readSettingsDocument } from './bot-settings.mjs';
@@ -471,6 +471,31 @@ const sessions = new Map(); // key -> { sessionId, lastTurn }
 const chatTurnQueues = new Map();
 const imageReplyAt = new Map();
 const ownerFailureNoticeAt = new Map();
+const EXPLICIT_FOLLOWUP_RE = /刚才|前面|之前|上次|继续|展开|再说|具体说|然后呢|后来呢|接着呢|为什么|怎么想|你提到/i;
+const RECENT_REPLY_STATE_FILE = 'D:\\deepseek\\state\\recent-chat-replies.json';
+
+function loadRecentReplies(key) {
+  try {
+    const state = JSON.parse(readFileSync(RECENT_REPLY_STATE_FILE, 'utf8'));
+    const record = state?.[key];
+    return Array.isArray(record?.replies) ? record.replies.filter((item) => typeof item === 'string').slice(-8) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentReplies(key, replies) {
+  try {
+    let state = {};
+    try { state = JSON.parse(readFileSync(RECENT_REPLY_STATE_FILE, 'utf8')); } catch {}
+    state[key] = { at: Date.now(), replies: replies.slice(-8) };
+    const entries = Object.entries(state).sort((a, b) => Number(b[1]?.at || 0) - Number(a[1]?.at || 0)).slice(0, 200);
+    mkdirSync('D:\\deepseek\\state', { recursive: true });
+    writeFileSync(RECENT_REPLY_STATE_FILE, JSON.stringify(Object.fromEntries(entries), null, 2), 'utf8');
+  } catch (error) {
+    log('[reply] recent-history save failed:', error.message);
+  }
+}
 
 function queueChatTurn(key, work) {
   const previous = chatTurnQueues.get(key) || Promise.resolve();
@@ -530,6 +555,7 @@ async function sessionFor(key) {
     request: { cwd: CWD, agentPreset: cfg.agentPreset || undefined }
   }));
   const rec = { sessionId: created.sessionId, lastTurn: 0, personaSent: false };
+  rec.recentReplies = loadRecentReplies(key);
   sessions.set(key, rec);
   log('[dsh] session created for', key, '->', rec.sessionId, '| preset =', created.agentPreset ?? cfg.agentPreset ?? 'default');
   return rec;
@@ -680,6 +706,9 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
   }
   if (firstPersonaTurn) promptText += '---\n以下是你要回应的消息：\n';
   if (messageContext) promptText += `${messageContext}\n\n`;
+  if (rec.recentReplies.length) {
+    promptText += `【本会话近期已经回复】\n${rec.recentReplies.slice(-5).map((reply) => `- ${reply}`).join('\n')}\n请接住当前话题，但不要重复这些回复或重新开启已经聊过的旧话题；除非用户明确追问。\n\n`;
+  }
   if (liveSearch?.context) promptText += `${liveSearch.context}\n\n`;
   promptText += groupSpeaker
     ? groupTurnPrompt({ ...groupSpeaker, text, isOwner: ownerTurn })
@@ -722,18 +751,41 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
 
   // 轮询直到出现新的 turn（实测 projections 可稳定取到 response）
   const deadline = Date.now() + (cfg.questionTimeoutMs ?? 120_000);
-  while (Date.now() < deadline) {
-    await sleep(1000);
-    const proj = await withDshRecovery(() => dsh.sessions.projections({ request: { sessionId: rec.sessionId } }));
-    const outline = proj?.values?.turnOutline ?? [];
-    for (const t of outline) {
-      if (t.turn > rec.lastTurn && t.response) {
-        rec.lastTurn = t.turn;
-        return t.response;
+  const waitForNextTurn = async () => {
+    while (Date.now() < deadline) {
+      await sleep(1000);
+      const proj = await withDshRecovery(() => dsh.sessions.projections({ request: { sessionId: rec.sessionId } }));
+      const outline = proj?.values?.turnOutline ?? [];
+      for (const turn of outline) {
+        if (turn.turn > rec.lastTurn && turn.response) {
+          rec.lastTurn = turn.turn;
+          return turn.response;
+        }
       }
     }
+    throw new Error('dsh: timeout waiting for reply');
+  };
+  let response = await waitForNextTurn();
+  if (!EXPLICIT_FOLLOWUP_RE.test(String(text)) && repeatsRecentTopic(response, rec.recentReplies)) {
+    log('[reply] repeated recent topic; asking for a fresh angle', key);
+    await withDshRecovery(() => dsh.sessions.prompt({
+      request: {
+        sessionId: rec.sessionId,
+        requestId: `qq-dedupe-${Date.now()}`,
+        mode: 'queue',
+        content: [{ type: 'text', text: '你刚才的回复和本会话近期内容重复了。请针对当前消息换一个具体角度，补充新信息或提出自然追问；不要复述旧话题，直接输出新的回复。' }]
+      }
+    }));
+    response = await waitForNextTurn();
+    if (repeatsRecentTopic(response, rec.recentReplies)) {
+      log('[reply] repeated after retry; suppressing duplicate', key);
+      return '[SILENT]';
+    }
   }
-  throw new Error('dsh: timeout waiting for reply');
+  rec.recentReplies.push(String(response).slice(0, 300));
+  if (rec.recentReplies.length > 8) rec.recentReplies.shift();
+  saveRecentReplies(key, rec.recentReplies);
+  return response;
 }
 
 /**
@@ -936,13 +988,21 @@ async function handleCommand(text, sender, isGroup, target) {
   // ---- 禁言 ----
   // /闭嘴  在当前群/私聊里让我闭嘴
   if (/^(?:\/闭嘴|\/mute)$/i.test(t)) {
-    setMuted(isGroup ? groupKey(target) : privateKey(sender), true);
-    return '哦。';
+    if (isGroup) setMuted(groupKey(target), true);
+    else {
+      setMuted(privateKey(sender), true);
+      setMuted(allGroupsKey(), true);
+    }
+    return isGroup ? '哦。' : '好，我会在所有群里闭嘴。';
   }
   // /解禁  恢复说话
   if (/^(?:\/解禁|\/unmute|\/开口)$/i.test(t)) {
-    setMuted(isGroup ? groupKey(target) : privateKey(sender), false);
-    return '行吧，那我说了。';
+    if (isGroup) setMuted(groupKey(target), false);
+    else {
+      setMuted(privateKey(sender), false);
+      setMuted(allGroupsKey(), false);
+    }
+    return isGroup ? '行吧，那我说了。' : '好，所有群恢复说话。';
   }
   // /静音状态
   if (/^(?:\/静音状态|\/mutestatus)$/i.test(t)) {
@@ -1127,21 +1187,23 @@ async function onMessage(ev) {
       ))
     : false; // 私聊天然就是对我说的
 
-  // 只有主人能开关，且群里必须 @ 我（避免别人刷屏误触发）
-  if (isOwner(sender) && (atMe || !isGroup)) {
+  // 主人的闭嘴/解禁命令不要求 @；其他群友仍不能改机器人的静音状态。
+  if (isOwner(sender)) {
     const t0 = String(text ?? '').trim();
     // 闭嘴：各种说法都认
     if (/闭嘴|别说话|禁言|不许说话|不要说话|shut\s*up/i.test(t0) && t0.length <= 20) {
       setMuted(chatKey, true);
+      if (!isGroup) setMuted(allGroupsKey(), true);
       log('[mute] muted', chatKey);
-      await sendText(target, '哦。', isGroup).catch(() => {});
+      await sendText(target, isGroup ? '哦。' : '好，我会在所有群里闭嘴。', isGroup).catch(() => {});
       return;
     }
     // 恢复：必须明确说可以讲话
     if (/可以讲话|可以说话|能说话|解除禁言|你可以说了|开口|解禁/i.test(t0) && t0.length <= 20) {
       setMuted(chatKey, false);
+      if (!isGroup) setMuted(allGroupsKey(), false);
       log('[mute] unmuted', chatKey);
-      await sendText(target, '行吧，那我说了。', isGroup).catch(() => {});
+      await sendText(target, isGroup ? '行吧，那我说了。' : '好，所有群恢复说话。', isGroup).catch(() => {});
       return;
     }
   }
@@ -1207,6 +1269,10 @@ async function onMessage(ev) {
       return;
     }
     await queueChatTurn(chatKey, async () => {
+      if (isMuted(chatKey)) {
+        log('[mute] skipped queued turn', chatKey);
+        return;
+      }
       // A busy group can queue turns faster than the model can answer. Old
       // replies refer to a conversation that has already moved on.
       if (isGroup && Date.now() - imageReceivedAt > 45_000) {
@@ -1234,6 +1300,10 @@ async function onMessage(ev) {
       const context = [messageReferences.context, imageContext, followupImageContext].filter(Boolean).join('\n');
       let reply = await ask(`${isGroup ? 'g' : 'p'}${target}`, promptMessage,
         media.filter((item) => item.type !== 'image'), sender, context, groupSpeaker);
+      if (isMuted(chatKey)) {
+        log('[mute] suppressed completed turn', chatKey);
+        return;
+      }
       if (isGroup && Date.now() - imageReceivedAt > 45_000) {
         log('[skip] stale completed group turn', target);
         return;
@@ -1247,6 +1317,10 @@ async function onMessage(ev) {
         if (falselyClaimsImageIsUnavailable(reply)) {
           reply = `我收到并识别了这张图：${inspected?.caption || recentPrivateImages.get(chatKey)?.caption}`;
         }
+      }
+      if (isMuted(chatKey)) {
+        log('[mute] suppressed completed turn', chatKey);
+        return;
       }
       await sendReply(target, reply, isGroup);
       log(`[reply] -> ${target}: ${reply.slice(0, 60)}`);
@@ -1568,7 +1642,7 @@ async function collectQzoneLines() {
     return buildDigest(sources);
 }
 
-async function generateQzoneText(lines, ownerRequest = '') {
+async function generateQzoneText(lines, ownerRequest = '', recentPosts = [], forceNewTopic = false) {
     // 用独立的 DSH 会话改写，避免污染聊天会话的人设上下文
     const rec = await dsh.sessions.create({ request: { cwd: CWD } });
     await dsh.sessions.prompt({
@@ -1576,7 +1650,7 @@ async function generateQzoneText(lines, ownerRequest = '') {
         sessionId: rec.sessionId,
         requestId: `qzone-${Date.now()}`,
         mode: 'queue',
-        content: [{ type: 'text', text: promptFor(lines, '今天主人私聊和群聊中', ownerRequest) }]
+        content: [{ type: 'text', text: promptFor(lines, '今天主人私聊和群聊中', ownerRequest, recentPosts, forceNewTopic) }]
       }
     });
     const raw = await waitForReply(rec.sessionId, 0);
@@ -1590,7 +1664,7 @@ async function publishRequestedQzone(ownerRequest) {
   const sourceLines = lines.length
     ? lines
     : [`主人：刚刚明确让我写一条${ownerRequest}的动态`];
-  const text = await generateQzoneText(sourceLines, ownerRequest);
+  const text = await generateQzoneText(sourceLines, ownerRequest, getRecentPosts());
   const data = await onebot('send_qzone_msg', { content: text, ugc_right: 1 });
   markPosted(data?.tid, text);
   log('[qzone] owner-requested post published | tid=', data?.tid);
@@ -1608,7 +1682,13 @@ async function postDailyQzone() {
       log('[qzone] not enough material today, skip');
       return;
     }
-    const text = await generateQzoneText(lines);
+    const recentPosts = getRecentPosts();
+    let text = await generateQzoneText(lines, '', recentPosts);
+    if (repeatsRecentTopic(text, recentPosts)) {
+      log('[qzone] generated topic repeats a recent post; retrying with a new topic');
+      text = await generateQzoneText(lines, '', recentPosts, true);
+      if (repeatsRecentTopic(text, recentPosts)) throw new Error('generated topic repeats a recent post; skipped');
+    }
 
     const data = await onebot('send_qzone_msg', { content: text, ugc_right: 1 });
     markPosted(data?.tid, text);

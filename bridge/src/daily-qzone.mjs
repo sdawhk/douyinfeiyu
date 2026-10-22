@@ -55,6 +55,54 @@ export function markPosted(tid, text) {
   }, null, 2), 'utf8');
 }
 
+/** 最近一周已发布的动态，用来给新动态避开旧内容和旧话题。 */
+export function getRecentPosts(now = Date.now(), limit = 24) {
+  ensureDir();
+  try {
+    if (!existsSync(STATE)) return [];
+    const j = JSON.parse(readFileSync(STATE, 'utf8'));
+    return (Array.isArray(j?.posts) ? j.posts : [])
+      .filter((post) => {
+        const at = Date.parse(post?.at ?? '');
+        return typeof post?.text === 'string' && Number.isFinite(at)
+          && at <= now && now - at <= 7 * 24 * 60 * 60 * 1000;
+      })
+      .slice(-Math.max(1, limit));
+  } catch {
+    return [];
+  }
+}
+
+const topicSegmenter = new Intl.Segmenter('zh-CN', { granularity: 'word' });
+const topicStopWords = new Set([
+  '今天', '昨天', '刚刚', '最近', '主人', '群友', '大家', '有人', '一个', '这个', '那个',
+  '然后', '结果', '突然', '感觉', '觉得', '真的', '有点', '还是', '因为', '所以', '但是',
+  '自己', '我们', '你们', '他们', '就是', '不是', '没有', '可以', '一下', '什么', '怎么',
+  '哈哈', '哈哈哈', '小鲸鱼', '机器人'
+]);
+
+function topicTokens(text) {
+  const tokens = new Set();
+  for (const part of topicSegmenter.segment(String(text ?? '').toLocaleLowerCase())) {
+    const token = part.segment.trim();
+    if (part.isWordLike && [...token].length > 1 && !topicStopWords.has(token)) tokens.add(token);
+  }
+  return tokens;
+}
+
+/** 识别明显在复述同一件事的动态，避免仅换说法就重复发布。 */
+export function repeatsRecentTopic(text, recentPosts = []) {
+  const candidate = topicTokens(text);
+  if (candidate.size < 2) return false;
+  return recentPosts.some((post) => {
+    const previous = topicTokens(typeof post === 'string' ? post : post?.text);
+    if (previous.size < 2) return false;
+    let overlap = 0;
+    for (const token of candidate) if (previous.has(token)) overlap++;
+    return overlap >= 2 && overlap / Math.min(candidate.size, previous.size) >= 0.5;
+  });
+}
+
 /**
  * 屏蔽明显不适合公开发的内容。
  * 说明：这是关键词级兜底，主要拦隐私/敏感词；真正的内容把关靠 DSH 的提示词。
@@ -100,11 +148,12 @@ export function buildDigest(sources, { startTime, endTime } = {}) {
 }
 
 /** 给 DSH 的改写指令。 */
-export function promptFor(lines, period = '今天主人私聊和群聊中', ownerRequest = '') {
+export function promptFor(lines, period = '今天主人私聊和群聊中', ownerRequest = '', recentPosts = [], forceNewTopic = false) {
   return [
     `下面是${period}机器人遇到的真实聊天片段。`,
     '请只挑一个具体瞬间或一件小事，从机器人的第一人称写一条自然、有个人感受的 QQ 动态。',
     ...(ownerRequest ? [`主人明确指定的主题：${ownerRequest}。请按这个主题创作并直接发布；这是主人的明确指令，不要改成普通聊天回复，也不要要求主人重复确认。`] : []),
+    ...(forceNewTopic ? ['上一版和近期动态话题重复了。请从聊天片段里改选一件不同的具体事情，不能只换措辞。'] : []),
     '',
     '要求：',
     '- 多条聊天片段只是候选素材，不要把它们全部总结或串成一篇回顾；一条动态只围绕一个素材点',
@@ -114,6 +163,10 @@ export function promptFor(lines, period = '今天主人私聊和群聊中', owne
     '- 不要出现"说说""动态""发一条"这类元描述',
     '- 不要用 Markdown、不要加引号、不要加标题',
     '- 不要出现群名、具体人名、账号、链接、数字ID；群聊素材要匿名转述，不照搬他人原话，也不要泄露个人隐私',
+    ...(recentPosts.length ? [
+      '最近已经发布过的动态如下。避开相同事件、话题和表达，不要只改写这些内容；优先挑完全不同的新素材：',
+      ...recentPosts.slice(-12).map((post) => `- ${typeof post === 'string' ? post : post.text}`)
+    ] : []),
     '- 只输出这一条说说的正文，不要解释',
     '',
     '聊天片段：',

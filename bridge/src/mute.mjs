@@ -28,12 +28,14 @@ function write(j) {
   writeFileSync(FILE, JSON.stringify(j, null, 2), 'utf8');
 }
 
-/** 群的 key；私聊用 privateKey。分开存，可以只禁某个群而不影响私聊。 */
+/** 群的 key；私聊用 privateKey。 */
 export const groupKey = (id) => `g${id}`;
 export const privateKey = (id) => `p${id}`;
+export const allGroupsKey = () => 'g*';
 
 export function isMuted(key) {
-  return read()[key] === true;
+  const state = read();
+  return state[key] === true || (String(key).startsWith('g') && state[allGroupsKey()] === true);
 }
 
 export function setMuted(key, value) {
@@ -44,5 +46,5 @@ export function setMuted(key, value) {
 }
 
 export function listMuted() {
-  return Object.keys(read());
+  return Object.keys(read()).map((key) => key === allGroupsKey() ? '全部群聊' : key);
 }
