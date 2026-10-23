@@ -32,6 +32,7 @@ import { isOwnerImageReplyRequest, resolveGroupMention, latestOwnerImage, recent
 import { recentImageFollowupContext, falselyClaimsImageIsUnavailable } from './recent-image-context.mjs';
 import { normalizePokeNotice, choosePokeReply, registerDirectPoke } from './poke-interaction.mjs';
 import { parseStickerSaveIntent, isStickerName } from './sticker-save-intent.mjs';
+import { todayChanges } from './today-changes.mjs';
 
 const CFG_PATH = new URL('../config.json', import.meta.url);
 const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
@@ -899,7 +900,7 @@ async function handleCommand(text, sender, isGroup, target) {
   //   1) 以 / 开头（/表情 /存表情 ...）
   //   2) 无斜杠的中文短命令（发动态、表情、状态 ...）
   //   3) 中文命令 + 参数（发动态 xxx、/表情 xxx）
-  const bareCmd = /^(?:发动态|发说说|说说|发表情|表情|状态|群列表|帮助|存表情|表情包列表|删表情|图库)(?:\s+(\S+))?$/;
+  const bareCmd = /^(?:发动态|发说说|说说|发表情|表情|状态|群列表|帮助|存表情|表情包列表|删表情|图库|今天加了什么功能|今天更新了什么|今天改了什么|今日更新)(?:\s+(\S+))?$/;
   if (!t.startsWith('/') && !bareCmd.test(t) && naturalQzone === null) {
     return null; // 不是命令
   }
@@ -911,6 +912,10 @@ async function handleCommand(text, sender, isGroup, target) {
   if (naturalQzone !== null) {
     const data = await publishRequestedQzone(naturalQzone);
     return `已经按主人吩咐发布 QQ 动态：tid=${data?.tid ?? ''}`;
+  }
+
+  if (/^(?:\/today-changes|今天加了什么功能[？?。！!]*|今天更新了什么[？?。！!]*|今天改了什么[？?。！!]*|今日更新[？?。！!]*)$/i.test(t)) {
+    return todayChanges();
   }
 
   // 发动态： /qzone <内容>  或  "发动态 <内容>"
@@ -1072,6 +1077,7 @@ async function handleCommand(text, sender, isGroup, target) {
       '  /闭嘴 或 "闭嘴"   —— 在这个群/私聊里闭嘴',
       '  /解禁 或 "可以讲话" —— 恢复说话',
       '  /静音状态          —— 看哪些会话被禁言了',
+      '  今天加了什么功能 —— 查看今天的提交和工作区改动',
       '',
       '  /help          —— 本帮助',
       '',
