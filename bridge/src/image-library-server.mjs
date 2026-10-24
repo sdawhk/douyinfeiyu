@@ -5,7 +5,8 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readSettingsDocument, saveSettingsDocument } from './bot-settings.mjs';
 import { readStickerSemantics, setStickerSemantics } from './sticker-semantics.mjs';
-import { modelStatus, modelCatalog, testModel, saveModelPolicy } from './model-management.mjs';
+import { readImageAnalyses } from './image-analysis-store.mjs';
+import { modelStatus, modelCatalog, testModel, saveModelPolicy, syncPromotedModel } from './model-management.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.IMAGE_LIBRARY_PORT || 18902);
@@ -62,6 +63,7 @@ function archiveFiles() {
   if (!existsSync(IMAGE_ROOT)) return { rows: [], index: readIndex() };
   const index = readIndex();
   const semantics = readStickerSemantics();
+  const analyses = readImageAnalyses();
   const tagsByImage = new Map();
   for (const [tag, record] of Object.entries(index)) {
     if (!record || typeof record.ref !== 'string' || !IMAGE_NAME.test(record.ref)) continue;
@@ -70,6 +72,15 @@ function archiveFiles() {
     const tags = tagsByImage.get(key) || [];
     tags.push(tag);
     tagsByImage.set(key, tags);
+  }
+  const statusByImage = new Map();
+  for (const record of Object.values(index)) {
+    if (!record || typeof record.ref !== 'string' || !IMAGE_NAME.test(record.ref)) continue;
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(record.day || '') ? record.day : '';
+    const key = `${day}/${record.ref}`;
+    const status = ['pending', 'rejected'].includes(record.status) ? record.status : 'approved';
+    const current = statusByImage.get(key);
+    if (!current || status === 'pending' || (status === 'rejected' && current === 'approved')) statusByImage.set(key, status);
   }
 
   const rows = [];
@@ -86,7 +97,9 @@ function archiveFiles() {
         bytes: stat.size,
         modified: stat.mtime.toISOString(),
         tags: tagsByImage.get(`${folder.name}/${entry.name}`) || [],
-        semantics: semantics[entry.name] || null
+        status: statusByImage.get(`${folder.name}/${entry.name}`) || 'archive',
+        semantics: semantics[entry.name] || null,
+        analysis: analyses[entry.name] || null
       });
     }
   }
@@ -171,7 +184,7 @@ function recentLogText(limit = 160_000) {
 function knownGroups(configured, disabled) {
   const ids = new Set([...configured, ...disabled]);
   try {
-    for (const match of recentLogText(2_000_000).matchAll(/\[msg\] group (\d{5,20}) from /g)) ids.add(match[1]);
+    for (const match of recentLogText(2_000_000).matchAll(/\[turn:[^\]]+\] received group target=(\d{5,20}) /g)) ids.add(match[1]);
   } catch { /* first launch may have no log */ }
   return [...ids].sort();
 }
@@ -202,10 +215,22 @@ function settingsStatus(version, settings) {
     const log = recentLogText().split(/\r?\n/);
     for (const line of log.slice(-500)) {
       let event = '';
-      if (/\[qzone\] posted:|\[qzone\] owner-requested post published/.test(line)) event = 'QQ 动态发布成功';
+      const turn = line.match(/\[turn:([^\]]+)\] (received|queued|processing|sent|skipped|failed)\b(?:[^\n]*?reason=([^\s]+))?/);
+      if (turn) {
+        const [, traceId, state, reason] = turn;
+        const stateLabel = ({ received: '收到消息', queued: '进入回复队列', processing: '正在生成回复', sent: '回复已发送', skipped: '本次未回复', failed: '处理失败' })[state];
+        const reasonLabel = ({ muted: '聊天已静音', 'muted-while-queued': '排队期间聊天被静音', 'muted-before-send': '发送前聊天被静音', 'stale-group-turn': '群聊消息已过期', 'superseded-before-image-recovery': '群里有更新消息', 'superseded-before-send': '群里有更新消息', 'group-queue-replaced': '群聊队列合并了较旧消息', 'group-frequency-control': '群聊频率规则跳过', 'image-only-cooldown': '图片消息冷却中', 'not-allowed': '未在允许范围', 'description-unavailable': '图片识别暂不可用' })[reason] || reason;
+        event = `${stateLabel}${reasonLabel ? `：${reasonLabel}` : ''}（${traceId}）`;
+      } else if (/\[qzone\] posted:|\[qzone\] owner-requested post published/.test(line)) event = 'QQ 动态发布成功';
       else if (/\[qzone\] (owner history|group list) fetch failed/.test(line)) event = '聊天记录接口不可用，动态素材读取失败';
       else if (/\[qzone\] not enough material/.test(line)) event = 'QQ 动态：素材不足';
       else if (/\[qzone\] failed:/.test(line)) event = 'QQ 动态执行失败';
+      else if (/\[qzone-social\] (preview like friend=|liked friend=)/.test(line)) event = line.includes('preview') ? '好友动态互动：预览点赞' : '好友动态互动：已点赞';
+      else if (/\[qzone-social\] (preview comment friend=|commented friend=)/.test(line)) event = line.includes('preview') ? '好友动态互动：预览评论' : '好友动态互动：已评论';
+      else if (/\[qzone-social\] (preview reply commenter=|replied commenter=)/.test(line)) event = line.includes('preview') ? '好友动态互动：预览回复评论' : '好友动态互动：已回复评论';
+      else if (/\[qzone-social\] (feed scan|own comment scan) failed/.test(line)) event = '好友动态互动：读取失败';
+      else if (/\[qzone-social\] (like|comment|reply) failed/.test(line)) event = '好友动态互动：执行失败';
+      else if (/\[qzone-social\] baseline established/.test(line)) event = '好友动态互动：首次扫描已建立基线';
       else if (/\[owner-proactive\] sent/.test(line)) event = '主动私聊已发送';
       else if (/\[owner-proactive\] skipped/.test(line)) event = '主动私聊：本次跳过';
       else if (/\[owner-proactive\] failed/.test(line)) event = '主动私聊执行失败';
@@ -251,6 +276,15 @@ async function handle(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/models/status') {
     try { return json(res, 200, await modelStatus()); }
     catch (error) { return json(res, 500, { error: error.message }); }
+  }
+  if (req.method === 'POST' && url.pathname === '/api/models/promoted') {
+    const remoteAddress = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+    if (!['127.0.0.1', '::1'].includes(remoteAddress)) return json(res, 403, { error: '仅允许本机模型代理同步' });
+    let body;
+    try { body = await readBody(req); }
+    catch (error) { return json(res, error.status || 400, { error: error.message }); }
+    try { return await serialMutation(async () => json(res, 200, await syncPromotedModel(body.model))); }
+    catch (error) { return json(res, error.status || 500, { error: error.message }); }
   }
   if (req.method === 'GET' && url.pathname === '/api/models/catalog') {
     try { return json(res, 200, await modelCatalog()); }
@@ -317,9 +351,19 @@ async function handle(req, res) {
       const { rows, index } = archiveFiles();
       const q = (url.searchParams.get('q') || '').trim().toLocaleLowerCase('zh-CN');
       const day = url.searchParams.get('day') || '';
+      const status = url.searchParams.get('status') || '';
+      const analysisFilter = url.searchParams.get('analysis') || '';
       const sort = url.searchParams.get('sort') || 'newest';
       let filtered = rows.filter((row) => (!day || row.day === day)
-        && (!q || `${row.file} ${row.day} ${row.tags.join(' ')} ${row.semantics?.deepseek ? 'DeepSeek 小鲸鱼' : ''} ${row.semantics?.action || ''} ${row.semantics?.emotion || ''}`.toLocaleLowerCase('zh-CN').includes(q)));
+        && (!status || row.status === status)
+        && (!analysisFilter
+          || (analysisFilter === 'photo' && row.analysis?.isPhoto === true)
+          || (analysisFilter === 'nonphoto' && row.analysis?.isPhoto === false)
+          || (analysisFilter === 'valuable' && row.analysis?.valuable === true)
+          || (analysisFilter === 'low-value' && row.analysis?.valuable === false)
+          || (analysisFilter === 'duplicate' && row.analysis?.duplicate === true)
+          || (analysisFilter === 'unique' && row.analysis?.duplicate === false))
+        && (!q || `${row.file} ${row.day} ${row.tags.join(' ')} ${row.analysis?.tags?.join(' ') || ''} ${row.analysis?.caption || ''} ${row.analysis?.kind || ''} ${row.analysis?.valueReason || ''} ${row.analysis?.duplicate ? '重复' : ''} ${row.semantics?.deepseek ? 'DeepSeek 小鲸鱼' : ''} ${row.semantics?.action || ''} ${row.semantics?.emotion || ''}`.toLocaleLowerCase('zh-CN').includes(q)));
       if (sort === 'largest') filtered.sort((a, b) => b.bytes - a.bytes || b.day.localeCompare(a.day));
       const total = filtered.length;
       const pageSize = Math.max(1, Math.min(PAGE_SIZE_MAX, Number(url.searchParams.get('limit')) || 48));
@@ -331,6 +375,11 @@ async function handle(req, res) {
         items: filtered.slice((page - 1) * pageSize, page * pageSize),
         page, pageSize, total, pages,
         stats: { total: rows.length, bytes: totalBytes, aliases: Object.keys(index).length, days: days.length },
+        moderation: {
+          pending: rows.filter((row) => row.status === 'pending').length,
+          approved: rows.filter((row) => row.status === 'approved').length,
+          rejected: rows.filter((row) => row.status === 'rejected').length
+        },
         days
       });
     } catch (error) {
@@ -361,6 +410,42 @@ async function handle(req, res) {
     return createReadStream(target).pipe(res);
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/images/bulk-review') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机管理页面审核图片' });
+    let body;
+    try { body = await readBody(req); }
+    catch (error) { return json(res, error.status || 400, { error: error.message }); }
+    if (!['approved', 'rejected', 'pending'].includes(body.status)
+      || !Array.isArray(body.items) || body.items.length < 1 || body.items.length > 200) {
+      return json(res, 400, { error: '请选 1～200 张图片并指定审核状态' });
+    }
+    const items = [...new Map(body.items.map((item) => [`${item?.day}/${item?.file}`, item])).values()];
+    for (const item of items) {
+      if (typeof item?.day !== 'string' || typeof item?.file !== 'string') return json(res, 400, { error: '图片列表格式无效' });
+      const target = safeImagePath(item.day, item.file);
+      if (!target || !existsSync(target)) return json(res, 404, { error: `图片不存在：${item.file}` });
+    }
+    try {
+      return await serialMutation(() => {
+        const index = readIndex();
+        const updates = items.map((item) => ({ item, aliases: aliasesFor(index, item.day, item.file) }));
+        const missing = updates.find(({ aliases }) => !aliases.length);
+        if (missing) return json(res, 409, { error: `图片 ${missing.item.file} 尚未绑定表情关键词，请先单独整理` });
+        let aliasesUpdated = 0;
+        for (const { aliases } of updates) {
+          for (const key of aliases) {
+            index[key] = { ...index[key], status: body.status, at: new Date().toISOString() };
+            aliasesUpdated++;
+          }
+        }
+        writeIndexAtomic(index);
+        return json(res, 200, { ok: true, updated: items.length, aliasesUpdated, status: body.status });
+      });
+    } catch (error) {
+      return json(res, 500, { error: error.message || '批量审核失败' });
+    }
+  }
+
   if (req.method === 'PATCH' && url.pathname.startsWith('/api/images/')) {
     if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机页面修改图片库' });
     let parts;
@@ -375,6 +460,10 @@ async function handle(req, res) {
     catch (error) { return json(res, error.status || 400, { error: error.message }); }
     const tags = validTags(body.tags);
     if (!tags) return json(res, 400, { error: '关键词需为文本，且每个不超过 40 个字符' });
+    const status = body.status;
+    if (status !== undefined && !['pending', 'approved', 'rejected'].includes(status)) {
+      return json(res, 400, { error: '审核状态无效' });
+    }
     const classification = body.semantics;
     if (classification && (typeof classification.deepseek !== 'boolean'
       || typeof classification.action !== 'string' || typeof classification.emotion !== 'string'
@@ -385,6 +474,9 @@ async function handle(req, res) {
     try {
       return await serialMutation(() => {
         const index = readIndex();
+        const previousAliases = aliasesFor(index, day, file);
+        const previousStatus = previousAliases.map((key) => index[key]?.status)
+          .find((value) => ['pending', 'rejected'].includes(value)) || 'approved';
         for (const tag of tags) {
           const existing = index[tag];
           if (existing && !sameImage(existing, day, file)) {
@@ -395,7 +487,8 @@ async function handle(req, res) {
         const ext = path.extname(file).toLowerCase();
         const mime = mimeTypes[ext] || 'image/jpeg';
         const bytes = statSync(target).size;
-        for (const tag of tags) index[tag] = { ref: file, day, mime, bytes, at: new Date().toISOString() };
+        const imageStatus = status || (previousAliases.length ? previousStatus : 'approved');
+        for (const tag of tags) index[tag] = { ref: file, day, mime, bytes, status: imageStatus, at: new Date().toISOString() };
         writeIndexAtomic(index);
         if (classification) {
           const previous = readStickerSemantics()[file] || {};

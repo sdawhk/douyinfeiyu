@@ -4,8 +4,19 @@ function segmentText(segment) {
     const qq = String(segment.data?.qq ?? '');
     return qq === 'all' ? '@全体成员' : `@QQ ${qq}`;
   }
-  if (segment?.type === 'image') return '[图片]';
-  if (segment?.type === 'face') return '[表情]';
+  if (segment?.type === 'image') {
+    const data = segment.data ?? {};
+    if (data.emoji_id) {
+      const label = String(data.summary ?? data.text ?? '').trim();
+      return label ? `[QQ 动态表情：${label.slice(0, 80)}]` : '[QQ 动态表情]';
+    }
+    return '[图片]';
+  }
+  if (segment?.type === 'face') return `[QQ 系统表情 id=${String(segment.data?.id ?? '?')}]`;
+  if (segment?.type === 'mface') {
+    const label = String(segment.data?.summary ?? segment.data?.text ?? segment.data?.name ?? '').trim();
+    return label ? `[QQ 动态表情：${label.slice(0, 80)}]` : '[QQ 动态表情]';
+  }
   if (segment?.type === 'reply') return `[引用消息 id=${String(segment.data?.id ?? '')}]`;
   if (segment?.type === 'record') return '[语音]';
   if (segment?.type === 'video') return '[视频]';
@@ -93,8 +104,15 @@ export function groupTurnPrompt({ groupId, botSelf, senderId, senderName, text, 
     '【QQ 群聊本轮发言归属，由桥接标记】',
     `群号：${groupId}；机器人 QQ：${botSelf}；发言人：${speaker}${isOwner ? '，管理员' : '，群友'}。`,
     '同一个群会有不同人轮流发言。原话中的“我”和自称、身份、亲属称谓属于本轮发言人；不要当作机器人自己的身份或称呼。群友之间说的“你”也不自动指机器人，须结合 QQ @、引用对象和语义判断。',
+    '只有明确 @机器人、引用机器人的消息，或上下文明确是在问机器人时才回应。群友 @/引用其他人、互相调侃或发图交流时不要插话；“人机”“机器人”等泛称不自动指你。对象、图片含义、指代或上下文不确定时，不要猜测，不要硬接话，必须只输出 [SILENT]。',
     `【本轮发言人原话】${JSON.stringify(String(text ?? ''))}`
   ].join('\n');
+}
+
+export function shouldSkipUnaddressedGroupMedia({ isGroup, text, mediaCount, references = {}, botSelf }) {
+  if (!isGroup || String(text ?? '').trim() || Number(mediaCount) <= 0) return false;
+  if (references.hasBotMention) return false;
+  return !(references.replyId && references.quotedUserId === String(botSelf));
 }
 
 export function explicitGroupReplyDecision({ botSelf, text, references = {}, isOwner = false, keywords = [] }) {

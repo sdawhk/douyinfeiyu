@@ -27,7 +27,7 @@ function dshConfig() {
 }
 function defaultPolicy() {
   return { version: 0, primary: dshConfig().model || 'reflection/beam-free', fallbacks: [],
-    firstTokenTimeoutMs: 12000, fallbackBudgetMs: 45000 };
+    firstTokenTimeoutMs: 25000, fallbackBudgetMs: 60000, autoPromote: true };
 }
 export function readPolicy() { return readJson(POLICY_FILE) || defaultPolicy(); }
 function redact(value) {
@@ -36,6 +36,14 @@ function redact(value) {
   return text.replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 240);
 }
 function safeFailure(error) { return redact(error?.message || error); }
+async function clearProxyModelCooldown(model) {
+  try {
+    await fetch(`${PROXY_URL}/_models/healthy`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(2500)
+    });
+  } catch { /* a saved policy remains valid when the proxy is restarting */ }
+}
 
 export async function modelStatus() {
   const saved = readPolicy();
@@ -59,18 +67,32 @@ function keys() {
     .filter((entry) => entry?.key && /^https?:\/\//.test(entry.upstream || source?.upstream || 'http://127.0.0.1:18900'))
     .map((entry) => ({ key: entry.key, upstream: (entry.upstream || source?.upstream || 'http://127.0.0.1:18900').replace(/\/+$/, '') }));
 }
+function providerPath(upstream, path) {
+  return /\/api\/paas\/v\d+$/i.test(upstream) ? path.replace(/^\/v1(?=\/)/, '') : path;
+}
 export async function modelCatalog() {
-  const first = keys()[0];
-  if (!first) throw new Error('没有可用的模型凭据');
-  const result = await fetch(`${first.upstream}/v1/models`, {
-    headers: { authorization: `Bearer ${first.key}` }, signal: AbortSignal.timeout(10000) });
-  if (!result.ok) throw new Error(`模型目录请求失败：HTTP ${result.status}`);
-  const body = await result.json();
-  return { models: (body.data || []).filter((row) => typeof row.id === 'string').map((row) => ({
-    id: row.id, name: row.name || row.id, owner: row.owned_by || null,
-    cost: /(?:^|[/:_-])free(?:$|[/:_-])/.test(row.id) || row.owned_by === 'our-free-model' ? 'free' : 'unknown',
-    capabilities: row.capabilities || null
-  })).sort((a, b) => a.id.localeCompare(b.id)), credentialsAvailable: true };
+  const entries = keys();
+  if (!entries.length) throw new Error('没有可用的模型凭据');
+  const results = await Promise.all(entries.map(async (entry) => {
+    const endpoint = /\/api\/paas\/v\d+$/i.test(entry.upstream) ? '/models' : '/v1/models';
+    try {
+      const result = await fetch(`${entry.upstream}${endpoint}`, {
+        headers: { authorization: `Bearer ${entry.key}` }, signal: AbortSignal.timeout(10000) });
+      if (!result.ok) return [];
+      const body = await result.json();
+      return (body.data || []).filter((row) => typeof row.id === 'string');
+    } catch { return []; }
+  }));
+  const unique = new Map();
+  for (const row of results.flat()) {
+    if (!unique.has(row.id)) unique.set(row.id, {
+      id: row.id, name: row.name || row.id, owner: row.owned_by || null,
+      cost: /(?:^|[/:_-])free(?:$|[/:_-])/.test(row.id) || row.owned_by === 'our-free-model' ? 'free' : 'unknown',
+      capabilities: row.capabilities || null
+    });
+  }
+  if (!unique.size) throw new Error('模型目录暂不可用，请检查模型服务连接');
+  return { models: [...unique.values()].sort((a, b) => a.id.localeCompare(b.id)), credentialsAvailable: true };
 }
 
 function streamHasContent(frame) {
@@ -86,9 +108,10 @@ export async function testModel(model) {
   let lastError = '请求失败';
   for (const entry of entries) {
     try {
-      const response = await fetch(`${entry.upstream}/v1/chat/completions`, {
+      const response = await fetch(`${entry.upstream}${providerPath(entry.upstream, '/v1/chat/completions')}`, {
         method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${entry.key}` },
-        body: JSON.stringify({ model, messages: [{ role: 'user', content: '请只回复“好”' }], max_tokens: 32, stream: true }),
+        // Reasoning models may spend dozens of tokens on reasoning before producing visible content.
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: '请只回复“好”' }], max_tokens: 256, stream: true }),
         signal: AbortSignal.timeout(30000)
       });
       if (!response.ok) { lastError = redact(`HTTP ${response.status}: ${await response.text()}`); continue; }
@@ -129,7 +152,10 @@ function validatePolicy(value, current) {
       || !Number.isInteger(fallbackBudgetMs) || fallbackBudgetMs < firstTokenTimeoutMs || fallbackBudgetMs > 120000) {
     throw Object.assign(new Error('超时设置超出允许范围'), { status: 400 });
   }
-  return { version: current.version + 1, primary, fallbacks, firstTokenTimeoutMs, fallbackBudgetMs };
+  const autoPromote = typeof value.autoPromote === 'boolean'
+    ? value.autoPromote
+    : (typeof current.autoPromote === 'boolean' ? current.autoPromote : true);
+  return { version: current.version + 1, primary, fallbacks, firstTokenTimeoutMs, fallbackBudgetMs, autoPromote };
 }
 function qqSessionIds() {
   let log = '';
@@ -176,7 +202,7 @@ export async function saveModelPolicy(input) {
     }
   }));
   const tests = [primaryTest, ...backupTests];
-  next.checks = tests.map(({ model, ok, reason }) => ({ model, ok, ...(reason ? { reason } : {}), at: new Date().toISOString() }));
+  next.checks = tests.map(({ model, ok, reason, elapsedMs }) => ({ model, ok, elapsedMs, ...(reason ? { reason } : {}), at: new Date().toISOString() }));
   const previousPolicy = existsSync(POLICY_FILE) ? readFileSync(POLICY_FILE, 'utf8') : null;
   const previousDsh = readFileSync(DSH_PATCH_FILE, 'utf8');
   const dsh = await dshClient();
@@ -185,6 +211,9 @@ export async function saveModelPolicy(input) {
   const applied = [];
   try {
     atomicWrite(POLICY_FILE, JSON.stringify(next, null, 2));
+    for (const test of tests) {
+      if (test.ok) await clearProxyModelCooldown(test.model);
+    }
     atomicWrite(DSH_PATCH_FILE, updatedDshSource(previousDsh, next.primary));
     await waitForDshModel(dsh, next.primary);
     for (const session of sessions) {
@@ -202,5 +231,35 @@ export async function saveModelPolicy(input) {
       try { await dsh.sessions.selectModel({ sessionId: session.sessionId, provider: 'dsh', model: current.primary }); } catch {}
     }
     throw Object.assign(new Error(`应用失败，已回滚：${safeFailure(error)}`), { status: 503, tests });
+  }
+}
+
+export async function syncPromotedModel(model) {
+  const policy = readPolicy();
+  if (policy.primary !== model) throw Object.assign(new Error('模型已被其他请求切换，请刷新状态'), { status: 409 });
+
+  const previousDsh = readFileSync(DSH_PATCH_FILE, 'utf8');
+  const previousDefault = dshConfig().model;
+  const dsh = await dshClient();
+  const knownIds = new Set((await dsh.sessions.list({}))?.items?.map((item) => item.sessionId) || []);
+  const sessions = qqSessionIds().filter((item) => knownIds.has(item.sessionId));
+  const applied = [];
+  try {
+    await clearProxyModelCooldown(model);
+    atomicWrite(DSH_PATCH_FILE, updatedDshSource(previousDsh, model));
+    await waitForDshModel(dsh, model);
+    for (const session of sessions) {
+      await dsh.sessions.selectModel({ sessionId: session.sessionId, provider: 'dsh', model });
+      applied.push(session);
+    }
+    const status = await modelStatus();
+    if (!status.effective) throw new Error('模型代理或 DSH 配置未生效');
+    return { saved: policy, sessions: { updated: applied.length, total: sessions.length }, status };
+  } catch (error) {
+    atomicWrite(DSH_PATCH_FILE, previousDsh);
+    for (const session of applied) {
+      try { await dsh.sessions.selectModel({ sessionId: session.sessionId, provider: 'dsh', model: previousDefault }); } catch {}
+    }
+    throw Object.assign(new Error(`同步模型会话失败：${safeFailure(error)}`), { status: 503 });
   }
 }

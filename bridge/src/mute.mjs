@@ -33,14 +33,29 @@ export const groupKey = (id) => `g${id}`;
 export const privateKey = (id) => `p${id}`;
 export const allGroupsKey = () => 'g*';
 
-export function isMuted(key) {
-  const state = read();
-  return state[key] === true || (String(key).startsWith('g') && state[allGroupsKey()] === true);
+function active(state, key, now) {
+  const value = state[key];
+  if (value === true) return true;
+  if (!value || typeof value !== 'object' || value.muted !== true) return false;
+  if (!Number.isFinite(value.expiresAt) || value.expiresAt > now) return true;
+  delete state[key];
+  return false;
 }
 
-export function setMuted(key, value) {
+export function isMuted(key) {
+  const state = read();
+  const before = JSON.stringify(state);
+  const now = Date.now();
+  const muted = active(state, key, now)
+    || (String(key).startsWith('g') && active(state, allGroupsKey(), now));
+  if (JSON.stringify(state) !== before) write(state);
+  return muted;
+}
+
+export function setMuted(key, value, durationMs = null) {
   const j = read();
-  if (value) j[key] = true;
+  if (value && Number.isFinite(durationMs) && durationMs > 0) j[key] = { muted: true, expiresAt: Date.now() + durationMs };
+  else if (value) j[key] = true;
   else delete j[key];
   write(j);
 }

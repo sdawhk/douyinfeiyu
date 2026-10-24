@@ -13,8 +13,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSy
 import { join, extname } from 'node:path';
 import { archiveImage, nameFor } from './image-archive.mjs';
 
-const DIR = 'D:\\deepseek\\stickers';
-const INDEX = join(DIR, 'index.json');
+const DIR = process.env.STICKER_LIBRARY_ROOT || 'D:\\deepseek\\stickers';
+const INDEX = process.env.STICKER_INDEX_PATH || join(DIR, 'index.json');
+const IMAGE_ROOT = process.env.IMAGE_LIBRARY_ROOT || 'D:\\deepseek\\images';
 
 function ensureDir() {
   if (!existsSync(DIR)) mkdirSync(DIR, { recursive: true });
@@ -50,17 +51,24 @@ function mimeOf(file) {
  * @param {string} b64  图片 base64（用于算哈希、并确保实体已入库）
  * @param {string} mime MIME
  */
-export function saveSticker(key, b64, mime = 'image/jpeg') {
+export function saveSticker(key, b64, mime = 'image/jpeg', options = {}) {
   // 1) 确保图片实体在图库里（内容哈希去重：已存在就不会再写一次）
   const archived = archiveImage(b64, mime);
   if (!archived) return null;
   // 2) 只记引用，不复制文件
   const idx = readIndex();
+  const status = options.status === 'pending' || options.status === 'rejected' ? options.status : 'approved';
+  if (status === 'approved') {
+    for (const record of Object.values(idx)) {
+      if (record?.ref === archived.file) record.status = 'approved';
+    }
+  }
   idx[key] = {
-    ref: nameFor(b64, mime),   // 图片库里的文件名
+    ref: archived.file || nameFor(b64, mime),   // 图片库里的文件名
     day: dayOf(archived.path), // 从路径反推日期目录
     mime: mimeOf(archived.path),
     bytes: archived.bytes,
+    status,
     at: new Date().toISOString()
   };
   writeIndex(idx);
@@ -80,11 +88,11 @@ function dayOf(path) {
 export function getStickerPath(key) {
   const idx = readIndex();
   const rec = idx[key];
-  if (!rec) return null;
+  if (!rec || rec.status === 'pending' || rec.status === 'rejected') return null;
 
   // 新格式：引用图片库
   if (rec.ref) {
-    const p = join('D:\\deepseek\\images', rec.day || '', rec.ref);
+    const p = join(IMAGE_ROOT, rec.day || '', rec.ref);
     if (existsSync(p)) return p;
     // day 缺失时按日期目录找一遍（向前兼容）
     const found = findInImages(rec.ref);
@@ -101,7 +109,7 @@ export function getStickerPath(key) {
 
 /** 在图片库所有日期目录里找某个文件名。 */
 function findInImages(name) {
-  const root = 'D:\\deepseek\\images';
+  const root = IMAGE_ROOT;
   if (!existsSync(root)) return null;
   for (const d of readdirSync(root)) {
     const p = join(root, d, name);
@@ -111,11 +119,22 @@ function findInImages(name) {
 }
 
 export function listStickers() {
+  return Object.entries(readIndex())
+    .filter(([, record]) => record?.status !== 'pending' && record?.status !== 'rejected')
+    .map(([key]) => key).sort();
+}
+
+export function listAllStickerKeys() {
   return Object.keys(readIndex()).sort();
 }
 
 export function listStickerRecords() {
-  return readIndex();
+  return Object.fromEntries(Object.entries(readIndex())
+    .filter(([, record]) => record?.status !== 'pending' && record?.status !== 'rejected'));
+}
+
+export function findStickerByRef(ref) {
+  return Object.entries(readIndex()).find(([, record]) => record?.ref === ref)?.[0] ?? null;
 }
 
 export function deleteSticker(key) {
@@ -127,13 +146,24 @@ export function deleteSticker(key) {
   return true;
 }
 
+/** Remove every sticker alias that points at one archived image. */
+export function deleteStickersByRef(ref) {
+  const idx = readIndex();
+  const removed = Object.entries(idx).filter(([, record]) => record?.ref === ref).map(([key]) => key);
+  if (!removed.length) return [];
+  for (const key of removed) delete idx[key];
+  writeIndex(idx);
+  return removed;
+}
+
 export function findSticker(keyword) {
   const keys = listStickers();
   const k = String(keyword).trim().toLowerCase();
   if (!k) return null;
   const exact = keys.find((x) => x.toLowerCase() === k);
   if (exact) return exact;
-  return keys.find((x) => x.toLowerCase().includes(k)) ?? null;
+  const matches = keys.filter((x) => x.toLowerCase().includes(k));
+  return matches.length === 1 ? matches[0] : null;
 }
 
 /** 关键词转安全名（虽然现在不再作为文件名，但仍用于兼容旧逻辑）。 */

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -31,7 +31,8 @@ function workingTreeChanges(now) {
     if (name.includes(' -> ')) name = name.split(' -> ').at(-1);
     name = name.replace(/^"|"$/g, '');
     const fullPath = resolve(REPO_ROOT, name);
-    if (!fullPath.startsWith(`${REPO_ROOT}\`) && fullPath !== REPO_ROOT) continue;
+    const relPath = relative(REPO_ROOT, fullPath);
+    if (relPath.startsWith('..') || isAbsolute(relPath)) continue;
     const removed = code.includes('D') || !existsSync(fullPath);
     if (!removed) {
       try { if (!isToday(statSync(fullPath).mtime, now)) continue; }
@@ -60,4 +61,12 @@ export function todayChanges(now = new Date()) {
   else lines.push('• 暂无。');
   if (workingChanges.length) lines.push('未提交部分按文件最后修改日期筛选；文件名不能准确说明功能，提交说明会提供更清楚的功能摘要。');
   return lines.join('\n').slice(0, 1800);
+}
+
+export function todayFeatureMaterials(now = new Date()) {
+  let commits = '';
+  try { commits = git(['log', '--since=midnight', '--format=%s', '-n', '8']); }
+  catch { return []; }
+  return commits.split(/\r?\n/).map((line) => line.trim()).filter((line) => /^feat(?:ure)?(?:\([^)]*\))?:/i.test(line))
+    .map((subject) => `今天的项目功能更新记录：${subject}`);
 }

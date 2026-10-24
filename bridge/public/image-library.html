@@ -45,6 +45,16 @@
     h1 { margin:0; font:normal clamp(34px,5vw,66px)/1 var(--serif); letter-spacing:-.045em; }
     .intro { max-width:560px; margin:14px 0 0; color:var(--muted); font-size:14px; line-height:1.75; }
     .stats { display:flex; gap:10px; }
+    .hero-side { display:grid; gap:10px; min-width:min(100%,420px); }
+    .auto-switch { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:12px 15px; border:1px solid var(--line); background:var(--panel); }
+    .auto-switch strong { display:block; color:var(--paper); font-size:12px; }
+    .auto-switch small { display:block; margin-top:4px; color:var(--muted); font-size:10px; }
+    .auto-switch input { appearance:none; position:relative; width:42px; height:24px; flex:none; border:1px solid #788477; border-radius:20px; background:#333b32; cursor:pointer; transition:background .18s,border-color .18s; }
+    .auto-switch input:before { content:""; position:absolute; top:3px; left:3px; width:16px; height:16px; border-radius:50%; background:#c0c8bd; transition:transform .18s,background .18s; }
+    .auto-switch input:checked { border-color:var(--acid); background:#809e38; }
+    .auto-switch input:checked:before { transform:translateX(18px); background:#fff; }
+    .auto-switch input:focus-visible { outline:2px solid var(--acid); outline-offset:3px; }
+    .auto-switch input:disabled { opacity:.55; cursor:wait; }
     .stat { min-width:108px; padding:13px 15px; border:1px solid var(--line); background:rgba(25,31,25,.8); }
     .stat strong { display:block; color:var(--acid); font:22px var(--mono); }
     .stat span { color:var(--muted); font-size:11px; }
@@ -56,6 +66,15 @@
     .select { min-width:148px; padding:0 12px; }
     .search:focus, .select:focus, .tag-input:focus { border-color:var(--acid); box-shadow:0 0 0 2px rgba(211,245,106,.12); }
     .toolbar-meta { color:var(--muted); font:11px var(--mono); white-space:nowrap; margin-left:auto; }
+    .select-page { display:flex; align-items:center; gap:8px; padding:0 5px; color:var(--muted); font-size:11px; white-space:nowrap; }
+    .select-page input,.card-select { accent-color:#809e38; width:17px; height:17px; cursor:pointer; }
+    .bulk-bar { display:flex; flex-wrap:wrap; align-items:center; gap:9px; margin:-5px 0 18px; padding:11px 13px; border:1px solid #68764f; background:#20281c; }
+    .bulk-bar[hidden] { display:none; }
+    .bulk-count { margin-right:auto; color:var(--paper); font-size:12px; }
+    .bulk-bar button { min-height:36px; padding:0 13px; color:var(--paper); border:1px solid var(--line); background:transparent; font-size:11px; }
+    .bulk-bar button:hover { border-color:var(--acid); }
+    .bulk-bar .bulk-reject { color:#ffc0b7; border-color:#75443e; }
+    .bulk-bar .bulk-reject:hover { background:#482a27; }
     .gallery { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; }
     .card { min-width:0; overflow:hidden; border:1px solid var(--line); background:var(--panel); transition:border-color .18s, transform .18s; }
     .card:hover { border-color:#79866b; transform:translateY(-2px); }
@@ -71,6 +90,10 @@
     .tag-row { display:flex; min-height:25px; flex-wrap:wrap; gap:5px; }
     .tag { max-width:100%; padding:4px 7px; overflow:hidden; color:#d4dfcb; border:1px solid #424b3d; background:#232b21; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
     .theme-tag { color:#b9e8ff; border-color:#3a6578; background:#183240; }
+    .tag-ai { color:#c7ddf5; border-color:#3c566c; background:#1b2935; }
+    .tag-value { color:#e2f59a; border-color:#60733b; background:#29351d; }
+    .tag-warn { color:#ffd0ad; border-color:#76543a; background:#38291d; }
+    .analysis-caption { display:-webkit-box; margin:8px 0 0; overflow:hidden; color:#aeb8a8; font-size:10px; line-height:1.55; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
     .no-tags { color:#828d7e; font-size:10px; }
     .card-actions { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:12px; padding-top:10px; border-top:1px solid #2b332b; }
     .size { color:var(--muted); font:10px var(--mono); }
@@ -98,6 +121,7 @@
     .editor-scroll { flex:1; overflow:auto; padding:20px 24px; }
     .preview { display:grid; min-height:190px; max-height:360px; place-items:center; margin-bottom:18px; overflow:hidden; background:#080c08; border:1px solid var(--line); }
     .preview img { display:block; max-width:100%; max-height:360px; object-fit:contain; }
+    .analysis-note { margin:-4px 0 18px; padding:12px; color:var(--muted); border-left:2px solid var(--acid); background:#1b231a; font-size:11px; line-height:1.7; }
     .meta-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:24px; }
     .meta-cell { padding:10px; border:1px solid var(--line); }
     .meta-cell span { display:block; margin-bottom:6px; color:var(--muted); font-size:10px; }
@@ -121,7 +145,7 @@
     .skeleton { background:linear-gradient(100deg,#1a211a 20%,#252f24 36%,#1a211a 52%); background-size:220% 100%; animation:shimmer 1.2s linear infinite; }
     @keyframes shimmer { to { background-position-x:-220%; } }
     @media (max-width:1100px) { .gallery { grid-template-columns:repeat(3,minmax(0,1fr)); } }
-    @media (max-width:760px) { main { padding-top:24px; } .hero { grid-template-columns:1fr; align-items:start; } .stats { width:100%; } .stat { flex:1; min-width:0; } .gallery { grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; } .toolbar-meta { width:100%; margin-left:0; } }
+    @media (max-width:760px) { main { padding-top:24px; } .hero { grid-template-columns:1fr; align-items:start; } .hero-side { min-width:0; } .stats { width:100%; } .stat { flex:1; min-width:0; } .gallery { grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; } .toolbar-meta { width:100%; margin-left:0; } }
     @media (max-width:430px) { .gallery { grid-template-columns:1fr; } .thumb { aspect-ratio:1.25; } .top-note { display:none; } .editor-head,.editor-scroll { padding-left:16px; padding-right:16px; } .editor-foot { padding:12px 16px 16px; } }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important; } }
   </style>
@@ -136,20 +160,27 @@
       <div>
         <p class="eyebrow">BOT MEMORY / IMAGE INDEX</p>
         <h1>机器人图片库</h1>
-        <p class="intro">浏览机器人自动存下的图片，整理表情关键词，或删除不再需要的图片。图片只在本机查看和管理。</p>
+        <p class="intro">浏览机器人存下的图片，查看 AI 对照片类型、收藏价值和重复项的判断，并整理表情关键词。图片只在本机查看和管理。</p>
       </div>
-      <div class="stats" aria-label="图片库统计">
-        <div class="stat"><strong id="statImages">—</strong><span>张图片</span></div>
-        <div class="stat"><strong id="statTags">—</strong><span>个表情关键词</span></div>
-        <div class="stat"><strong id="statSize">—</strong><span>占用空间</span></div>
+      <div class="hero-side">
+        <label class="auto-switch" for="autoStickerToggle"><span><strong>自动收录表情</strong><small id="autoStickerState">读取开关状态…</small></span><input id="autoStickerToggle" type="checkbox" disabled aria-label="自动收录新表情包"></label>
+        <div class="stats" aria-label="图片库统计">
+          <div class="stat"><strong id="statImages">—</strong><span>张图片</span></div>
+          <div class="stat"><strong id="statTags">—</strong><span>个表情关键词</span></div>
+          <div class="stat"><strong id="statSize">—</strong><span>占用空间</span></div>
+        </div>
       </div>
     </section>
     <section class="toolbar" aria-label="图片筛选">
-      <label class="search-wrap"><span class="search-icon" aria-hidden="true">⌕</span><input class="search" id="search" type="search" placeholder="搜索文件名或表情关键词" autocomplete="off" aria-label="搜索图片"></label>
+      <label class="search-wrap"><span class="search-icon" aria-hidden="true">⌕</span><input class="search" id="search" type="search" placeholder="搜索 AI 标签、画面内容或关键词" autocomplete="off" aria-label="搜索图片"></label>
       <select class="select" id="dayFilter" aria-label="按日期筛选"><option value="">全部日期</option></select>
+      <select class="select" id="statusFilter" aria-label="按审核状态筛选"><option value="">全部状态</option><option value="pending">待审核</option><option value="approved">已启用</option><option value="rejected">已停用</option><option value="archive">仅归档</option></select>
+      <select class="select" id="analysisFilter" aria-label="按 AI 识别结果筛选"><option value="">全部 AI 结果</option><option value="photo">照片</option><option value="nonphoto">非照片</option><option value="valuable">有收藏价值</option><option value="low-value">收藏价值低</option><option value="duplicate">重复</option><option value="unique">未发现重复</option></select>
       <select class="select" id="sortFilter" aria-label="排序方式"><option value="newest">最近存入</option><option value="largest">文件最大</option></select>
+      <label class="select-page"><input id="selectPage" type="checkbox" aria-label="选择本页所有表情图片">选择本页</label>
       <span class="toolbar-meta" id="resultCount">读取图片索引…</span>
     </section>
+    <div class="bulk-bar" id="bulkBar" hidden><span class="bulk-count" id="selectedCount">已选 0 张</span><button id="bulkApprove" type="button">审核通过</button><button class="bulk-reject" id="bulkReject" type="button">一键拉黑</button><button id="clearSelection" type="button">取消选择</button></div>
     <section class="gallery" id="gallery" aria-live="polite"><div class="loading">正在读取本机图片索引…</div></section>
     <nav class="pager" aria-label="图片分页"><button id="prevPage" type="button">← 上一页</button><span id="pageCount" class="page-count">—</span><button id="nextPage" type="button">下一页 →</button></nav>
   </main>
@@ -159,7 +190,10 @@
       <header class="editor-head"><div><h2 id="editorTitle">整理图片</h2><p id="editorId">—</p></div><button class="close" id="closeEditor" type="button" aria-label="关闭">×</button></header>
       <div class="editor-scroll">
         <div class="preview"><img id="previewImage" alt="图片预览"></div>
+        <div class="analysis-note" id="analysisNote" aria-live="polite">读取 AI 图片识别结果…</div>
         <div class="meta-grid"><div class="meta-cell"><span>存档日期</span><strong id="metaDay">—</strong></div><div class="meta-cell"><span>文件大小</span><strong id="metaSize">—</strong></div></div>
+        <label class="field-label" for="moderationStatus">机器人使用状态</label>
+        <select class="select" id="moderationStatus" style="width:100%;margin-bottom:18px"><option value="pending">待审核（不会被机器人使用）</option><option value="approved">已启用</option><option value="rejected">已停用（保留图片）</option></select>
         <label class="field-label" for="tagInput">表情关键词</label>
         <p class="tag-help">添加、删除或改名关键词。删除全部关键词只会取消表情关联，原图仍保留在图库中。</p>
         <div class="tag-editor" id="tagEditor"><input class="tag-input" id="tagInput" placeholder="输入关键词后按 Enter" maxlength="40" autocomplete="off"></div>
@@ -175,7 +209,7 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script>
     (() => {
-      const state = { page: 1, pages: 1, items: [], days: [], selected: null, tags: [], timer: null, controller: null };
+      const state = { page: 1, pages: 1, items: [], days: [], selected: null, selectedImages: new Set(), tags: [], timer: null, controller: null, autoSticker: null };
       const $ = (id) => document.getElementById(id);
       const gallery = $('gallery');
       const dialog = $('editor');
@@ -194,8 +228,29 @@
         const response = await fetch(url, { cache: 'no-store', ...options });
         let data = {};
         try { data = await response.json(); } catch { /* server may send an empty response */ }
-        if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
+        if (!response.ok) { const error = new Error(data.error || `请求失败 (${response.status})`); error.status = response.status; throw error; }
         return data;
+      }
+      async function saveAutoSticker(enabled) {
+        let document = await api('/api/settings');
+        for (let attempt = 0; attempt < 2; attempt++) {
+          document.settings.autoSticker = enabled;
+          try {
+            return await api('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ version: document.version, settings: document.settings }) });
+          } catch (error) {
+            if (error.status !== 409 || attempt > 0) throw error;
+            document = await api('/api/settings');
+          }
+        }
+      }
+      async function loadAutoSticker() {
+        const toggle = $('autoStickerToggle');
+        try {
+          const document = await api('/api/settings');
+          state.autoSticker = document.settings.autoSticker !== false;
+          toggle.checked = state.autoSticker; toggle.disabled = false;
+          $('autoStickerState').textContent = state.autoSticker ? '新识别的表情会进入待审核' : '已暂停自动收录';
+        } catch (error) { $('autoStickerState').textContent = `开关读取失败：${error.message}`; }
       }
       function buildDays(days) {
         const select = $('dayFilter'), current = select.value;
@@ -217,33 +272,89 @@
         const body = document.createElement('div'); body.className = 'card-body';
         const line = document.createElement('div'); line.className = 'card-line';
         const date = document.createElement('span'); date.className = 'card-date'; date.textContent = item.day;
+        const select = document.createElement('input'); select.type = 'checkbox'; select.className = 'card-select';
+        select.checked = state.selectedImages.has(imageKey(item)); select.disabled = !item.tags.length;
+        select.setAttribute('aria-label', item.tags.length ? `选择表情图片 ${item.file}` : '请先添加表情关键词再审核');
+        select.title = item.tags.length ? '加入批量审核' : '先整理关键词后再加入审核';
+        select.addEventListener('change', () => {
+          const key = imageKey(item);
+          if (select.checked && state.selectedImages.size >= 200) { select.checked = false; toast('一次最多选择 200 张', true); return; }
+          if (select.checked) state.selectedImages.add(key); else state.selectedImages.delete(key);
+          updateBulkControls();
+        });
         const order = document.createElement('span'); order.textContent = item.modified.slice(11, 16);
-        line.append(date, order);
+        line.append(date, select, order);
         const id = document.createElement('div'); id.className = 'file-id'; id.textContent = item.file;
         const tags = document.createElement('div'); tags.className = 'tag-row';
+        const status = document.createElement('span'); status.className = 'tag';
+        status.textContent = ({ pending: '待审核', approved: '已启用', rejected: '已停用', archive: '仅归档' })[item.status] || '仅归档';
+        tags.append(status);
+        const analysis = item.analysis;
+        if (analysis) {
+          const badge = (text, className = 'tag tag-ai') => { const el = document.createElement('span'); el.className = className; el.textContent = text; tags.append(el); };
+          badge(analysis.kind || '已识别');
+          if (analysis.isPhoto !== null) badge(analysis.isPhoto ? '照片' : '非照片');
+          if (analysis.valuable !== null) badge(analysis.valuable ? '值得收藏' : '价值较低', analysis.valuable ? 'tag tag-value' : 'tag');
+          if (analysis.duplicate === true) badge(analysis.exactDuplicate ? '完全重复' : '疑似重复', 'tag tag-warn');
+          else if (analysis.duplicate === false) badge('未发现重复');
+          else badge('重复待比对', 'tag');
+        }
         if (item.tags.length) for (const text of item.tags.slice(0, 4)) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = text; tags.append(tag); }
         else { const empty = document.createElement('span'); empty.className = 'no-tags'; empty.textContent = '尚未绑定表情关键词'; tags.append(empty); }
+        if (analysis?.tags?.length) for (const text of analysis.tags.filter((value) => !['照片', '非照片', '有收藏价值', '收藏价值低', '重复'].includes(value)).slice(0, 5)) { const tag = document.createElement('span'); tag.className = 'tag tag-ai'; tag.textContent = text; tags.append(tag); }
         if (item.semantics?.deepseek && item.semantics.confidence >= .65) { const theme = document.createElement('span'); theme.className = 'tag theme-tag'; theme.textContent = 'DeepSeek'; tags.prepend(theme); }
         if (item.semantics?.action) { const action = document.createElement('span'); action.className = 'tag'; action.textContent = `动作：${item.semantics.action}`; tags.append(action); }
         if (item.tags.length > 4) { const extra = document.createElement('span'); extra.className = 'no-tags'; extra.textContent = `+${item.tags.length - 4}`; tags.append(extra); }
+        const caption = document.createElement('p'); caption.className = 'analysis-caption'; caption.textContent = analysis?.caption || analysis?.valueReason || '';
         const actions = document.createElement('div'); actions.className = 'card-actions';
         const size = document.createElement('span'); size.className = 'size'; size.textContent = bytes(item.bytes);
         const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'edit-button'; edit.textContent = '整理关键词 ↗'; edit.addEventListener('click', () => openEditor(item));
-        actions.append(size, edit); body.append(line, id, tags, actions); card.append(thumb, body); return card;
+        actions.append(size, edit); body.append(line, id, tags); if (caption.textContent) body.append(caption); body.append(actions); card.append(thumb, body); return card;
       }
       function render(data) {
         state.items = data.items; state.pages = data.pages; state.days = data.days;
         renderStats(data.stats); buildDays(data.days);
-        $('resultCount').textContent = `${data.total.toLocaleString('zh-CN')} 张匹配图片`;
+        $('resultCount').textContent = `${data.total.toLocaleString('zh-CN')} 张匹配图片 · 待审核 ${data.moderation?.pending || 0}`;
         $('pageCount').textContent = `${data.page} / ${data.pages}`;
         $('prevPage').disabled = data.page <= 1; $('nextPage').disabled = data.page >= data.pages;
         gallery.replaceChildren();
         if (!data.items.length) {
           const empty = document.createElement('div'); empty.className = 'empty';
           const mark = document.createElement('div'); mark.className = 'empty-mark'; mark.textContent = '∅';
-          const text = document.createElement('p'); text.textContent = '这里暂时没有匹配的图片。'; empty.append(mark, text); gallery.append(empty); return;
+          const text = document.createElement('p'); text.textContent = '这里暂时没有匹配的图片。'; empty.append(mark, text); gallery.append(empty); updateBulkControls(); return;
         }
         for (const item of data.items) gallery.append(makeCard(item));
+        updateBulkControls();
+      }
+      function imageKey(item) { return `${item.day}/${item.file}`; }
+      function updateBulkControls() {
+        const selectedCount = $('selectedCount');
+        selectedCount.textContent = `已选 ${state.selectedImages.size} 张`;
+        $('bulkBar').hidden = state.selectedImages.size === 0;
+        const selectable = state.items.filter((item) => item.tags.length);
+        const selectedOnPage = selectable.filter((item) => state.selectedImages.has(imageKey(item))).length;
+        const selectPage = $('selectPage');
+        selectPage.checked = selectable.length > 0 && selectedOnPage === selectable.length;
+        selectPage.indeterminate = selectedOnPage > 0 && selectedOnPage < selectable.length;
+        selectPage.disabled = selectable.length === 0;
+      }
+      async function bulkReview(status) {
+        const selected = [...state.selectedImages].map((key) => {
+          const [day, file] = key.split('/'); return { day, file };
+        });
+        if (!selected.length) return;
+        const buttons = [$('bulkApprove'), $('bulkReject'), $('clearSelection')];
+        buttons.forEach((button) => { button.disabled = true; });
+        try {
+          const result = await api('/api/images/bulk-review', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ items: selected, status })
+          });
+          state.selectedImages.clear();
+          toast(status === 'approved' ? `已通过 ${result.updated} 张图片` : `已拉黑 ${result.updated} 张图片`);
+          await load();
+        } catch (error) { toast(error.message, true); }
+        finally { buttons.forEach((button) => { button.disabled = false; }); updateBulkControls(); }
       }
       async function load() {
         state.controller?.abort(); state.controller = new AbortController();
@@ -251,6 +362,8 @@
         const params = new URLSearchParams({ page: String(state.page), limit: '48', sort: $('sortFilter').value });
         if ($('search').value.trim()) params.set('q', $('search').value.trim());
         if ($('dayFilter').value) params.set('day', $('dayFilter').value);
+        if ($('statusFilter').value) params.set('status', $('statusFilter').value);
+        if ($('analysisFilter').value) params.set('analysis', $('analysisFilter').value);
         try {
           const response = await fetch(`/api/images?${params}`, { signal: state.controller.signal, cache: 'no-store' });
           const data = await response.json(); if (!response.ok) throw new Error(data.error || '读取失败'); render(data);
@@ -275,6 +388,11 @@
         state.selected = item; state.tags = [...item.tags];
         $('editorId').textContent = `${item.day} / ${item.file}`;
         $('previewImage').src = mediaUrl(item); $('metaDay').textContent = item.day; $('metaSize').textContent = bytes(item.bytes);
+        const analysis = item.analysis;
+        $('analysisNote').textContent = analysis
+          ? `AI识别：${analysis.kind || '类别未知'} · ${analysis.isPhoto === null ? '照片类型未知' : analysis.isPhoto ? '照片' : '非照片'} · ${analysis.valuable === null ? '价值待判断' : analysis.valuable ? '有收藏价值' : '收藏价值低'} · ${analysis.duplicate === null ? '重复待比对' : analysis.duplicate ? `${analysis.exactDuplicate ? '完全重复' : '疑似重复'}${analysis.duplicateOf && analysis.duplicateOf !== item.file ? `（对比 ${analysis.duplicateOf}）` : ''}` : '未发现重复'}${analysis.valueReason ? `。${analysis.valueReason}` : ''}${analysis.duplicateReason ? ` 重复判断：${analysis.duplicateReason}` : ''}${analysis.caption ? ` 画面：${analysis.caption}` : ''}`
+          : '这张图片还没有 AI 分类记录。新收到的图片会自动识别照片类型、收藏价值、重复情况和内容标签。';
+        $('moderationStatus').value = ['pending', 'approved', 'rejected'].includes(item.status) ? item.status : 'approved';
         $('tagInput').value = '';
         $('deepseekTheme').value = item.semantics ? (item.semantics.deepseek ? 'yes' : 'no') : '';
         $('semanticAction').value = item.semantics?.action || '';
@@ -290,6 +408,34 @@
       $('tagInput').addEventListener('keydown', (event) => {
         if (event.key === 'Enter' || event.key === ',') { event.preventDefault(); addTag(); }
       });
+      $('selectPage').addEventListener('change', () => {
+        const items = state.items.filter((item) => item.tags.length);
+        const nextSize = items.filter((item) => !state.selectedImages.has(imageKey(item))).length + state.selectedImages.size;
+        if ($('selectPage').checked && nextSize > 200) { $('selectPage').checked = false; toast('一次最多选择 200 张', true); return; }
+        for (const item of items) {
+          if ($('selectPage').checked) state.selectedImages.add(imageKey(item));
+          else state.selectedImages.delete(imageKey(item));
+        }
+        updateBulkControls();
+      });
+      $('bulkApprove').addEventListener('click', () => bulkReview('approved'));
+      $('bulkReject').addEventListener('click', () => bulkReview('rejected'));
+      $('clearSelection').addEventListener('click', () => { state.selectedImages.clear(); updateBulkControls(); load(); });
+      $('autoStickerToggle').addEventListener('change', async () => {
+        const toggle = $('autoStickerToggle'), requested = toggle.checked, previous = state.autoSticker;
+        toggle.disabled = true; $('autoStickerState').textContent = '正在保存…';
+        try {
+          const saved = await saveAutoSticker(requested);
+          state.autoSticker = saved.settings.autoSticker;
+          toggle.checked = state.autoSticker;
+          $('autoStickerState').textContent = state.autoSticker ? '新识别的表情会进入待审核' : '已暂停自动收录';
+          toast(state.autoSticker ? '自动收录已开启' : '自动收录已暂停');
+        } catch (error) {
+          state.autoSticker = previous; toggle.checked = previous;
+          $('autoStickerState').textContent = previous ? '新识别的表情会进入待审核' : '已暂停自动收录';
+          toast(`开关保存失败：${error.message}`, true);
+        } finally { toggle.disabled = false; }
+      });
       $('saveTags').addEventListener('click', async () => {
         if (!state.selected) return; const button = $('saveTags'); button.disabled = true;
         try {
@@ -300,8 +446,8 @@
           const changed = theme !== oldTheme || action !== (original?.action || '') || emotion !== (original?.emotion || '');
           if (changed && !theme) throw new Error('请先选择是否属于 DeepSeek 主题');
           const semantics = changed ? { deepseek: theme === 'yes', action, emotion } : null;
-          await api(`/api/images/${encodeURIComponent(state.selected.day)}/${encodeURIComponent(state.selected.file)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tags: state.tags, semantics }) });
-          dialog.close(); toast('图片关键词和识别信息已保存'); await load();
+          await api(`/api/images/${encodeURIComponent(state.selected.day)}/${encodeURIComponent(state.selected.file)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tags: state.tags, semantics, status: $('moderationStatus').value }) });
+          dialog.close(); toast('图片关键词和审核状态已保存'); await load();
         } catch (error) { toast(error.message, true); }
         finally { button.disabled = false; }
       });
@@ -322,8 +468,11 @@
       $('prevPage').addEventListener('click', () => { state.page = Math.max(1, state.page - 1); load(); });
       $('nextPage').addEventListener('click', () => { state.page = Math.min(state.pages, state.page + 1); load(); });
       $('dayFilter').addEventListener('change', () => { state.page = 1; load(); });
+      $('statusFilter').addEventListener('change', () => { state.page = 1; load(); });
+      $('analysisFilter').addEventListener('change', () => { state.page = 1; load(); });
       $('sortFilter').addEventListener('change', () => { state.page = 1; load(); });
       $('search').addEventListener('input', () => { clearTimeout(state.timer); state.timer = setTimeout(() => { state.page = 1; load(); }, 220); });
+      loadAutoSticker();
       load();
     })();
   </script>

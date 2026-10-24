@@ -6,11 +6,11 @@
 //
 // 存储：D:\deepseek\images\<YYYY-MM-DD>\<hash>.<ext>
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
-const ROOT = 'D:\\deepseek\\images';
+const ROOT = process.env.IMAGE_LIBRARY_ROOT || 'D:\\deepseek\\images';
 
 function ensure(dir) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -28,9 +28,9 @@ function extFor(mime) {
   return 'jpg';
 }
 
-/** 用内容哈希命名，天然去重：同一张图存一次。 */
+/** 按解码后的图片字节计算哈希，避免 base64 表示差异造成重复文件。 */
 function hashOf(b64) {
-  return createHash('sha1').update(b64).digest('hex').slice(0, 16);
+  return createHash('sha1').update(Buffer.from(b64, 'base64')).digest('hex').slice(0, 16);
 }
 
 /** 按内容哈希算出的文件名（供表情库引用，不重复存实体）。 */
@@ -44,16 +44,33 @@ export function nameFor(b64, mime) {
  */
 export function archiveImage(b64, mime) {
   try {
+    const bytes = Buffer.from(b64, 'base64');
+    if (!bytes.length) return null;
     const day = dayKey();
     const dir = join(ROOT, day);
     ensure(dir);
     const name = `${hashOf(b64)}.${extFor(mime || 'image/jpeg')}`;
     const path = join(dir, name);
-    if (!existsSync(path)) {
-      writeFileSync(path, Buffer.from(b64, 'base64'));
-      return { path, fresh: true, bytes: Buffer.from(b64, 'base64').length };
+    if (existsSync(path)) return { path, file: name, fresh: false, bytes: statSync(path).size };
+
+    // 查找旧版本按 base64 字符串命名的存档，避免升级后重复写入历史图片。
+    const legacyStem = createHash('sha1').update(b64).digest('hex').slice(0, 16);
+    if (existsSync(ROOT)) {
+      for (const folder of readdirSync(ROOT, { withFileTypes: true })) {
+        if (!folder.isDirectory() || !/^\d{4}-\d{2}-\d{2}$/.test(folder.name)) continue;
+        const candidates = readdirSync(join(ROOT, folder.name)).filter((file) =>
+          new RegExp(`^(?:${hashOf(b64)}|${legacyStem})\\.(?:jpg|jpeg|png|gif|webp)$`, 'i').test(file));
+        for (const candidateName of candidates) {
+          const candidate = join(ROOT, folder.name, candidateName);
+          if (statSync(candidate).isFile() && statSync(candidate).size === bytes.length) {
+            return { path: candidate, file: candidateName, fresh: false, bytes: bytes.length };
+          }
+        }
+      }
     }
-    return { path, fresh: false, bytes: statSync(path).size };
+
+    writeFileSync(path, bytes);
+    return { path, file: name, fresh: true, bytes: bytes.length };
   } catch {
     return null;
   }
@@ -66,7 +83,7 @@ export function archiveImage(b64, mime) {
 export function listArchived(days = 2) {
   if (!existsSync(ROOT)) return [];
   const out = [];
-  const dirs = readdirSync(ROOT).sort().reverse().slice(0, days);
+  const dirs = readdirSync(ROOT).filter((name) => /^\d{4}-\d{2}-\d{2}$/.test(name)).sort().reverse().slice(0, days);
   for (const d of dirs) {
     const dir = join(ROOT, d);
     if (!statSync(dir).isDirectory()) continue;
@@ -76,6 +93,24 @@ export function listArchived(days = 2) {
     }
   }
   return out;
+}
+
+/** Move an archived image out of the active gallery without irreversibly deleting it. */
+export function quarantineArchivedImage(day, file) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(day))
+    || !/^[a-f0-9]{16}\.(?:jpg|jpeg|png|gif|webp)$/i.test(String(file))) return null;
+  const source = join(ROOT, day, file);
+  if (!existsSync(source)) return null;
+  const targetDir = join(ROOT, '.quarantine', 'automatic-private-image-cleanup', day);
+  const target = join(targetDir, file);
+  try {
+    ensure(targetDir);
+    if (existsSync(target)) return null;
+    renameSync(source, target);
+    return target;
+  } catch {
+    return null;
+  }
 }
 
 /** 读某张缓存图为 base64（供转发/存档用）。 */
@@ -91,4 +126,19 @@ export function readArchived(path) {
 export function findArchived(hashPrefix) {
   const all = listArchived(30);
   return all.find((x) => x.file.startsWith(hashPrefix)) ?? null;
+}
+
+/** Locate an exact content-addressed image even when it was archived long ago. */
+export function findArchivedByName(file) {
+  const name = String(file ?? '');
+  if (!/^[a-f0-9]{16}\.(?:jpg|jpeg|png|gif|webp)$/i.test(name) || !existsSync(ROOT)) return null;
+  for (const folder of readdirSync(ROOT, { withFileTypes: true }).filter((entry) =>
+    entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name)).sort((a, b) => b.name.localeCompare(a.name))) {
+    const path = join(ROOT, folder.name, name);
+    try {
+      const info = statSync(path);
+      if (info.isFile()) return { path, day: folder.name, file: name, bytes: info.size };
+    } catch { /* continue searching */ }
+  }
+  return null;
 }

@@ -13,14 +13,20 @@
 // （万一只是临时限流，能自动恢复）。
 
 import http from 'node:http';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { addUsageRecord, createUsageDay, estimateRequestUsage, normalizeTokenUsage, usageFromSse } from './token-usage.mjs';
 
 const PORT = Number(process.env.PORT || 18901);
 const KEYS_FILE = process.env.KEYS_FILE || 'D:\\deepseek\\keys.json';
 const STATE_FILE = process.env.KEYS_STATE_FILE || 'D:\\deepseek\\state\\keys.json';
 const MODEL_STATE_FILE = process.env.MODEL_STATE_FILE || 'D:\\deepseek\\state\\models.json';
 const MODEL_POLICY_FILE = process.env.MODEL_POLICY_FILE || 'D:\\deepseek\\state\\model-policy.json';
+const MODEL_PROMOTION_HOLD_MS = 15 * 60_000;
 const MODEL_ACTIVITY_FILE = process.env.MODEL_ACTIVITY_FILE || 'D:\\deepseek\\state\\model-activity.json';
+const TOKEN_USAGE_FILE = process.env.TOKEN_USAGE_FILE || 'D:\\deepseek\\state\\token-usage.json';
+const TOKEN_USAGE_RETENTION_DAYS = 180;
 const COOLDOWN_MS = Number(process.env.KEY_COOLDOWN_MS || 60 * 60 * 1000); // 1h
 
 // 首字超时触发模型切换；已经开始输出的回答有更长的总时限。
@@ -34,6 +40,7 @@ const MODEL_COOLDOWN_MS = Number(process.env.MODEL_COOLDOWN_MS || 3 * 60 * 1000)
 const MODEL_RECOVERY_PROBE_INTERVAL_MS = Number(process.env.MODEL_RECOVERY_PROBE_INTERVAL_MS || 15_000);
 const MODEL_QUOTA_COOLDOWN_MS = Number(process.env.MODEL_QUOTA_COOLDOWN_MS || 5 * 60 * 1000);
 const MODEL_UNAVAILABLE_COOLDOWN_MS = Number(process.env.MODEL_UNAVAILABLE_COOLDOWN_MS || 30 * 60 * 1000);
+const MODEL_MANAGEMENT_URL = process.env.MODEL_MANAGEMENT_URL || 'http://127.0.0.1:18902';
 
 // DSH 内部 model id -> 上游实际 id（沿用原 model-map-proxy 的映射）
 const MAP = new Map(Object.entries({
@@ -109,10 +116,47 @@ let state = loadState();
 let modelState = loadModelState();
 let lastRecoveryProbeAt = 0;
 let recoveryProbeInFlight = false;
+const modelSyncInFlight = new Set();
 let activityHistory = null;
 try { activityHistory = JSON.parse(readFileSync(MODEL_ACTIVITY_FILE, 'utf8')); } catch {}
 let lastActivity = activityHistory?.lastActivity ?? activityHistory ?? null;
 let lastSuccess = activityHistory?.lastSuccess ?? (lastActivity?.outcome === 'success' ? lastActivity : null);
+let tokenUsageLedger = {};
+try { tokenUsageLedger = JSON.parse(readFileSync(TOKEN_USAGE_FILE, 'utf8')); } catch {}
+
+function tokenUsageDate(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Singapore', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(now);
+}
+
+function saveTokenUsage() {
+  const date = tokenUsageDate();
+  const cutoff = new Date(`${date}T00:00:00+08:00`);
+  cutoff.setDate(cutoff.getDate() - TOKEN_USAGE_RETENTION_DAYS);
+  const cutoffDate = tokenUsageDate(cutoff);
+  for (const key of Object.keys(tokenUsageLedger.days ?? {})) {
+    if (key < cutoffDate) delete tokenUsageLedger.days[key];
+  }
+  const temp = `${TOKEN_USAGE_FILE}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  mkdirSync(path.dirname(TOKEN_USAGE_FILE), { recursive: true });
+  writeFileSync(temp, JSON.stringify(tokenUsageLedger, null, 2), 'utf8');
+  try { renameSync(temp, TOKEN_USAGE_FILE); }
+  catch (error) { try { unlinkSync(temp); } catch {} throw error; }
+}
+
+function recordTokenUsage(model, usage, request, responseText) {
+  const date = tokenUsageDate();
+  tokenUsageLedger.days ??= {};
+  const day = tokenUsageLedger.days[date] ??= createUsageDay(date);
+  addUsageRecord(day, model, usage, estimateRequestUsage(request, responseText));
+  try { saveTokenUsage(); }
+  catch (error) { console.log(`[usage] failed to save daily token usage: ${error.message}`); }
+}
+
+function readTokenUsage(date) {
+  return tokenUsageLedger.days?.[date] ?? createUsageDay(date);
+}
 
 function activePolicy() {
   try {
@@ -127,6 +171,47 @@ function recordActivity(value) {
   if (value.outcome === 'success') lastSuccess = lastActivity;
   try { writeFileSync(MODEL_ACTIVITY_FILE, JSON.stringify({ lastActivity, lastSuccess }, null, 2), 'utf8'); }
   catch { /* runtime status is best effort */ }
+}
+
+function promoteModel(requested, actual) {
+  const current = activePolicy();
+  if (!current || current.autoPromote === false || current.primary !== requested || !current.fallbacks.includes(actual)) return null;
+  const lastPromotedAt = Date.parse(current.lastPromotedAt || '');
+  if (Number.isFinite(lastPromotedAt) && Date.now() - lastPromotedAt < MODEL_PROMOTION_HOLD_MS) {
+    console.log(`[models] promotion held for ${Math.ceil((MODEL_PROMOTION_HOLD_MS - (Date.now() - lastPromotedAt)) / 1000)}s; fallback ${actual} still served`);
+    return null;
+  }
+  const next = {
+    ...current,
+    version: Number(current.version || 0) + 1,
+    primary: actual,
+    lastPromotedAt: new Date().toISOString(),
+    fallbacks: [...current.fallbacks.filter((model) => model !== requested && model !== actual), requested],
+    checks: [
+      ...(Array.isArray(current.checks) ? current.checks.filter((check) => check.model !== actual) : []),
+      { model: actual, ok: true, source: 'complete-live-response', at: new Date().toISOString() },
+    ],
+  };
+  const temp = `${MODEL_POLICY_FILE}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  mkdirSync(path.dirname(MODEL_POLICY_FILE), { recursive: true });
+  writeFileSync(temp, JSON.stringify(next, null, 2), 'utf8');
+  try { renameSync(temp, MODEL_POLICY_FILE); }
+  catch (error) { try { unlinkSync(temp); } catch {} throw error; }
+  console.log(`[models] promoted ${actual} to primary after a complete live response; ${requested} moved to fallback`);
+  return next;
+}
+
+function syncPromotedModel(model) {
+  if (modelSyncInFlight.has(model)) return;
+  modelSyncInFlight.add(model);
+  fetch(`${MODEL_MANAGEMENT_URL}/api/models/promoted`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model }), signal: AbortSignal.timeout(10_000),
+  }).then(async (response) => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 160)}`);
+    console.log(`[models] DSH default and active sessions synced to ${model}`);
+  }).catch((error) => console.log(`[models] DSH model sync pending for ${model}: ${error.message}`))
+    .finally(() => modelSyncInFlight.delete(model));
 }
 
 function loadModelState() {
@@ -207,7 +292,22 @@ function hasStreamContent(text) {
   return false;
 }
 
-async function forward(entry, path, method, headers, body, res, timeoutMs = UPSTREAM_TIMEOUT_MS) {
+function hasStreamTerminal(text) {
+  for (const line of String(text).split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (data === '[DONE]') return true;
+    try {
+      const frame = JSON.parse(data);
+      if (frame?.choices?.some((choice) => choice?.finish_reason != null)) return true;
+      if (frame?.type === 'response.completed') return true;
+    } catch { /* wait for a complete SSE frame */ }
+  }
+  return false;
+}
+
+async function forward(entry, path, method, headers, body, res,
+  timeoutMs = UPSTREAM_TIMEOUT_MS, streamDeadline = Date.now() + MODEL_STREAM_TOTAL_TIMEOUT_MS) {
   const ctrl = new AbortController();
   let timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const resetTimer = (ms) => {
@@ -216,7 +316,9 @@ async function forward(entry, path, method, headers, body, res, timeoutMs = UPST
   };
   let sentStream = false;
   try {
-    const up = await fetch(entry.upstream + path, {
+    const upstreamPath = /\/api\/paas\/v\d+$/i.test(entry.upstream)
+      ? path.replace(/^\/v1(?=\/)/, '') : path;
+    const up = await fetch(entry.upstream + upstreamPath, {
       method,
       headers: { ...headers, authorization: `Bearer ${entry.key}` },
       body,
@@ -230,17 +332,28 @@ async function forward(entry, path, method, headers, body, res, timeoutMs = UPST
       const decoder = new TextDecoder();
       const pendingChunks = [];
       let pendingText = '';
+      let usage = null;
+      let usagePending = '';
+      const updateUsage = (chunk) => {
+        usagePending += chunk;
+        const boundary = usagePending.lastIndexOf('\n');
+        if (boundary < 0) return;
+        usage = usageFromSse(usagePending.slice(0, boundary + 1)) ?? usage;
+        usagePending = usagePending.slice(boundary + 1);
+      };
       try {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
           if (res.destroyed) {
             await reader.cancel().catch(() => {});
-            return { status: up.status, text: pendingText, contentType, streamed: true };
+            return { status: up.status, text: pendingText, contentType, streamed: true, complete: false, interrupted: true };
           }
+          const decoded = decoder.decode(value, { stream: true });
+          pendingText += decoded;
+          updateUsage(decoded);
           if (!sentStream) {
             pendingChunks.push(Buffer.from(value));
-            pendingText += decoder.decode(value, { stream: true });
             if (isStreamModelFailure(up.status, pendingText)) {
               await reader.cancel().catch(() => {});
               return { status: up.status, text: pendingText, contentType };
@@ -250,13 +363,16 @@ async function forward(entry, path, method, headers, body, res, timeoutMs = UPST
               for (const chunk of pendingChunks) res.write(chunk);
               pendingChunks.length = 0;
               sentStream = true;
-              resetTimer(MODEL_STREAM_TOTAL_TIMEOUT_MS);
+              resetTimer(Math.max(1, streamDeadline - Date.now()));
             }
           } else {
             res.write(value);
           }
         }
-        pendingText += decoder.decode();
+        const finalChunk = decoder.decode();
+        pendingText += finalChunk;
+        updateUsage(finalChunk);
+        usage = usageFromSse(usagePending) ?? usage;
         if (!sentStream) {
           if (isStreamModelFailure(up.status, pendingText)) {
             return { status: up.status, text: pendingText, contentType };
@@ -274,12 +390,13 @@ async function forward(entry, path, method, headers, body, res, timeoutMs = UPST
           for (const chunk of pendingChunks) res.write(chunk);
         }
         res.end();
-        return { status: up.status, text: '', contentType, streamed: true };
+        return { status: up.status, text: '', usageText: pendingText, usage, contentType, streamed: true,
+          complete: hasStreamTerminal(pendingText) && !isStreamModelFailure(up.status, pendingText) };
       } catch (error) {
         if (sentStream) {
           console.log(`[stream] ${entry.name} downstream stream ended early: ${error.message}`);
           if (!res.destroyed) res.end();
-          return { status: up.status, text: '', contentType, streamed: true, interrupted: true };
+          return { status: up.status, text: '', usageText: pendingText, usage, contentType, streamed: true, complete: false, interrupted: true };
         }
         throw error;
       } finally {
@@ -288,9 +405,13 @@ async function forward(entry, path, method, headers, body, res, timeoutMs = UPST
     }
 
     const text = await up.text();
+    let usage = null;
+    try { usage = normalizeTokenUsage(JSON.parse(text)?.usage); } catch {}
     return {
       status: up.status,
       text,
+      usageText: text,
+      usage,
       contentType,
     };
   } finally {
@@ -467,7 +588,8 @@ async function adminWrite(pathname, body, res) {
     if (!k) return fail('没找到这个密钥');
     const t0 = Date.now();
     try {
-      const up = await fetch(k.upstream + '/v1/chat/completions', {
+      const testPath = /\/api\/paas\/v\d+$/i.test(k.upstream) ? '/chat/completions' : '/v1/chat/completions';
+      const up = await fetch(k.upstream + testPath, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${k.key}` },
         body: JSON.stringify({
@@ -522,6 +644,38 @@ const server = http.createServer((req, res) => {
       }));
       return;
     }
+    if (req.method === 'GET' && (req.url === '/_usage' || req.url.startsWith('/_usage?'))) {
+      if (!clientIsLocal(req)) { res.writeHead(403); res.end('forbidden'); return; }
+      const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+      const date = url.searchParams.get('date') || tokenUsageDate();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'date must use YYYY-MM-DD' }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(readTokenUsage(date)));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/_models/healthy') {
+      if (!clientIsLocal(req)) { res.writeHead(403); res.end('forbidden'); return; }
+      let value;
+      try { value = JSON.parse(req.__raw || '{}'); } catch { value = {}; }
+      if (typeof value.model !== 'string' || !value.model) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, message: 'model is required' }));
+        return;
+      }
+      let cleared = 0;
+      for (const entry of KEYS) {
+        const route = modelRouteKey(entry.upstream, value.model);
+        if (modelState[route]) { delete modelState[route]; cleared++; }
+      }
+      if (cleared) saveModelState();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, model: value.model, cleared }));
+      return;
+    }
     if (req.url.startsWith('/_reload')) {
       KEYS = loadKeys();
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -550,8 +704,11 @@ const server = http.createServer((req, res) => {
     const mayFallback = model && /\/(?:chat\/completions|responses)(?:\?|$)/.test(path);
     const policy = activePolicy();
     const fallbacks = hasImageInput(requestJson) ? VISION_MODEL_FALLBACKS : (policy?.fallbacks ?? CHAT_MODEL_FALLBACKS);
+    const configuredPrimary = mayFallback && policy?.primary !== model && policy?.fallbacks?.includes(model)
+      ? policy.primary : null;
     const modelCandidates = mayFallback
-      ? [...new Set([model, ...fallbacks])].slice(0, Math.max(MODEL_MAX_ATTEMPTS, policy ? policy.fallbacks.length + 1 : 0))
+      ? [...new Set([...(configuredPrimary ? [configuredPrimary] : []), model, ...fallbacks])]
+        .slice(0, Math.max(MODEL_MAX_ATTEMPTS, policy ? policy.fallbacks.length + 1 : 0))
       : [model];
     const modelDeadline = mayFallback ? Date.now() + (policy?.fallbackBudgetMs ?? MODEL_FALLBACK_BUDGET_MS) : Infinity;
 
@@ -617,6 +774,19 @@ const server = http.createServer((req, res) => {
         if (candidate && requestJson && candidate !== requestJson.model) {
           requestBody = Buffer.from(JSON.stringify({ ...requestJson, model: candidate }), 'utf8');
         }
+        let plainRequestBody = requestBody;
+        let usageOptionAdded = false;
+        if (requestJson?.stream === true && /\/chat\/completions(?:\?|$)/.test(path) && requestBody) {
+          try {
+            const value = JSON.parse(requestBody.toString());
+            if (value.stream_options?.include_usage !== true) {
+              plainRequestBody = requestBody;
+              value.stream_options = { ...(value.stream_options || {}), include_usage: true };
+              requestBody = Buffer.from(JSON.stringify(value), 'utf8');
+              usageOptionAdded = true;
+            }
+          } catch { /* Preserve non-JSON requests unchanged. */ }
+        }
 
         let r;
         const attemptStarted = Date.now();
@@ -624,9 +794,15 @@ const server = http.createServer((req, res) => {
           requestJson?.stream === true ? (policy?.firstTokenTimeoutMs ?? MODEL_FIRST_TOKEN_TIMEOUT_MS) : UPSTREAM_TIMEOUT_MS,
           remainingMs
         );
+        const streamDeadline = Math.min(modelDeadline, attemptStarted + MODEL_STREAM_TOTAL_TIMEOUT_MS);
         try {
           r = await forward(entry, path, req.method, headers, requestBody,
-            res, timeoutMs);
+            res, timeoutMs, streamDeadline);
+          if (usageOptionAdded && r.status === 400) {
+            console.log(`[usage] ${candidate} returned HTTP 400 with optional usage reporting; retrying without the flag`);
+            r = await forward(entry, path, req.method, headers, plainRequestBody,
+              res, Math.min(UPSTREAM_TIMEOUT_MS, Math.max(1, modelDeadline - Date.now())), streamDeadline);
+          }
         } catch (err) {
           // 网络/首字超时不代表 key 失效；暂时冷却此模型路由，再继续尝试。
           lastModelFailure = {
@@ -641,6 +817,13 @@ const server = http.createServer((req, res) => {
         }
         if (path.includes('/chat/completions') || path.includes('/responses')) {
           console.log(`[response] ${candidate} HTTP ${r.status} ${r.contentType} ${Date.now() - attemptStarted}ms`);
+        }
+
+        if (r.streamed && !r.complete) {
+          coolModel(entry, candidate, 'incomplete stream');
+          recordActivity({ requested: model, attempted: candidate, outcome: 'failed', reason: 'stream ended before a completion marker' });
+          console.log(`[models] ${candidate} stream was incomplete; it will not be promoted`);
+          return;
         }
 
         if (isQuotaFailure(r.status, r.text) || isUnavailableModel(r.status, r.text) || isStreamModelFailure(r.status, r.text)) {
@@ -669,7 +852,18 @@ const server = http.createServer((req, res) => {
         }
 
         markModelHealthy(entry, candidate);
-        if (r.status >= 200 && r.status < 300) recordActivity({ requested: model, actual: candidate, outcome: 'success', fallback: candidate !== model });
+        if (r.status >= 200 && r.status < 300) {
+          recordTokenUsage(candidate, r.usage, requestJson, r.usageText ?? r.text);
+          let promoted = null;
+          if (candidate !== model) {
+            try { promoted = promoteModel(model, candidate); }
+            catch (error) { console.log(`[models] could not persist promotion to ${candidate}: ${error.message}`); }
+          }
+          recordActivity({ requested: model, actual: candidate, outcome: 'success', fallback: candidate !== model,
+            promoted: Boolean(promoted), policyVersion: promoted?.version });
+          if (promoted) syncPromotedModel(candidate);
+          else if (policy?.primary === candidate && candidate !== model && policy.fallbacks.includes(model)) syncPromotedModel(candidate);
+        }
         if (r.streamed) {
           if (candidate !== model) console.log(`[models] ${model} served with fallback ${candidate}`);
           return;

@@ -1,4 +1,11 @@
 const IMAGE_FOLLOWUP_MS = 5 * 60_000;
+const UNRECOGNIZED_IMAGE = /(?:无法|不能|没法|看不清|识别不出|未能).{0,14}(?:识别|看清|辨认|图片|图像|画面|内容|文字)|(?:图片|图像|画面|内容|文字).{0,14}(?:无法|不能|没法|看不清|识别不出|未能)|看不出(?:图片|图像|画面|内容)/i;
+
+export function hasUsableImageDescription(value) {
+  const description = String(value ?? '').trim();
+  return description.length >= 2 && !UNRECOGNIZED_IMAGE.test(description)
+    && !/^(?:\[?图片\]?|QQ 图片|未知图片|无可用描述)$/i.test(description);
+}
 
 export function recentImageFollowupContext(image, text, now = Date.now()) {
   if (!image?.caption || now - image.at < 0 || now - image.at > IMAGE_FOLLOWUP_MS) return '';

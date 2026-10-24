@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { describeMessageReferences, explicitGroupReplyDecision, groupTurnPrompt } from '../src/qq-message-context.mjs';
+import { describeMessageReferences, explicitGroupReplyDecision, groupTurnPrompt, shouldSkipUnaddressedGroupMedia } from '../src/qq-message-context.mjs';
 
 const botSelf = '2427256325';
 const keywords = ['小鲸鱼', '鲸鱼', 'deepseek'];
@@ -38,4 +38,17 @@ test('group turns identify each speaker and keep self-descriptions with that spe
   assert.match(first, /【本轮发言人原话】"真好，看的叔叔骨架都暖暖的"/);
   assert.match(second, /发言人："群友乙"（QQ 789），群友/);
   assert.doesNotMatch(second, /群友甲/);
+  assert.match(first, /对象、图片含义、指代或上下文不确定时/);
+});
+
+test('unaddressed group images stay silent while direct mentions and replies to the bot are processed', () => {
+  assert.equal(shouldSkipUnaddressedGroupMedia({ isGroup: true, text: '', mediaCount: 1, references: {}, botSelf }), true);
+  assert.equal(shouldSkipUnaddressedGroupMedia({ isGroup: true, text: '', mediaCount: 1,
+    references: { hasBotMention: true }, botSelf }), false);
+  assert.equal(shouldSkipUnaddressedGroupMedia({ isGroup: true, text: '', mediaCount: 1,
+    references: { replyId: '1', quotedUserId: botSelf }, botSelf }), false);
+  assert.equal(shouldSkipUnaddressedGroupMedia({ isGroup: true, text: '这是什么图', mediaCount: 1,
+    references: {}, botSelf }), false);
+  assert.equal(shouldSkipUnaddressedGroupMedia({ isGroup: false, text: '', mediaCount: 1,
+    references: {}, botSelf }), false);
 });

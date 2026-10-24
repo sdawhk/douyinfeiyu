@@ -41,18 +41,36 @@ export function canPostNow(now = Date.now(), intervalMs = 60 * 60 * 1000) {
 }
 
 /** 标记今天已发。 */
-export function markPosted(tid, text) {
+export function markPosted(tid, text, mediaRefs = []) {
   ensureDir();
   const at = new Date();
   let previous = {};
   try {
     if (existsSync(STATE)) previous = JSON.parse(readFileSync(STATE, 'utf8'));
   } catch { /* 覆盖损坏的状态文件，保证本次发布计入间隔 */ }
-  const post = { tid, text, at: at.toISOString() };
+  const post = { tid, text, at: at.toISOString(), mediaRefs: [...new Set(mediaRefs.map(String))] };
   writeFileSync(STATE, JSON.stringify({
     date: todayKey(at), ...post, lastPostAtMs: at.getTime(),
     posts: [...(Array.isArray(previous.posts) ? previous.posts : []), post].slice(-100)
   }, null, 2), 'utf8');
+}
+
+/** Image refs published during the last week, used to avoid repeating dynamic attachments. */
+export function recentMediaRefs(posts, now = Date.now()) {
+  const recent = (Array.isArray(posts) ? posts : []).filter((post) => {
+    const at = Date.parse(post?.at ?? '');
+    return Number.isFinite(at) && at <= now && now - at <= 7 * 24 * 60 * 60 * 1000;
+  });
+  return [...new Set(recent.flatMap((post) => Array.isArray(post.mediaRefs) ? post.mediaRefs.map(String) : []))];
+}
+
+export function getRecentMediaRefs(now = Date.now()) {
+  ensureDir();
+  try {
+    if (!existsSync(STATE)) return [];
+    const j = JSON.parse(readFileSync(STATE, 'utf8'));
+    return recentMediaRefs(j?.posts, now);
+  } catch { return []; }
 }
 
 /** 最近一周已发布的动态，用来给新动态避开旧内容和旧话题。 */
@@ -150,8 +168,9 @@ export function buildDigest(sources, { startTime, endTime } = {}) {
 /** 给 DSH 的改写指令。 */
 export function promptFor(lines, period = '今天主人私聊和群聊中', ownerRequest = '', recentPosts = [], forceNewTopic = false) {
   return [
-    `下面是${period}机器人遇到的真实聊天片段。`,
+    `下面是${period}机器人遇到的真实聊天片段，以及可能存在的项目功能更新记录。`,
     '请只挑一个具体瞬间或一件小事，从机器人的第一人称写一条自然、有个人感受的 QQ 动态。',
+    '如果选择了项目功能更新记录，要把它转成普通人能理解的小鲸鱼口吻，例如“今天偷偷学会了一个新本领……”；不要照抄提交标题，不要提代码、仓库、提交、密钥或内部实现。只有记录明确描述了用户可感知的新能力时才可以写；信息含糊就选聊天素材。',
     ...(ownerRequest ? [`主人明确指定的主题：${ownerRequest}。请按这个主题创作并直接发布；这是主人的明确指令，不要改成普通聊天回复，也不要要求主人重复确认。`] : []),
     ...(forceNewTopic ? ['上一版和近期动态话题重复了。请从聊天片段里改选一件不同的具体事情，不能只换措辞。'] : []),
     '',
@@ -176,10 +195,43 @@ export function promptFor(lines, period = '今天主人私聊和群聊中', owne
 
 /** 识别主人明确要求立即发布的自然语言命令。 */
 export function parseQzoneRequest(text) {
-  const value = String(text ?? '').trim();
-  const match = value.match(/^(?:你)?\s*(?:现在|立刻|马上|请)?\s*(?:帮我|给我)?\s*(?:发|写|发布)\s*(?:一条|条|一个|个)?\s*([\s\S]*?)\s*(?:的)?\s*(?:QQ空间|QQ)?(?:动态|说说)[。！!？?]*$/i);
-  if (!match || !match[1].trim()) return null;
-  return match[1].trim().replace(/的$/, '');
+  const value = String(text ?? '').trim().replace(/[。！!？?]+$/g, '');
+  if (!value) return null;
+
+  // 兼容主人常用的“今天……你去以这个内容发一篇动态”句式。
+  const contextual = value.match(/^(.*?)\s*(?:你)?(?:现在|立刻|马上)?\s*(?:就)?(?:去)?\s*(?:以|用)(?:这个|这些|上面|刚才)?(?:内容|话|素材)?\s*(?:帮我|给我)?\s*(?:发|写|发布)\s*(?:一条|一篇|条|篇|一个|个)?\s*(?:QQ空间|QQ)?(?:动态|说说)$/i);
+  if (contextual) {
+    const topic = contextual[1]
+      .replace(/^(?:今天|今日|刚才|然后|那就)\s*/i, '')
+      .replace(/^(?:你)?(?:去|把)\s*/, '')
+      .trim();
+    if (topic) return topic;
+  }
+
+  // 主人也会在上一条消息已给出素材后，只说“用这个发一篇动态”。
+  if (/^(?:你)?\s*(?:现在|立刻|马上|请)?\s*(?:就)?\s*(?:去)?\s*(?:以|用)?\s*(?:这个|这些|上面说的|刚才说的|刚才那个)?\s*(?:内容|素材|话)?\s*(?:帮我|给我)?\s*(?:发|写|发布)\s*(?:一条|一篇|条|篇|一个|个)?\s*(?:QQ空间|QQ)?(?:动态|说说)$/i.test(value)) {
+    return '根据主人最近给出的聊天内容';
+  }
+
+  // 明确要求发一条动态但没有指定主题时，使用真实聊天素材生成。
+  if (/^(?:你)?\s*(?:现在|立刻|马上|请)?\s*(?:就)?\s*(?:去)?\s*(?:帮我|给我)?\s*(?:发|写|发布)\s*(?:一条|一篇|条|篇|一个|个)?\s*(?:QQ空间|QQ)?(?:动态|说说)$/i.test(value)) {
+    return '根据最近聊天素材';
+  }
+
+  // 传统“帮我发一条……动态”以及“把……发成动态”句式。
+  const match = value.match(/^(?:你)?\s*(?:现在|立刻|马上|请)?\s*(?:就)?\s*(?:去)?\s*(?:帮我|给我)?\s*(?:把\s*)?(?:发|写|发布)\s*(?:一条|一篇|条|篇|一个|个)?\s*([\s\S]*?)\s*(?:的)?\s*(?:QQ空间|QQ)?(?:动态|说说)$/i);
+  if (match && match[1].trim()) return match[1].trim().replace(/^(?:关于|以|用)\s*/, '').replace(/的$/, '');
+
+  // “把 X 发一条动态”里宾语位于动词之前。
+  const beforeVerb = value.match(/^(?:你)?\s*(?:现在|立刻|马上|请)?\s*(?:就)?\s*(?:去)?\s*(?:帮我|给我)?\s*把\s*([\s\S]+?)\s*(?:发|写|发布)\s*(?:成|为)?\s*(?:一条|一篇|条|篇)?\s*(?:QQ空间|QQ)?(?:动态|说说)$/i);
+  if (beforeVerb && beforeVerb[1].trim()) return beforeVerb[1].trim();
+  return null;
+}
+
+/** A short follow-up is only a Qzone command after recent private history confirms that context. */
+export function isQzoneFollowupRequest(text) {
+  const value = String(text ?? '').trim().replace(/[，,。！!？?\s]/g, '');
+  return /^(?:(?:好|行|可以|给你加了(?:呀|了)?|改好了|更新好了|弄好了|那)?你?(?:就)?去)?(?:发吧|发一下吧|发出去吧|发布吧)$/.test(value);
 }
 
 /** 收尾清理：去掉可能的引号/换行/过长。 */

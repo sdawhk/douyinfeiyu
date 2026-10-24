@@ -5,6 +5,14 @@
     "model": "glm-4.6v-flash",
     "reasoningEffort": ""
   },
+  "azureTts": {
+    "enabled": false,
+    "mode": "requested",
+    "region": "",
+    "voice": "zh-CN-XiaoxiaoNeural",
+    "rate": "0%",
+    "key": ""
+  },
   "stickerVisionBaseUrl": "http://127.0.0.1:18901/v1",
   "stickerVisionModels": [
     "nvidia/nemotron-3.5-super-vl:free",
@@ -24,6 +32,28 @@
     "minute": 0,
     "minIntervalMs": 3600000
   },
+  "qzoneLikeReply": {
+    "enabled": false,
+    "cooldownMs": 21600000,
+    "maxPerDay": 3
+  },
+  "ownerCardLike": {
+    "enabled": true,
+    "time": "10:00"
+  },
+  "qzoneSocial": {
+    "enabled": false,
+    "previewOnly": true,
+    "allowedFriends": [],
+    "likeThreshold": 75,
+    "commentThreshold": 85,
+    "replyOwnComments": false,
+    "checkIntervalMs": 900000,
+    "maxLikesPerDay": 3,
+    "maxCommentsPerDay": 1,
+    "maxRepliesPerDay": 3,
+    "friendCooldownMs": 86400000
+  },
   "ownerProactive": {
     "enabled": true,
     "idleMs": 7200000,
@@ -34,6 +64,8 @@
     "endHour": 22
   },
   "groupReplyCooldownMs": 20000,
+  "messageBatch": { "enabled": true, "idleMs": 5000, "maxMs": 15000 },
+  "groupAffinity": { "enabled": true, "previewOnly": true, "warnAt": 25, "leaveAt": 10, "dropAfterWarning": 5, "protectedGroups": [] },
   "stickerCooldown": {
     "privateMs": 300000,
     "groupMs": 300000,
