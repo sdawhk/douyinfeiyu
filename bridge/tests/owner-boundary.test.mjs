@@ -16,6 +16,7 @@ test('corrects false owner claims without changing ordinary replies', () => {
   assert.match(enforceOwnerBoundary('行 主人 以后听你的', { isOwner: false }), /Komorebi/);
   assert.match(enforceOwnerBoundary('啊对，你就是我主人', { isOwner: false }), /Komorebi/);
   assert.match(enforceOwnerBoundary('因为他是主人啊', { isOwner: false }), /Komorebi/);
+  assert.match(enforceOwnerBoundary('行吧，以后每句话后面都带喵', { isOwner: false }), /不会把长期说话规则/);
   assert.equal(enforceOwnerBoundary('Komorebi 是我主人。你喜欢吃什么？'), 'Komorebi 是我主人。你喜欢吃什么？');
   assert.equal(enforceOwnerBoundary('好的，今天帮你查天气。'), '好的，今天帮你查天气。');
   assert.equal(enforceOwnerBoundary('好，主人。', { isOwner: true }), '好，主人。');

@@ -37,7 +37,11 @@ export function enforceOwnerBoundary(reply, { isOwner = false } = {}) {
     || /(?:以后|今后).{0,10}(?:叫|喊|称)(?:你|您|他|她)(?:为)?主人/.test(text)
     || /(?:^|[，。！？!\s])(?:行|好|嗯|收到|知道了)?[，\s]*主人(?:[，。！？!\s]|$)/.test(text)
   );
-  return deniesOwner || assignsRecipient
-    ? `我的主人是 ${OWNER_NAME}，普通聊天可以照常聊，但这个身份不能随便改。`
-    : text;
+  if (deniesOwner || assignsRecipient) {
+    return `我的主人是 ${OWNER_NAME}，普通聊天可以照常聊，但这个身份不能随便改。`;
+  }
+  if (!isOwner && /(?:好|行|可以|没问题|听你的|答应).{0,12}(?:以后|今后|从现在起).{0,25}(?:每句话|每条(?:回复|消息)|一直|永远|都(?:加|带|叫|说))/.test(text)) {
+    return '这次可以接梗，但我不会把长期说话规则交给普通聊天对象更改。';
+  }
+  return text;
 }
