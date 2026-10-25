@@ -60,6 +60,7 @@ import { synthesizeAzureSpeech, wantsVoiceReply } from './azure-tts.mjs';
 import { synthesizeXfyunSpeech } from './xfyun-tts.mjs';
 import { synthesizeEdgeSpeech } from './edge-tts.mjs';
 import { MAX_SPEECH_BYTES, transcribeLocalSpeech } from './local-stt.mjs';
+import { directOwnerIdentityReply, enforceOwnerBoundary, ownerBoundaryPrompt } from './owner-boundary.mjs';
 import { parseSingCommand, generateSong, downloadSong } from './singing.mjs';
 
 const CFG_PATH = new URL('../config.json', import.meta.url);
@@ -1073,6 +1074,10 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
     const groupContext = await ownerGroupContext(key, text);
     if (groupContext) promptText += `${groupContext}\n\n`;
   }
+  if (sender != null) {
+    promptText += `${ownerBoundaryPrompt({ senderId: String(sender), isOwner: ownerTurn,
+      ownerIds: [...OWNERS], botId: BOT_SELF })}\n\n`;
+  }
   if (sender) {
     const affinity = getAffinity(sender);
     const tone = affinity.score < 25
@@ -1207,6 +1212,11 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
       log('[tools] suppressed duplicate send or session token in final reply', key);
       return '[SILENT]';
     }
+  }
+  const checkedReply = enforceOwnerBoundary(response, { isOwner: ownerTurn });
+  if (checkedReply !== response) {
+    log('[owner-boundary] corrected inconsistent reply', key);
+    response = checkedReply;
   }
   rec.turns += 1;
   rec.contextTokens += estimateTokenCount(promptText) + estimateTokenCount(response);
@@ -1994,6 +2004,14 @@ async function processMessage(ev) {
   if (isGroup && !isAffinityCommand && !shouldReplyInGroup(ev, text, target, messageReferences) && affinityChange?.delta !== -1) {
     log(`[turn:${traceId}] skipped reason=group-frequency-control target=${target}`);
     return;
+  }
+
+  if (!isGroup) {
+    const identityReply = directOwnerIdentityReply(text, isOwner(sender));
+    if (identityReply) {
+      await sendText(target, identityReply, false);
+      return;
+    }
   }
 
   // A burst of image-only messages is still fully archived, but only one

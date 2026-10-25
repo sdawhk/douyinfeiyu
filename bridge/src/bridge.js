@@ -7030,7 +7030,7 @@ async function main() {
       tail: String(plainContent ?? textContent).slice(-200),
       quoteTargetIsSelf: !!quoteTargetIsSelf,
       isOwner: !!isOwner,
-      ownerLabel: isOwner ? `管理员（ownerQQ ${cfg.ownerQQ ?? ''}）` : '',
+      ownerLabel: isOwner ? `管理员（已验证 QQ ${userId ?? ''}）` : '',
       isSelf: false,
       media: safeMedia,
       hasMedia: safeMedia.length > 0,
@@ -7760,7 +7760,8 @@ async function main() {
     // 因此必须先解析 quoteTargetIsSelf 再做空文本过滤，避免“只引用不附文”被漏掉。
     const quoteTargetIsSelf = await isQuoteTargetSelf(event.message ?? [], kind, id, event.self_id);
     if (!plainContent && !quoteTargetIsSelf) return;
-    const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
+    const isOwner = (Array.isArray(cfg.ownerQQs) && cfg.ownerQQs.length ? cfg.ownerQQs : [cfg.ownerQQ])
+      .some((id) => String(id) === String(event.user_id));
     if (TOOL_SIDECAR) {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
       appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner,
