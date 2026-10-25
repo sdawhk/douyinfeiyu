@@ -34,6 +34,13 @@ test('blocks less explicit planning language in Chinese and English', () => {
   }
 });
 
+test('blocks English recap analysis about a previous group message', () => {
+  const result = sanitizeModelReply('长期素食 said "这大肥鱼笨笨的" and then "没有那么好玩嘞". Hmm, the previous message "这大肥鱼笨笨的" — 大肥鱼 is my 雷点 (they call me 蓝色大肥鱼). But co…');
+  assert.equal(result.text, '');
+  assert.equal(result.blocked, true);
+  assert.equal(result.leaked, true);
+});
+
 test('extracts only the final segment after explicit reasoning tags', () => {
   const result = sanitizeModelReply('<|analysis|>The user means a gold coin promise.<|final|>金币上的承诺，我先保留怀疑。');
   assert.equal(result.text, '金币上的承诺，我先保留怀疑。');

@@ -76,6 +76,9 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `sendDelayMs` | QQ 连续发送间隔，防止触发频率限制 |
 | `consolePort` | 本地控制台端口，默认 `3100` |
 | `consoleToken` | 控制台访问令牌；留空时启动自动生成并保存到 `state/console-token` |
+| `speechRecognition.modelDir` | 本地 SenseVoice 模型目录，默认 `D:/deepseek/state/voice-asr` |
+
+首次启用 QQ 语音识别时运行 `node --use-env-proxy scripts/install-local-stt.mjs`，下载并校验约 240 MB 的离线模型。机器人通过 OneBot 获取 WAV，在本机识别语音后按文字消息处理；识别失败会写入桥接日志。模型文件保存在运行目录，不入库。
 
 > ⚠️ `allowAllWhenEmpty: true` 表示「白名单没填就全部放行」——把 agent 接入 QQ 等于把账号控制权交给了模型，建议先填白名单。
 
@@ -180,7 +183,7 @@ qq-bridge/
 ## 已知限制
 
 - agent 回复在回合结束时一次性发送（不做流式逐字转发）；回复超过 4000 字自动分段
-- QQ 图片/语音/视频会转成 `[图片]` 等占位文本给 agent
+- QQ 图片与视频目前仍以占位文本交给 agent；语音消息会先在本机转成文字
 - agent 的 Markdown 回复会转成纯文本（链接保留 `文字 (url)` 形式）
 - `@snowluma/sdk` 的 npm 发布版存在 ESM 扩展名 bug，本仓库通过 postinstall 补丁修复（见 `scripts/patch-snowluma-sdk.mjs`）
 

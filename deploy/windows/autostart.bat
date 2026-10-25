@@ -75,7 +75,7 @@ rem ---- 5. local image library ----
 netstat -ano | findstr /R /C:":18902 .*LISTENING" >nul 2>&1
 if errorlevel 1 (
   echo [%date% %time%] starting image library >> "%LOGDIR%\autostart.log"
-  start "ImageLibrary" /MIN /D "%ROOT%" "%NODE%" "%ROOT%\repo\bridge\src\image-library-server.mjs"
+  start "ImageLibrary" /MIN /D "%ROOT%" "%NODE%" --use-env-proxy "%ROOT%\repo\bridge\src\image-library-server.mjs"
 ) else (
   echo [%date% %time%] image library already up, skip >> "%LOGDIR%\autostart.log"
 )

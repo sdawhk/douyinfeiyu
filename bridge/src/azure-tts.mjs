@@ -30,5 +30,5 @@ export async function synthesizeAzureSpeech(text, config, fetchImpl = fetch) {
 }
 
 export function wantsVoiceReply(input, mode = 'requested') {
-  return mode === 'always' || /(?:语音说|用语音|发语音|说出来|语音回复)/i.test(String(input ?? ''));
+  return mode === 'always' || /(?:语音说|用语音|(?:给我)?发(?:个|句|条|段)?语音|说出来|语音回复|语音回答)/i.test(String(input ?? ''));
 }

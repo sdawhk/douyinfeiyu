@@ -23,5 +23,8 @@ test('Azure synthesis uses TrueSilk output and returns a OneBot base64 record fi
 test('speech is opt-in by phrase unless automatic mode is selected', () => {
   assert.equal(wantsVoiceReply('今天天气不错'), false);
   assert.equal(wantsVoiceReply('请用语音说出来'), true);
+  assert.equal(wantsVoiceReply('发句语音'), true);
+  assert.equal(wantsVoiceReply('给我发个语音'), true);
+  assert.equal(wantsVoiceReply('语音回答我'), true);
   assert.equal(wantsVoiceReply('今天天气不错', 'always'), true);
 });

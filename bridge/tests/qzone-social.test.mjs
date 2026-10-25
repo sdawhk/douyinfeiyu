@@ -1,10 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { plainQzoneText, qzoneCommentKey, qzoneFeedKey } from '../src/qzone-social.mjs';
+import { plainQzoneText, qzoneCommentKey, qzoneFeedKey, qzonePostsWithComments } from '../src/qzone-social.mjs';
 
 test('Qzone text extraction removes markup and decodes common escaped text', () => {
   assert.equal(plainQzoneText('<div>今天 &amp; 明天<br>都好</div><script>ignore()</script>'), '今天 & 明天 都好');
   assert.equal(plainQzoneText('&#x9C7C;\\u9C7C\\x21'), '鱼鱼!');
+});
+
+test('own Qzone scan rejects a stale response without comment data', () => {
+  assert.throws(() => qzonePostsWithComments({ msglist: [{ tid: 'post-1', comment_num: 1 }] }), /comments/);
+  assert.deepEqual(qzonePostsWithComments({ msglist: [{ tid: 'post-1', comments: [] }] }), [{ tid: 'post-1', comments: [] }]);
 });
 
 test('Qzone feed and comment keys require stable identifiers', () => {

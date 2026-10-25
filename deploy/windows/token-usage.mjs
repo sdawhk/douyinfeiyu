@@ -79,10 +79,24 @@ export function estimateRequestUsage(request, responseText = '') {
 export function createUsageDay(date) {
   return { date, requests: 0, exactRequests: 0, estimatedRequests: 0,
     inputTokens: 0, outputTokens: 0, totalTokens: 0,
-    estimatedInputTokens: 0, estimatedOutputTokens: 0, estimatedTotalTokens: 0, models: {} };
+    estimatedInputTokens: 0, estimatedOutputTokens: 0, estimatedTotalTokens: 0, models: {}, sources: {} };
 }
 
-export function addUsageRecord(day, model, usage, estimate) {
+export function usageSourceFromRequest(request) {
+  const input = request?.messages ?? request?.input ?? [];
+  if (Array.isArray(input) && input.some((message) =>
+    Array.isArray(message?.content) && message.content.some((part) =>
+      ['image_url', 'input_image', 'image'].includes(part?.type)))) return 'vision';
+  const items = Array.isArray(input) ? [...input].reverse() : [input];
+  for (const item of items) {
+    const text = typeof item === 'string' ? item : JSON.stringify(item ?? '');
+    const markers = [...text.matchAll(/【用量场景:(group|private|task)】/g)];
+    if (markers.length) return markers.at(-1)[1];
+  }
+  return 'other';
+}
+
+export function addUsageRecord(day, model, usage, estimate, source = 'other') {
   day.requests += 1;
   const exact = normalizeTokenUsage(usage);
   const value = exact ?? estimate;
@@ -102,5 +116,14 @@ export function addUsageRecord(day, model, usage, estimate) {
   item[inputKey] += value.inputTokens ?? 0;
   item[outputKey] += value.outputTokens ?? 0;
   item[totalKey] += value.totalTokens ?? ((value.inputTokens ?? 0) + (value.outputTokens ?? 0));
+  day.sources ??= {};
+  const sourceItem = day.sources[source] ??= { requests: 0, exactRequests: 0, estimatedRequests: 0,
+    inputTokens: 0, outputTokens: 0, totalTokens: 0,
+    estimatedInputTokens: 0, estimatedOutputTokens: 0, estimatedTotalTokens: 0 };
+  sourceItem.requests += 1;
+  sourceItem[exact ? 'exactRequests' : 'estimatedRequests'] += 1;
+  sourceItem[inputKey] += value.inputTokens ?? 0;
+  sourceItem[outputKey] += value.outputTokens ?? 0;
+  sourceItem[totalKey] += value.totalTokens ?? ((value.inputTokens ?? 0) + (value.outputTokens ?? 0));
   return day;
 }

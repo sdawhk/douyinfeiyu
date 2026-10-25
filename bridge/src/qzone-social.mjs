@@ -29,3 +29,11 @@ export function qzoneCommentKey(postTid, comment) {
   if (!postTid || !commentId || !/^\d{5,20}$/.test(userId)) return '';
   return `${postTid}:${commentId}:${userId}`;
 }
+
+export function qzonePostsWithComments(result) {
+  if (!Array.isArray(result?.msglist)) throw new Error('QQ 空间说说列表不可用');
+  if (result.msglist.some((post) => !Array.isArray(post.comments))) {
+    throw new Error('SnowLuma 当前返回的说说没有 comments 字段，请重启 SnowLuma 以加载评论读取实现');
+  }
+  return result.msglist;
+}

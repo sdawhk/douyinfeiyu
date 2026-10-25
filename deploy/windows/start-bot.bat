@@ -88,7 +88,7 @@ if not errorlevel 1 (
   echo       already running, skip
 ) else (
   echo       starting local image library...
-  start "ImageLibrary" /MIN /D "%ROOT%" "%NODE%" "%ROOT%\repo\bridge\src\image-library-server.mjs"
+  start "ImageLibrary" /MIN /D "%ROOT%" "%NODE%" --use-env-proxy "%ROOT%\repo\bridge\src\image-library-server.mjs"
   timeout /t 2 /nobreak >nul
 )
 

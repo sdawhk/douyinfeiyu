@@ -56,6 +56,7 @@ export async function modelStatus() {
   const route = dsh.baseURL === `${PROXY_URL}/v1` ? 'proxy' : 'direct';
   return { saved, dsh: { defaultModel: dsh.model, baseURL: dsh.baseURL }, route,
     proxy: proxy && { online: true, policy: proxy.policy, lastActivity: proxy.lastActivity, lastSuccess: proxy.lastSuccess,
+      recentRequests: proxy.recentRequests || [],
       cooling: proxy.cooling, keys: proxy.keys },
     effective: Boolean(proxy && route === 'proxy' && proxy.policy?.version === saved.version
       && proxy.policy?.primary === saved.primary && dsh.model === saved.primary) };

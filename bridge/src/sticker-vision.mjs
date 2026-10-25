@@ -1,9 +1,35 @@
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+
 const DEFAULT_MODELS = [
   'nvidia/nemotron-3.5-super-vl:free',
   'trae/multimodal_image_kimi-k2.5'
 ];
 const modelCooldownUntil = new Map();
 const modelCooldownReason = new Map();
+const UNSUPPORTED_CACHE = process.env.VISION_MODEL_COOLDOWN_PATH || 'D:\\deepseek\\state\\vision-model-cooldowns.json';
+try {
+  const saved = JSON.parse(readFileSync(UNSUPPORTED_CACHE, 'utf8'));
+  for (const [model, until] of Object.entries(saved)) {
+    if (Number(until) > Date.now()) {
+      modelCooldownUntil.set(model, Number(until));
+      modelCooldownReason.set(model, 'previous HTTP 400/404/422');
+    }
+  }
+} catch {}
+
+function coolUnsupportedModel(model, status) {
+  const until = Date.now() + 60 * 60_000;
+  modelCooldownUntil.set(model, until);
+  modelCooldownReason.set(model, `HTTP ${status}; cooling down`);
+  try {
+    let saved = {};
+    try { saved = JSON.parse(readFileSync(UNSUPPORTED_CACHE, 'utf8')); } catch {}
+    saved[model] = until;
+    mkdirSync(dirname(UNSUPPORTED_CACHE), { recursive: true });
+    writeFileSync(UNSUPPORTED_CACHE, JSON.stringify(saved), 'utf8');
+  } catch {}
+}
 
 const PROMPT = '分析这张图片，用于本地图片库分类和检索。判断它是不是聊天表情包或梗图；区分真实拍摄照片和插画、表情、截图、文档、二维码等非照片。'
   + '按图片库的复用价值判断：有清晰表情/动作/梗、可再次用于聊天，或包含值得留存的明确内容时 valuable=true；普通随手拍、模糊无内容或重复信息时 valuable=false。不要按人物外貌、身份、隐私或个人偏好评判价值。'
@@ -41,9 +67,12 @@ export async function inspectStickerImage(b64, mime, options = {}) {
       const data = await response.json();
       if (!response.ok) {
         lastFailure = `${model}: HTTP ${response.status}`;
-        if ([429, 500, 502, 503, 504].includes(response.status) || model.includes(':free')) {
-          modelCooldownUntil.set(model, Date.now() + (model.includes(':free') ? 10 : 3) * 60_000);
-          modelCooldownReason.set(model, `HTTP ${response.status}; cooling down`);
+        if ([400, 404, 422, 429, 500, 502, 503, 504].includes(response.status) || model.includes(':free')) {
+          if ([400, 404, 422].includes(response.status)) coolUnsupportedModel(model, response.status);
+          else {
+            modelCooldownUntil.set(model, Date.now() + (model.includes(':free') ? 10 : 3) * 60_000);
+            modelCooldownReason.set(model, `HTTP ${response.status}; cooling down`);
+          }
         }
         continue;
       }
@@ -126,9 +155,12 @@ export async function compareImageDuplicates(b64, mime, candidates, options = {}
       });
       const data = await response.json();
       if (!response.ok) {
-        if ([429, 500, 502, 503, 504].includes(response.status) || model.includes(':free')) {
-          modelCooldownUntil.set(model, Date.now() + (model.includes(':free') ? 10 : 3) * 60_000);
-          modelCooldownReason.set(model, `HTTP ${response.status}; cooling down`);
+        if ([400, 404, 422, 429, 500, 502, 503, 504].includes(response.status) || model.includes(':free')) {
+          if ([400, 404, 422].includes(response.status)) coolUnsupportedModel(model, response.status);
+          else {
+            modelCooldownUntil.set(model, Date.now() + (model.includes(':free') ? 10 : 3) * 60_000);
+            modelCooldownReason.set(model, `HTTP ${response.status}; cooling down`);
+          }
         }
         continue;
       }

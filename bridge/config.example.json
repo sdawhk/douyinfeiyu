@@ -13,6 +13,31 @@
     "rate": "0%",
     "key": ""
   },
+  "xfyunTts": {
+    "enabled": false,
+    "mode": "requested",
+    "appId": "",
+    "authMode": "password",
+    "apiPassword": "",
+    "apiKey": "",
+    "apiSecret": "",
+    "voice": "x5_lingxiaoxuan_flow",
+    "speed": 50
+  },
+  "edgeTts": {
+    "enabled": false,
+    "mode": "requested",
+    "url": "http://127.0.0.1:18902",
+    "workerUrl": "https://tts.wangwangit.com",
+    "voice": "zh-CN-XiaoxiaoNeural"
+  },
+  "speechRecognition": {
+    "modelDir": "D:/deepseek/state/voice-asr"
+  },
+  "singing": {
+    "enabled": false,
+    "apiKey": ""
+  },
   "stickerVisionBaseUrl": "http://127.0.0.1:18901/v1",
   "stickerVisionModels": [
     "nvidia/nemotron-3.5-super-vl:free",
@@ -22,6 +47,8 @@
     "wsUrl": "ws://127.0.0.1:3001",
     "httpUrl": "http://127.0.0.1:3000",
     "accessToken": "",
+    "wsAccessToken": "",
+    "httpAccessToken": "",
     "launcherPath": "C:\\path\\to\\SnowLuma\\launcher.bat",
     "homeDir": "C:\\path\\to\\SnowLuma",
     "allowProcessControl": false
@@ -64,6 +91,7 @@
     "endHour": 22
   },
   "groupReplyCooldownMs": 20000,
+  "replyControl": { "privateEnabled": true, "groupEnabled": true, "disabledPrivate": [], "disabledGroups": [] },
   "messageBatch": { "enabled": true, "idleMs": 5000, "maxMs": 15000 },
   "groupAffinity": { "enabled": true, "previewOnly": true, "warnAt": 25, "leaveAt": 10, "dropAfterWarning": 5, "protectedGroups": [] },
   "stickerCooldown": {

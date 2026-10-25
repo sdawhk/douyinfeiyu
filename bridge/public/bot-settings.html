@@ -88,8 +88,37 @@
     <div class="hero"><div><div class="eyebrow">LOCAL CONTROL PANEL · 18902</div><h1>把节奏交给你。</h1><p>管理群聊插话、表情包、QQ 动态、主动私聊和戳一戳互动。保存后，运行中的 QQBridge 会在约 5 秒内应用设置。</p></div><div class="version"><span>当前配置</span><strong id="version">读取中…</strong><span id="loadedAt">—</span></div></div>
     <div class="layout">
       <div class="stack">
+        <section><div class="section-head"><div><div class="tag">REPLY CONTROL</div><h2>聊天回复开关</h2><p>分别控制私聊和群聊；名单里的会话单独保持安静。</p></div></div><div class="section-body"><label class="switch-row"><span><strong>允许私聊回复</strong><small>关闭后不回复任何私聊消息，也不会主动私聊或回应私聊戳一戳。</small></span><input id="privateReplyEnabled" type="checkbox"></label><label class="switch-row"><span><strong>允许群聊回复</strong><small>关闭后所有群都不回复，包括 @、命令、表情包和戳一戳。</small></span><input id="groupReplyEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">不回复的私聊 QQ 号</span><textarea id="disabledPrivateReplies" rows="3" placeholder="每行一个 QQ 号"></textarea><small class="hint">全局私聊开启时，这些联系人仍不回复。</small></label><label class="field"><span class="field-name">不回复的群号</span><textarea id="disabledGroupReplies" rows="3" placeholder="每行一个群号"></textarea><small class="hint">这些群完全不回复；与下方“自然插话”开关不同。</small></label></div></div></section>
         <section><div class="section-head"><div><div class="tag">01 / GROUP CHAT</div><h2>群聊发言</h2><p>未点名消息不再抽签；只按冷却时间决定何时插话。</p></div><div class="number">01</div></div><div class="section-body"><div class="field-grid"><label class="field"><span class="field-name">同群插话冷却</span><div class="input-wrap"><input id="groupCooldown" type="number" min="0" max="300" step="1"><span>秒</span></div><small class="hint">0 表示不冷却。被 @、点名和主人消息不受此限制。</small></label></div><label class="switch-row"><span><strong>允许群友发送“闭嘴 / 解禁”</strong><small>开启后，群内成员可用独立命令控制本群静音，支持“先闭嘴十分钟，鲸鱼”；到时自动恢复，不影响其他群或私聊。</small></span><input id="groupMuteEnabled" type="checkbox"></label><div id="groupList" class="group-list"></div><div class="callout">群聊开关只影响未点名的自然插话；有人明确叫小鲸鱼时仍会回复。</div></div></section>
         <section><div class="section-head"><div><div class="tag">AZURE SPEECH</div><h2>语音回复</h2><p>可先保存音色和回复策略；填入 Azure Speech Key 后启用合成。</p></div></div><div class="section-body"><label class="switch-row"><span><strong>启用 Azure 语音回复</strong><small id="azureKeyStatus">默认关闭；Key 只保存在本机配置中，不会从设置接口返回。</small></span><input id="azureTtsEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">Azure 区域</span><input id="azureTtsRegion" type="text" maxlength="80" placeholder="例如 eastus"><small class="hint">在 Azure Speech 资源的“密钥和终结点”页查看区域。</small></label><label class="field"><span class="field-name">中文音色</span><select id="azureTtsVoice"><option value="zh-CN-XiaoxiaoNeural">晓晓（女声）</option><option value="zh-CN-YunxiNeural">云希（男声）</option><option value="zh-CN-YunyangNeural">云扬（男声）</option><option value="zh-CN-XiaoyiNeural">晓伊（女声）</option></select></label><label class="field"><span class="field-name">回复方式</span><select id="azureTtsMode"><option value="requested">仅明确要求语音时</option><option value="always">所有普通回复</option></select></label><label class="field"><span class="field-name">语速</span><select id="azureTtsRate"><option value="-15%">稍慢</option><option value="0%">正常</option><option value="+15%">稍快</option></select></label><label class="field"><span class="field-name">Azure Speech Key</span><input id="azureTtsKey" type="password" autocomplete="new-password" maxlength="512" placeholder="留空则保留已保存的 Key"><small class="hint">保存后不会再次显示；留空不会覆盖现有 Key。</small></label></div><label class="switch-row"><span><strong>清除已保存的 Key</strong><small>需要更换 Key 时，先清除旧 Key，再填入新 Key 保存。</small></span><input id="azureTtsClearKey" type="checkbox"></label><div class="callout">语音通过 QQ 语音消息发送；Azure 输出 TrueSilk 格式。若 Key 未配置、请求失败或 Azure 不可用，机器人会回退发送文字。群聊自动语音可能增加刷屏和调用费用。</div></div></section>
+        <section><div class="section-head"><div><div class="tag">XFYUN SPEECH</div><h2>讯飞语音合成</h2><p>使用讯飞开放平台“超拟人语音合成”的凭据；Spark-X2.6 的 MaaS 对话 Key 不适用。</p></div></div><div class="section-body">
+          <label class="switch-row"><span><strong>启用讯飞语音回复</strong><small id="xfyunKeyStatus">默认关闭；凭据只保存在本机配置中。</small></span><input id="xfyunTtsEnabled" type="checkbox"></label>
+          <div class="field-grid">
+            <label class="field"><span class="field-name">APPID</span><input id="xfyunTtsAppId" type="text" maxlength="50" placeholder="讯飞开放平台应用 APPID"></label>
+            <label class="field"><span class="field-name">发音人 ID</span><input id="xfyunTtsVoice" type="text" maxlength="100" placeholder="x5_lingxiaoxuan_flow"><small class="hint">需在超拟人语音合成控制台开通对应发音人权限。</small></label>
+            <label class="field"><span class="field-name">鉴权方式</span><select id="xfyunTtsAuthMode"><option value="password">APIPassword</option><option value="signature">APIKey + APISecret</option></select></label>
+            <label class="field"><span class="field-name">回复方式</span><select id="xfyunTtsMode"><option value="requested">仅明确要求语音时</option><option value="always">所有普通回复</option></select></label>
+            <label class="field"><span class="field-name">语速：<span id="xfyunSpeedLabel">50</span></span><input id="xfyunTtsSpeed" type="range" min="0" max="100" step="1"></label>
+            <label class="field"><span class="field-name">APIPassword</span><input id="xfyunTtsPassword" type="password" autocomplete="new-password" maxlength="512" placeholder="留空保留已保存的值"><small class="hint">选 APIPassword 鉴权时填写。</small></label>
+            <label class="field"><span class="field-name">APIKey</span><input id="xfyunTtsApiKey" type="password" autocomplete="new-password" maxlength="512" placeholder="留空保留已保存的值"><small class="hint">选签名鉴权时与 APISecret 一起填写。</small></label>
+            <label class="field"><span class="field-name">APISecret</span><input id="xfyunTtsApiSecret" type="password" autocomplete="new-password" maxlength="512" placeholder="留空保留已保存的值"></label>
+          </div>
+          <div class="field-grid" style="margin-top:18px"><label class="switch-row"><span><strong>清除 APIPassword</strong></span><input id="xfyunTtsClearPassword" type="checkbox"></label><label class="switch-row"><span><strong>清除 APIKey</strong></span><input id="xfyunTtsClearApiKey" type="checkbox"></label><label class="switch-row"><span><strong>清除 APISecret</strong></span><input id="xfyunTtsClearApiSecret" type="checkbox"></label></div>
+          <div class="callout">讯飞使用 MP3 合成，NapCat 会转换为 QQ 语音。若讯飞未配置或合成失败，机器人会回退发送文字。讯飞与 Azure 同时开启时优先使用讯飞。</div>
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:18px"><button id="xfyunTtsTest" type="button" style="border:1px solid var(--lime);background:transparent;color:var(--lime);padding:9px 15px">测试已保存的音色</button><audio id="xfyunTtsPreview" controls hidden></audio><small class="hint">先保存凭据，再点击测试；不会发送 QQ 消息。</small></div>
+        </div></section>
+        <section><div class="section-head"><div><div class="tag">EDGE TTS</div><h2>Edge TTS 朗读</h2><p>接入 wangwangit/tts 的 Edge TTS 接口，发送普通 QQ 语音；这是朗读，不会唱歌。</p></div></div><div class="section-body">
+          <label class="switch-row"><span><strong>启用 Edge TTS 朗读</strong><small>开启后优先于讯飞和 Azure 语音回复。</small></span><input id="edgeTtsEnabled" type="checkbox"></label>
+          <div class="field-grid"><label class="field"><span class="field-name">服务地址</span><input id="edgeTtsUrl" type="url" maxlength="250" placeholder="https://tts.wangwangit.com"><small class="hint">可填项目公开服务或自行部署的 Worker 地址。</small></label><label class="field"><span class="field-name">中文音色</span><select id="edgeTtsVoice"><option value="zh-CN-XiaoxiaoNeural">晓晓（女声）</option><option value="zh-CN-XiaoyiNeural">晓伊（女声）</option><option value="zh-CN-YunxiNeural">云希（男声）</option><option value="zh-CN-YunyangNeural">云扬（男声）</option></select></label><label class="field"><span class="field-name">回复方式</span><select id="edgeTtsMode"><option value="requested">仅明确要求语音时</option><option value="always">所有普通回复</option></select></label></div>
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:18px"><button id="edgeTtsTest" type="button" style="border:1px solid var(--lime);background:transparent;color:var(--lime);padding:9px 15px">测试朗读</button><audio id="edgeTtsPreview" controls hidden></audio><small class="hint">先保存地址与音色；测试不会发 QQ 消息。</small></div>
+        </div></section>
+        <section><div class="section-head"><div><div class="tag">SINGING</div><h2>原创唱歌</h2><p>用音乐模型生成真正带旋律和伴奏的人声歌曲，与 Edge TTS 分开配置。</p></div></div><div class="section-body">
+          <label class="switch-row"><span><strong>启用“/唱歌 主题”</strong><small id="singingKeyStatus">默认关闭；只允许主人主动点歌。</small></span><input id="singingEnabled" type="checkbox"></label>
+          <div class="field-grid"><label class="field"><span class="field-name">Mureka 音乐 API Key</span><input id="singingApiKey" type="password" autocomplete="new-password" maxlength="512" placeholder="留空保留已保存的 Key"><small class="hint">Spark 对话 Key 和 Edge TTS 都不能代替音乐 API Key。</small></label></div>
+          <label class="switch-row"><span><strong>清除音乐 API Key</strong></span><input id="singingClearApiKey" type="checkbox"></label>
+          <div class="callout">发送“/唱歌 海边的夏天”后，机器人生成一首原创歌曲并作为 QQ 语音发送。每次只生成 1 首；模型尽量做短歌，但实际时长由服务决定。页面测试也会产生一次生成费用。</div>
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:18px"><button id="singingTest" type="button" style="border:1px solid var(--lime);background:transparent;color:var(--lime);padding:9px 15px">生成并试听一次</button><audio id="singingPreview" controls hidden></audio></div>
+        </div></section>
         <section><div class="section-head"><div><div class="tag">MESSAGE BATCH</div><h2>连续消息合并</h2><p>同一人在同一会话连续发言时，收齐后只调用一次聊天模型。</p></div></div><div class="section-body"><label class="switch-row"><span><strong>合并连续文字消息</strong><small>明确命令、引用和带图消息立即走原有流程；保存后约 5 秒生效。</small></span><input id="batchEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">最后一条消息后的等待</span><div class="input-wrap"><input id="batchIdle" type="number" min="1" max="15" step="1"><span>秒</span></div></label><label class="field"><span class="field-name">最长等待</span><div class="input-wrap"><input id="batchMax" type="number" min="5" max="30" step="1"><span>秒</span></div><small class="hint">连续发言不断时，到达上限就提交当前一批。</small></label></div></div></section>
         <section><div class="section-head"><div><div class="tag">GROUP AFFINITY</div><h2>群好感度与退群</h2><p>明确辱骂及常见谐音辱骂会扣分；角色雷点不扣分。</p></div></div><div class="section-body"><label class="switch-row"><span><strong>启用低好感度警告和退群</strong><small>群分低于警告线先提醒；提醒后继续下降达到条件才退群。</small></span><input id="groupAffinityEnabled" type="checkbox"></label><label class="switch-row"><span><strong>预览模式</strong><small>开启时只记录将要警告或退群的动作；关闭后执行 OneBot 退群操作。</small></span><input id="groupAffinityPreview" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">警告分数</span><div class="input-wrap"><input id="groupAffinityWarn" type="number" min="1" max="49" step="1"><span>分</span></div></label><label class="field"><span class="field-name">退群分数</span><div class="input-wrap"><input id="groupAffinityLeave" type="number" min="0" max="48" step="1"><span>分</span></div></label><label class="field"><span class="field-name">警告后继续下降</span><div class="input-wrap"><input id="groupAffinityDrop" type="number" min="1" max="25" step="1"><span>分</span></div></label></div><label class="field" style="display:block;margin-top:18px"><span class="field-name">保护群号</span><textarea id="groupAffinityProtected" rows="2" placeholder="每行一个群号"></textarea><small class="hint">保护名单内永不自动退群；建议填入主人的群。</small></label><div class="callout">每位群友的辱骂最多每 20 分钟扣 1 分；同一条重复刷屏不会快速耗尽群分。</div></div></section>
         <section><div class="section-head"><div><div class="tag">02 / QZONE</div><h2>QQ 动态</h2><p>从真实聊天素材中选取一件小事，按设置的节奏尝试发布。</p></div><div class="number">02</div></div><div class="section-body"><label class="switch-row"><span><strong>自动发布动态</strong><small>关闭后不会自动尝试，主人手动命令仍可使用</small></span><input id="qzoneEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">每小时的检查分钟</span><div class="input-wrap"><input id="qzoneMinute" type="number" min="0" max="59" step="1"><span>分</span></div><small class="hint">例如 0 为每小时整点检查；有素材才可能发布。</small></label><label class="field"><span class="field-name">两次发布最短间隔</span><div class="input-wrap"><input id="qzoneInterval" type="number" min="60" max="1440" step="1"><span>分钟</span></div><small class="hint">至少 60 分钟；发布成功后才开始计时。</small></label></div><label class="switch-row" style="margin-top:20px"><span><strong>每天给主人点一次名片赞</strong><small>使用机器人的 QQ 账号给配置中的主人点赞；成功后当天不重复执行。</small></span><input id="ownerCardLikeEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">每天执行时间</span><input id="ownerCardLikeTime" type="time" step="60"><small class="hint">按运行 QQBridge 的电脑本地时间执行；默认每天 10:00。</small></label></div><div class="callout">名片赞失败会记录日志，并在当天稍后重试；执行成功后会保存日期，机器人重启也不会重复点赞。</div><div class="callout">点赞回谢会作为评论发在机器人自己的对应动态下；需要 OneBot 推送 qzone_like 点赞通知。当前 SnowLuma 版本尚未提供该事件，事件源接通后设置才会触发。</div><label class="switch-row" style="margin-top:20px"><span><strong>在动态下公开感谢点赞者</strong><small>收到自己动态的新点赞通知后，在对应动态下评论；同一人同一条动态只处理一次，不发私聊</small></span><input id="qzoneLikeEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">同一点赞者回谢冷却</span><div class="input-wrap"><input id="qzoneLikeCooldown" type="number" min="60" max="10080" step="60"><span>分钟</span></div></label><label class="field"><span class="field-name">每天最多回谢</span><div class="input-wrap"><input id="qzoneLikeMax" type="number" min="1" max="20" step="1"><span>人</span></div></label></div></div></section>
@@ -111,7 +140,17 @@
       const note = (message, error = false) => { $('message').textContent = message; $('message').classList.toggle('error', error); };
       function values() {
         return {
+          replyControl: { privateEnabled:$('privateReplyEnabled').checked, groupEnabled:$('groupReplyEnabled').checked,
+            disabledPrivate:$('disabledPrivateReplies').value.split(/\r?\n/).map((id) => id.trim()).filter(Boolean),
+            disabledGroups:$('disabledGroupReplies').value.split(/\r?\n/).map((id) => id.trim()).filter(Boolean) },
           azureTts: { enabled:$('azureTtsEnabled').checked, mode:$('azureTtsMode').value, region:$('azureTtsRegion').value.trim(), voice:$('azureTtsVoice').value, rate:$('azureTtsRate').value, key:$('azureTtsKey').value, clearKey:$('azureTtsClearKey').checked },
+          xfyunTts: { enabled:$('xfyunTtsEnabled').checked, mode:$('xfyunTtsMode').value, appId:$('xfyunTtsAppId').value.trim(),
+            voice:$('xfyunTtsVoice').value.trim(), speed:number('xfyunTtsSpeed'), authMode:$('xfyunTtsAuthMode').value,
+            apiPassword:$('xfyunTtsPassword').value, apiKey:$('xfyunTtsApiKey').value, apiSecret:$('xfyunTtsApiSecret').value,
+            clearApiPassword:$('xfyunTtsClearPassword').checked, clearApiKey:$('xfyunTtsClearApiKey').checked,
+            clearApiSecret:$('xfyunTtsClearApiSecret').checked },
+          edgeTts: { enabled:$('edgeTtsEnabled').checked, mode:$('edgeTtsMode').value, url:$('edgeTtsUrl').value.trim(), voice:$('edgeTtsVoice').value },
+          singing: { enabled:$('singingEnabled').checked, apiKey:$('singingApiKey').value, clearApiKey:$('singingClearApiKey').checked },
           groupReplyCooldownMs: number('groupCooldown') * 1000,
           messageBatch: { enabled:$('batchEnabled').checked, idleMs:number('batchIdle') * 1000, maxMs:number('batchMax') * 1000 },
           groupAffinity: { enabled:$('groupAffinityEnabled').checked, previewOnly:$('groupAffinityPreview').checked, warnAt:number('groupAffinityWarn'), leaveAt:number('groupAffinityLeave'), dropAfterWarning:number('groupAffinityDrop'), protectedGroups:$('groupAffinityProtected').value.split(/\r?\n/).map((id) => id.trim()).filter(Boolean) },
@@ -159,16 +198,29 @@
         }
       }
       function draw(data) {
-        const required = ['dailyQzone', 'qzoneLikeReply', 'ownerCardLike', 'qzoneSocial', 'ownerProactive', 'pokeInteraction', 'stickerCooldown', 'messageBatch', 'groupAffinity', 'azureTts'];
+        const required = ['replyControl', 'dailyQzone', 'qzoneLikeReply', 'ownerCardLike', 'qzoneSocial', 'ownerProactive', 'pokeInteraction', 'stickerCooldown', 'messageBatch', 'groupAffinity', 'azureTts', 'xfyunTts', 'edgeTts', 'singing'];
         if (!data?.settings || required.some((key) => !data.settings[key])) {
           throw new Error('设置页面与管理服务版本不一致，请重启本机设置服务后重新读取。');
         }
         version = data.version; groups = data.groups || [];
         const s = data.settings, q = s.dailyQzone, ql = s.qzoneLikeReply, qs = s.qzoneSocial, o = s.ownerProactive, p = s.pokeInteraction, c = s.stickerCooldown;
+        $('privateReplyEnabled').checked = s.replyControl.privateEnabled; $('groupReplyEnabled').checked = s.replyControl.groupEnabled;
+        $('disabledPrivateReplies').value = s.replyControl.disabledPrivate.join('\n'); $('disabledGroupReplies').value = s.replyControl.disabledGroups.join('\n');
         $('azureTtsEnabled').checked = s.azureTts.enabled; $('azureTtsRegion').value = s.azureTts.region;
         $('azureTtsVoice').value = s.azureTts.voice; $('azureTtsMode').value = s.azureTts.mode; $('azureTtsRate').value = s.azureTts.rate;
         $('azureTtsKey').value = ''; $('azureTtsClearKey').checked = false;
         $('azureKeyStatus').textContent = s.azureTts.hasKey ? 'Key 已配置；输入新 Key 可替换，也可以保持空白。' : '默认关闭；Key 只保存在本机配置中，不会从设置接口返回。';
+        $('xfyunTtsEnabled').checked = s.xfyunTts.enabled; $('xfyunTtsAppId').value = s.xfyunTts.appId;
+        $('xfyunTtsVoice').value = s.xfyunTts.voice; $('xfyunTtsSpeed').value = s.xfyunTts.speed;
+        $('xfyunSpeedLabel').textContent = s.xfyunTts.speed; $('xfyunTtsMode').value = s.xfyunTts.mode;
+        $('xfyunTtsAuthMode').value = s.xfyunTts.authMode;
+        for (const id of ['xfyunTtsPassword', 'xfyunTtsApiKey', 'xfyunTtsApiSecret']) $(id).value = '';
+        for (const id of ['xfyunTtsClearPassword', 'xfyunTtsClearApiKey', 'xfyunTtsClearApiSecret']) $(id).checked = false;
+        $('xfyunKeyStatus').textContent = `APIPassword ${s.xfyunTts.hasApiPassword ? '已保存' : '未填写'}；APIKey / APISecret ${s.xfyunTts.hasApiKey && s.xfyunTts.hasApiSecret ? '已保存' : '未填齐'}。`;
+        $('edgeTtsEnabled').checked = s.edgeTts.enabled; $('edgeTtsUrl').value = s.edgeTts.url;
+        $('edgeTtsVoice').value = s.edgeTts.voice; $('edgeTtsMode').value = s.edgeTts.mode;
+        $('singingEnabled').checked = s.singing.enabled; $('singingApiKey').value = ''; $('singingClearApiKey').checked = false;
+        $('singingKeyStatus').textContent = s.singing.hasApiKey ? '音乐 Key 已保存；只有主人可以点歌。' : '音乐 Key 尚未填写；功能默认关闭。';
         otherDisabled = s.groupInterjectionDisabled.filter((id) => !groups.includes(id));
         $('groupCooldown').value = s.groupReplyCooldownMs / 1000;
         $('batchEnabled').checked = s.messageBatch.enabled;
@@ -205,8 +257,39 @@
       async function api(path, options) { const response = await fetch(path, { cache:'no-store', signal:AbortSignal.timeout(10000), ...options }); const data = await response.json(); if (!response.ok) throw new Error(data.error || '请求失败'); return data; }
       async function load() { busy = true; $('save').disabled = true; note('正在读取设置…'); let error = null; try { draw(await api('/api/settings')); } catch (e) { error = e; } finally { busy = false; changed(); note(error ? error.message : '设置已读取', Boolean(error)); } }
       async function save() { busy = true; $('save').disabled = true; note('正在保存…'); let error = null; try { const data = await api('/api/settings', { method:'PUT', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ version, settings:values() }) }); draw({ ...data, status:{ applied:false, lastQzoneAt:null, lastOwnerMessageAt:null, ownerMessagesToday:0, lastHeartbeatAt:null, recentEvents:[] } }); setTimeout(load, 6000); } catch (e) { error = e; } finally { busy = false; changed(); note(error ? error.message : '已保存；约 5 秒后生效', Boolean(error)); } }
+      let previewUrl = '';
+      async function testXfyunTts() {
+        const button = $('xfyunTtsTest'); button.disabled = true; note('正在合成测试语音…');
+        try {
+          const response = await fetch('/api/settings/xfyun-tts-test', { method:'POST', signal:AbortSignal.timeout(35000) });
+          if (!response.ok) { const result = await response.json(); throw new Error(result.error || '合成失败'); }
+          const blob = await response.blob();
+          if (previewUrl) URL.revokeObjectURL(previewUrl);
+          previewUrl = URL.createObjectURL(blob);
+          const player = $('xfyunTtsPreview'); player.src = previewUrl; player.hidden = false;
+          await player.play().catch(() => {});
+          note('讯飞语音合成测试成功，可在页面播放。');
+        } catch (error) { note(error.message, true); }
+        finally { button.disabled = false; }
+      }
+      async function testAudio(buttonId, path, playerId, message, timeout) {
+        const button = $(buttonId); button.disabled = true; note(message);
+        try {
+          const response = await fetch(path, { method:'POST', signal:AbortSignal.timeout(timeout) });
+          if (!response.ok) { const result = await response.json(); throw new Error(result.error || '生成失败'); }
+          const blob = await response.blob();
+          const player = $(playerId); if (player.src.startsWith('blob:')) URL.revokeObjectURL(player.src);
+          player.src = URL.createObjectURL(blob); player.hidden = false;
+          await player.play().catch(() => {}); note('生成成功，可在页面试听。');
+        } catch (error) { note(error.message, true); }
+        finally { button.disabled = false; }
+      }
       document.querySelectorAll('input,textarea').forEach((input) => input.addEventListener('input', changed));
+      $('xfyunTtsSpeed').addEventListener('input', () => { $('xfyunSpeedLabel').textContent = $('xfyunTtsSpeed').value; });
       $('reload').addEventListener('click', load); $('save').addEventListener('click', save);
+      $('xfyunTtsTest').addEventListener('click', testXfyunTts);
+      $('edgeTtsTest').addEventListener('click', () => testAudio('edgeTtsTest', '/api/settings/edge-tts-test', 'edgeTtsPreview', '正在合成朗读语音…', 45000));
+      $('singingTest').addEventListener('click', () => testAudio('singingTest', '/api/settings/singing-test', 'singingPreview', '正在生成原创歌曲，可能需要几分钟…', 300000));
       setInterval(() => { if (!busy && version && JSON.stringify(values()) === original) load(); }, 30_000);
       load();
     })();

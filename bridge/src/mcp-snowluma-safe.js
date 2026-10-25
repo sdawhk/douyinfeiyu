@@ -48,7 +48,7 @@ function getOneBotConfig() {
   const c = getConfig();
   return {
     httpUrl: (c.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, ''),
-    token: c.snowluma?.accessToken ?? ''
+    token: c.snowluma?.httpAccessToken || c.snowluma?.accessToken || ''
   };
 }
 
@@ -179,14 +179,15 @@ server.tool(
 server.tool(
   'qq_list_groups',
   '列出机器人所在的全部 QQ 群（只读）：群号、群名。',
-  {},
-  async () => {
-    // 旧只读工具没有 agent token；reserved2 模式下通过桥接 /api/status 直接拒绝，
-    // 避免绕过二代仿真模式的令牌隔离。
+  { key: z.string().optional().describe('当前会话 key（reserved2 模式必填）'), token: z.string().optional().describe('当前会话令牌（reserved2 模式必填）') },
+  async ({ key, token }) => {
+    let reserved2 = false;
     try {
       const status = await agentApi('/api/status');
       if (status?.mode === 'reserved2') {
-        return { content: [{ type: 'text', text: 'reserved2 模式下旧只读工具不可用，请使用带会话令牌的 v2 读工具' }], isError: true };
+        reserved2 = true;
+        if (!key || !token) throw new Error('请提供当前会话 key 和 token');
+        await authorizeRead(key, token);
       }
     } catch (error) {
       return { content: [{ type: 'text', text: `无法确认当前模式，拒绝执行：${error?.message ?? error}` }], isError: true };
@@ -195,7 +196,7 @@ server.tool(
       const a = getAccess();
       const data = await onebot('get_group_list');
       const list = (Array.isArray(data) ? data : (data?.data ?? []))
-          .filter((g) => isAllowed(a.allowGroups, a.denyGroups, g.group_id, a.allowAllWhenEmpty))
+          .filter((g) => (reserved2 && a.allowGroups.length === 0 && !a.denyGroups.map(String).includes(String(g.group_id))) || isAllowed(a.allowGroups, a.denyGroups, g.group_id, a.allowAllWhenEmpty))
           .map((g) => ({ group_id: g.group_id, group_name: g.group_name }));
       return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
     } catch (error) {
@@ -207,14 +208,14 @@ server.tool(
 server.tool(
   'qq_get_group_members',
   '列出指定群的成员列表（只读）：QQ 号、昵称、群名片。',
-  { groupId: z.union([z.number(), z.string()]).describe('群号') },
-  async ({ groupId }) => {
+  { groupId: z.union([z.number(), z.string()]).describe('群号'), token: z.string().optional().describe('当前会话令牌（reserved2 模式必填）') },
+  async ({ groupId, token }) => {
     const g = String(groupId);
     const a = getAccess();
-    if (!isAllowed(a.allowGroups, a.denyGroups, g, a.allowAllWhenEmpty)) {
+    if (a.allowGroups.length && !isAllowed(a.allowGroups, a.denyGroups, g, a.allowAllWhenEmpty)) {
       return { content: [{ type: 'text', text: `拒绝：群 ${g} 不在只读白名单中。白名单：${a.allowGroups.join(', ') || '（空）'}` }], isError: true };
     }
-    try { await authorizeRead(`group:${g}`); } catch (error) {
+    try { await authorizeRead(`group:${g}`, token); } catch (error) {
       return { content: [{ type: 'text', text: `拒绝读取：${error?.message ?? error}` }], isError: true };
     }
     try {
@@ -230,14 +231,14 @@ server.tool(
 server.tool(
   'qq_get_group_history',
   '获取指定群的最近消息历史（只读）。messageSeq 可选：从该消息序号往前取。注意：是否可用取决于 SnowLuma 是否实现 get_group_msg_history。',
-  { groupId: z.union([z.number(), z.string()]).describe('群号'), messageSeq: z.number().optional().describe('起始消息序号（可选）') },
-  async ({ groupId, messageSeq }) => {
+  { groupId: z.union([z.number(), z.string()]).describe('群号'), messageSeq: z.number().optional().describe('起始消息序号（可选）'), token: z.string().optional().describe('当前会话令牌（reserved2 模式必填）') },
+  async ({ groupId, messageSeq, token }) => {
     const g = String(groupId);
     const a = getAccess();
-    if (!isAllowed(a.allowGroups, a.denyGroups, g, a.allowAllWhenEmpty)) {
+    if (a.allowGroups.length && !isAllowed(a.allowGroups, a.denyGroups, g, a.allowAllWhenEmpty)) {
       return { content: [{ type: 'text', text: `拒绝：群 ${g} 不在只读白名单中。白名单：${a.allowGroups.join(', ') || '（空）'}` }], isError: true };
     }
-    try { await authorizeRead(`group:${g}`); } catch (error) {
+    try { await authorizeRead(`group:${g}`, token); } catch (error) {
       return { content: [{ type: 'text', text: `拒绝读取：${error?.message ?? error}` }], isError: true };
     }
     try {

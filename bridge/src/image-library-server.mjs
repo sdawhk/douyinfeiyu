@@ -4,6 +4,9 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readSettingsDocument, saveSettingsDocument } from './bot-settings.mjs';
+import { synthesizeXfyunSpeech } from './xfyun-tts.mjs';
+import { synthesizeEdgeSpeech } from './edge-tts.mjs';
+import { generateSong, downloadSong } from './singing.mjs';
 import { readStickerSemantics, setStickerSemantics } from './sticker-semantics.mjs';
 import { readImageAnalyses } from './image-analysis-store.mjs';
 import { modelStatus, modelCatalog, testModel, saveModelPolicy, syncPromotedModel } from './model-management.mjs';
@@ -308,7 +311,7 @@ async function handle(req, res) {
       'content-type': 'text/html; charset=utf-8', 'content-length': body.length,
       'cache-control': 'no-cache', 'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
-      'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+      'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; media-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     });
     return res.end(body);
   }
@@ -320,6 +323,55 @@ async function handle(req, res) {
         groups: knownGroups(document.groups, document.settings.groupInterjectionDisabled),
         status: settingsStatus(document.version, document.settings) });
     } catch (error) { return json(res, 500, { error: error.message }); }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/audio/speech') {
+    try {
+      const body = await readBody(req);
+      const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
+      if (!config.edgeTts?.enabled || !config.edgeTts?.workerUrl) throw Object.assign(new Error('Edge TTS 尚未启用或缺少 Worker 地址'), { status: 400 });
+      const file = await synthesizeEdgeSpeech(body.input, { url: config.edgeTts.workerUrl, voice: config.edgeTts.voice });
+      const audio = Buffer.from(file.slice('base64://'.length), 'base64');
+      res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': audio.length,
+        'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end(audio);
+    } catch (error) { return json(res, error.status || 502, { error: error.message }); }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/settings/xfyun-tts-test') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机设置页面测试语音' });
+    try {
+      const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
+      const file = await synthesizeXfyunSpeech('你好，我是小鲸鱼。讯飞语音合成已经接通。', config.xfyunTts);
+      const audio = Buffer.from(file.slice('base64://'.length), 'base64');
+      res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': audio.length,
+        'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end(audio);
+    } catch (error) { return json(res, 400, { error: error.message }); }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/settings/edge-tts-test') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机设置页面测试语音' });
+    try {
+      const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
+      const file = await synthesizeEdgeSpeech('你好，我是小鲸鱼。Edge TTS 语音已经接通。', { ...config.edgeTts, url: config.edgeTts.workerUrl || config.edgeTts.url });
+      const audio = Buffer.from(file.slice('base64://'.length), 'base64');
+      res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': audio.length,
+        'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end(audio);
+    } catch (error) { return json(res, 400, { error: error.message }); }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/settings/singing-test') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机设置页面测试唱歌' });
+    try {
+      const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
+      const song = await generateSong('小鲸鱼在晴天里和朋友一起散步', config.singing);
+      const audio = await downloadSong(song.url);
+      res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': audio.length,
+        'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end(audio);
+    } catch (error) { return json(res, 400, { error: error.message }); }
   }
 
   if (req.method === 'PUT' && url.pathname === '/api/settings') {

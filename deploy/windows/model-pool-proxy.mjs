@@ -16,7 +16,7 @@ import http from 'node:http';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { addUsageRecord, createUsageDay, estimateRequestUsage, normalizeTokenUsage, usageFromSse } from './token-usage.mjs';
+import { addUsageRecord, createUsageDay, estimateRequestUsage, normalizeTokenUsage, usageFromSse, usageSourceFromRequest } from './token-usage.mjs';
 
 const PORT = Number(process.env.PORT || 18901);
 const KEYS_FILE = process.env.KEYS_FILE || 'D:\\deepseek\\keys.json';
@@ -25,6 +25,8 @@ const MODEL_STATE_FILE = process.env.MODEL_STATE_FILE || 'D:\\deepseek\\state\\m
 const MODEL_POLICY_FILE = process.env.MODEL_POLICY_FILE || 'D:\\deepseek\\state\\model-policy.json';
 const MODEL_PROMOTION_HOLD_MS = 15 * 60_000;
 const MODEL_ACTIVITY_FILE = process.env.MODEL_ACTIVITY_FILE || 'D:\\deepseek\\state\\model-activity.json';
+const MODEL_TRACE_LIMIT = 20;
+const MODEL_STREAM_MAX_BYTES = 4 * 1024 * 1024;
 const TOKEN_USAGE_FILE = process.env.TOKEN_USAGE_FILE || 'D:\\deepseek\\state\\token-usage.json';
 const TOKEN_USAGE_RETENTION_DAYS = 180;
 const COOLDOWN_MS = Number(process.env.KEY_COOLDOWN_MS || 60 * 60 * 1000); // 1h
@@ -33,6 +35,7 @@ const COOLDOWN_MS = Number(process.env.KEY_COOLDOWN_MS || 60 * 60 * 1000); // 1h
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 30_000);
 const MODEL_FIRST_TOKEN_TIMEOUT_MS = Number(process.env.MODEL_FIRST_TOKEN_TIMEOUT_MS || 12_000);
 const MODEL_STREAM_TOTAL_TIMEOUT_MS = Number(process.env.MODEL_STREAM_TOTAL_TIMEOUT_MS || 120_000);
+const MODEL_ATTEMPT_TOTAL_TIMEOUT_MS = Number(process.env.MODEL_ATTEMPT_TOTAL_TIMEOUT_MS || 35_000);
 const MODEL_FALLBACK_BUDGET_MS = Number(process.env.MODEL_FALLBACK_BUDGET_MS || 45_000);
 // Try the requested free model plus every configured automatic free fallback.
 const MODEL_MAX_ATTEMPTS = Number(process.env.MODEL_MAX_ATTEMPTS || 8);
@@ -117,10 +120,12 @@ let modelState = loadModelState();
 let lastRecoveryProbeAt = 0;
 let recoveryProbeInFlight = false;
 const modelSyncInFlight = new Set();
+const fallbackPromotionStreaks = new Map();
 let activityHistory = null;
 try { activityHistory = JSON.parse(readFileSync(MODEL_ACTIVITY_FILE, 'utf8')); } catch {}
 let lastActivity = activityHistory?.lastActivity ?? activityHistory ?? null;
 let lastSuccess = activityHistory?.lastSuccess ?? (lastActivity?.outcome === 'success' ? lastActivity : null);
+let recentRequests = Array.isArray(activityHistory?.recentRequests) ? activityHistory.recentRequests.slice(0, MODEL_TRACE_LIMIT) : [];
 let tokenUsageLedger = {};
 try { tokenUsageLedger = JSON.parse(readFileSync(TOKEN_USAGE_FILE, 'utf8')); } catch {}
 
@@ -149,7 +154,7 @@ function recordTokenUsage(model, usage, request, responseText) {
   const date = tokenUsageDate();
   tokenUsageLedger.days ??= {};
   const day = tokenUsageLedger.days[date] ??= createUsageDay(date);
-  addUsageRecord(day, model, usage, estimateRequestUsage(request, responseText));
+  addUsageRecord(day, model, usage, estimateRequestUsage(request, responseText), usageSourceFromRequest(request));
   try { saveTokenUsage(); }
   catch (error) { console.log(`[usage] failed to save daily token usage: ${error.message}`); }
 }
@@ -169,13 +174,28 @@ function activePolicy() {
 function recordActivity(value) {
   lastActivity = { ...value, at: new Date().toISOString() };
   if (value.outcome === 'success') lastSuccess = lastActivity;
-  try { writeFileSync(MODEL_ACTIVITY_FILE, JSON.stringify({ lastActivity, lastSuccess }, null, 2), 'utf8'); }
+  try { writeFileSync(MODEL_ACTIVITY_FILE, JSON.stringify({ lastActivity, lastSuccess, recentRequests }, null, 2), 'utf8'); }
+  catch { /* runtime status is best effort */ }
+}
+
+function saveRequestTrace(trace) {
+  trace.updatedAt = new Date().toISOString();
+  recentRequests = [trace, ...recentRequests.filter((item) => item.id !== trace.id)].slice(0, MODEL_TRACE_LIMIT);
+  try { writeFileSync(MODEL_ACTIVITY_FILE, JSON.stringify({ lastActivity, lastSuccess, recentRequests }, null, 2), 'utf8'); }
   catch { /* runtime status is best effort */ }
 }
 
 function promoteModel(requested, actual) {
   const current = activePolicy();
   if (!current || current.autoPromote === false || current.primary !== requested || !current.fallbacks.includes(actual)) return null;
+  const streakKey = `${requested}|${actual}`;
+  const previousStreak = fallbackPromotionStreaks.get(streakKey);
+  const streak = previousStreak && Date.now() - previousStreak.at < 15 * 60_000 ? previousStreak.count + 1 : 1;
+  fallbackPromotionStreaks.set(streakKey, { count: streak, at: Date.now() });
+  if (streak < 3) {
+    console.log(`[models] promotion held for ${actual}; complete fallback successes ${streak}/3`);
+    return null;
+  }
   const lastPromotedAt = Date.parse(current.lastPromotedAt || '');
   if (Number.isFinite(lastPromotedAt) && Date.now() - lastPromotedAt < MODEL_PROMOTION_HOLD_MS) {
     console.log(`[models] promotion held for ${Math.ceil((MODEL_PROMOTION_HOLD_MS - (Date.now() - lastPromotedAt)) / 1000)}s; fallback ${actual} still served`);
@@ -197,8 +217,14 @@ function promoteModel(requested, actual) {
   writeFileSync(temp, JSON.stringify(next, null, 2), 'utf8');
   try { renameSync(temp, MODEL_POLICY_FILE); }
   catch (error) { try { unlinkSync(temp); } catch {} throw error; }
+  fallbackPromotionStreaks.delete(streakKey);
   console.log(`[models] promoted ${actual} to primary after a complete live response; ${requested} moved to fallback`);
   return next;
+}
+
+function resetFallbackPromotionStreaks(requested) {
+  const prefix = `${requested}|`;
+  for (const key of fallbackPromotionStreaks.keys()) if (key.startsWith(prefix)) fallbackPromotionStreaks.delete(key);
 }
 
 function syncPromotedModel(model) {
@@ -314,7 +340,6 @@ async function forward(entry, path, method, headers, body, res,
     clearTimeout(timer);
     timer = setTimeout(() => ctrl.abort(), ms);
   };
-  let sentStream = false;
   try {
     const upstreamPath = /\/api\/paas\/v\d+$/i.test(entry.upstream)
       ? path.replace(/^\/v1(?=\/)/, '') : path;
@@ -331,7 +356,9 @@ async function forward(entry, path, method, headers, body, res,
       const reader = up.body.getReader();
       const decoder = new TextDecoder();
       const pendingChunks = [];
+      let pendingBytes = 0;
       let pendingText = '';
+      let sawContent = false;
       let usage = null;
       let usagePending = '';
       const updateUsage = (chunk) => {
@@ -352,50 +379,52 @@ async function forward(entry, path, method, headers, body, res,
           const decoded = decoder.decode(value, { stream: true });
           pendingText += decoded;
           updateUsage(decoded);
-          if (!sentStream) {
-            pendingChunks.push(Buffer.from(value));
-            if (isStreamModelFailure(up.status, pendingText)) {
-              await reader.cancel().catch(() => {});
-              return { status: up.status, text: pendingText, contentType };
-            }
-            if (hasStreamContent(pendingText)) {
-              res.writeHead(up.status, { 'content-type': contentType });
-              for (const chunk of pendingChunks) res.write(chunk);
-              pendingChunks.length = 0;
-              sentStream = true;
-              resetTimer(Math.max(1, streamDeadline - Date.now()));
-            }
-          } else {
-            res.write(value);
+          pendingChunks.push(Buffer.from(value));
+          pendingBytes += value.length;
+          if (pendingBytes > MODEL_STREAM_MAX_BYTES) {
+            await reader.cancel().catch(() => {});
+            return { status: 502, text: JSON.stringify({ error: { message: 'upstream stream exceeded the 4 MiB response limit' } }), contentType };
+          }
+          if (!sawContent && hasStreamContent(pendingText)) {
+            sawContent = true;
+            resetTimer(Math.max(1, streamDeadline - Date.now()));
+          }
+          if (isStreamModelFailure(up.status, pendingText)) {
+            await reader.cancel().catch(() => {});
+            return { status: up.status, text: pendingText, contentType };
           }
         }
         const finalChunk = decoder.decode();
         pendingText += finalChunk;
         updateUsage(finalChunk);
         usage = usageFromSse(usagePending) ?? usage;
-        if (!sentStream) {
-          if (isStreamModelFailure(up.status, pendingText)) {
-            return { status: up.status, text: pendingText, contentType };
-          }
-          if (!hasStreamContent(pendingText)) {
-            // Some upstreams signal a model failure as HTTP 200 with an empty
-            // SSE stream. Treat it as transient so the next free model can run.
-            return {
-              status: 502,
-              text: JSON.stringify({ error: { message: 'upstream stream ended without generated content' } }),
-              contentType,
-            };
-          }
-          res.writeHead(up.status, { 'content-type': contentType });
-          for (const chunk of pendingChunks) res.write(chunk);
+        if (isStreamModelFailure(up.status, pendingText)) {
+          return { status: up.status, text: pendingText, contentType };
         }
+        if (!hasStreamContent(pendingText)) {
+          // Some upstreams signal a model failure as HTTP 200 with an empty
+          // SSE stream. Treat it as transient so the next free model can run.
+          return {
+            status: 502,
+            text: JSON.stringify({ error: { message: 'upstream stream ended without generated content' } }),
+            contentType,
+          };
+        }
+        if (!hasStreamTerminal(pendingText)) {
+          return {
+            status: 502,
+            text: JSON.stringify({ error: { message: 'upstream stream ended before a completion marker' } }),
+            contentType,
+          };
+        }
+        res.writeHead(up.status, { 'content-type': contentType });
+        for (const chunk of pendingChunks) res.write(chunk);
         res.end();
         return { status: up.status, text: '', usageText: pendingText, usage, contentType, streamed: true,
-          complete: hasStreamTerminal(pendingText) && !isStreamModelFailure(up.status, pendingText) };
+          complete: true };
       } catch (error) {
-        if (sentStream) {
-          console.log(`[stream] ${entry.name} downstream stream ended early: ${error.message}`);
-          if (!res.destroyed) res.end();
+        if (res.destroyed) {
+          console.log(`[stream] ${entry.name} downstream disconnected: ${error.message}`);
           return { status: up.status, text: '', usageText: pendingText, usage, contentType, streamed: true, complete: false, interrupted: true };
         }
         throw error;
@@ -639,7 +668,7 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({
         policy: policy && { version: policy.version, primary: policy.primary, fallbacks: policy.fallbacks,
           firstTokenTimeoutMs: policy.firstTokenTimeoutMs, fallbackBudgetMs: policy.fallbackBudgetMs },
-        lastActivity, lastSuccess, cooling: modelState,
+        lastActivity, lastSuccess, recentRequests, cooling: modelState,
         keys: { total: KEYS.length, available: availableKeys().length }
       }));
       return;
@@ -703,14 +732,38 @@ const server = http.createServer((req, res) => {
     }
     const mayFallback = model && /\/(?:chat\/completions|responses)(?:\?|$)/.test(path);
     const policy = activePolicy();
-    const fallbacks = hasImageInput(requestJson) ? VISION_MODEL_FALLBACKS : (policy?.fallbacks ?? CHAT_MODEL_FALLBACKS);
-    const configuredPrimary = mayFallback && policy?.primary !== model && policy?.fallbacks?.includes(model)
+    const imageInput = hasImageInput(requestJson);
+    const fallbacks = imageInput ? VISION_MODEL_FALLBACKS : (policy?.fallbacks ?? CHAT_MODEL_FALLBACKS);
+    const configuredPrimary = mayFallback && !imageInput && policy?.primary !== model && policy?.fallbacks?.includes(model)
       ? policy.primary : null;
     const modelCandidates = mayFallback
       ? [...new Set([...(configuredPrimary ? [configuredPrimary] : []), model, ...fallbacks])]
         .slice(0, Math.max(MODEL_MAX_ATTEMPTS, policy ? policy.fallbacks.length + 1 : 0))
       : [model];
     const modelDeadline = mayFallback ? Date.now() + (policy?.fallbackBudgetMs ?? MODEL_FALLBACK_BUDGET_MS) : Infinity;
+    const requestTrace = mayFallback ? {
+      id: randomBytes(6).toString('hex'), requested: model, startedAt: new Date().toISOString(),
+      attempts: [], outcome: 'running',
+    } : null;
+    const startAttempt = (candidate, entry) => {
+      if (!requestTrace) return null;
+      const attempt = { model: candidate, route: entry.name, startedAt: new Date().toISOString(), outcome: 'running' };
+      requestTrace.attempts.push(attempt);
+      saveRequestTrace(requestTrace);
+      return attempt;
+    };
+    const finishAttempt = (attempt, outcome, reason = '') => {
+      if (!attempt) return;
+      attempt.outcome = outcome;
+      attempt.elapsedMs = Date.now() - Date.parse(attempt.startedAt);
+      if (reason) attempt.reason = String(reason).slice(0, 200);
+      if (outcome !== 'success' && requestTrace) resetFallbackPromotionStreaks(model);
+      saveRequestTrace(requestTrace);
+    };
+    if (requestTrace) {
+      console.log(`[models] request ${requestTrace.id} primary=${model} candidates=${modelCandidates.length}`);
+      saveRequestTrace(requestTrace);
+    }
 
     const pool = availableKeys();
     if (pool.length === 0) {
@@ -721,6 +774,10 @@ const server = http.createServer((req, res) => {
     }
     const tryList = pool.length ? pool : KEYS;
     if (tryList.length === 0) {
+      if (requestTrace) {
+        requestTrace.outcome = 'failed'; requestTrace.reason = '没有配置可用凭据';
+        requestTrace.finishedAt = new Date().toISOString(); saveRequestTrace(requestTrace);
+      }
       res.writeHead(503, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'no api keys configured' } }));
       return;
@@ -757,6 +814,11 @@ const server = http.createServer((req, res) => {
       const candidateKeys = activeKeys.filter((entry) => !modelCooling(entry, candidate)
         || modelRouteKey(entry.upstream, candidate) === recoveryProbeRoute?.route);
       if (candidateKeys.length === 0) {
+        if (requestTrace) {
+          requestTrace.attempts.push({ model: candidate, outcome: 'skipped', reason: '所有凭据线路均在冷却中' });
+          saveRequestTrace(requestTrace);
+        }
+        console.log(`[models] request ${requestTrace?.id || '-'} ${candidate} skipped; all routes cooling`);
         console.log(`[models] ${candidate} skipped; every route is cooling down`);
         continue;
       }
@@ -790,11 +852,13 @@ const server = http.createServer((req, res) => {
 
         let r;
         const attemptStarted = Date.now();
+        const attemptTrace = startAttempt(candidate, entry);
         const timeoutMs = Math.min(
           requestJson?.stream === true ? (policy?.firstTokenTimeoutMs ?? MODEL_FIRST_TOKEN_TIMEOUT_MS) : UPSTREAM_TIMEOUT_MS,
           remainingMs
         );
-        const streamDeadline = Math.min(modelDeadline, attemptStarted + MODEL_STREAM_TOTAL_TIMEOUT_MS);
+        const streamDeadline = Math.min(modelDeadline, attemptStarted + MODEL_STREAM_TOTAL_TIMEOUT_MS,
+          attemptStarted + MODEL_ATTEMPT_TOTAL_TIMEOUT_MS);
         try {
           r = await forward(entry, path, req.method, headers, requestBody,
             res, timeoutMs, streamDeadline);
@@ -811,8 +875,9 @@ const server = http.createServer((req, res) => {
           };
           coolModel(entry, candidate, err.name === 'AbortError' ? 'first-token timeout' : 'network error');
           recordActivity({ requested: model, attempted: candidate, outcome: 'failed', reason: err.message });
+          finishAttempt(attemptTrace, 'failed', err.name === 'AbortError' ? '上游响应超时' : err.message);
           shouldTryNextModel = true;
-          console.log(`[models] ${candidate} network/timeout error; trying another key or model`);
+          console.log(`[models] request ${requestTrace?.id || '-'} ${candidate} network/timeout error; trying another key or model`);
           continue;
         }
         if (path.includes('/chat/completions') || path.includes('/responses')) {
@@ -822,7 +887,9 @@ const server = http.createServer((req, res) => {
         if (r.streamed && !r.complete) {
           coolModel(entry, candidate, 'incomplete stream');
           recordActivity({ requested: model, attempted: candidate, outcome: 'failed', reason: 'stream ended before a completion marker' });
-          console.log(`[models] ${candidate} stream was incomplete; it will not be promoted`);
+          finishAttempt(attemptTrace, 'interrupted', '客户端已断开，流未完整结束');
+          if (requestTrace) { requestTrace.outcome = 'interrupted'; requestTrace.finishedAt = new Date().toISOString(); saveRequestTrace(requestTrace); }
+          console.log(`[models] request ${requestTrace?.id || '-'} ${candidate} stream interrupted; client disconnected`);
           return;
         }
 
@@ -835,6 +902,7 @@ const server = http.createServer((req, res) => {
               : MODEL_COOLDOWN_MS;
           coolModel(entry, candidate, isUnavailableModel(r.status, r.text) ? 'model unavailable' : 'model returned an error', duration);
           recordActivity({ requested: model, attempted: candidate, outcome: 'failed', reason: `HTTP ${r.status}: ${String(r.text).slice(0, 180)}` });
+          finishAttempt(attemptTrace, 'failed', `HTTP ${r.status}: ${String(r.text).slice(0, 160)}`);
           shouldTryNextModel = true;
           continue;
         }
@@ -842,12 +910,22 @@ const server = http.createServer((req, res) => {
           lastModelFailure = r;
           coolModel(entry, candidate, `HTTP ${r.status}`);
           recordActivity({ requested: model, attempted: candidate, outcome: 'failed', reason: `HTTP ${r.status}` });
+          finishAttempt(attemptTrace, 'failed', `HTTP ${r.status}`);
           shouldTryNextModel = true;
           continue;
         }
         if (isKeyFailure(r.status, r.text)) {
+          finishAttempt(attemptTrace, 'failed', `HTTP ${r.status}: 凭据失效`);
           markDead(entry.key, `HTTP ${r.status}`);
           activeKeys = activeKeys.filter((key) => key !== entry);
+          continue;
+        }
+        if (r.status >= 400 && r.status < 500) {
+          lastModelFailure = r;
+          coolModel(entry, candidate, `HTTP ${r.status}`);
+          recordActivity({ requested: model, attempted: candidate, outcome: 'failed', reason: `HTTP ${r.status}` });
+          finishAttempt(attemptTrace, 'failed', `HTTP ${r.status}: 模型线路拒绝请求`);
+          shouldTryNextModel = true;
           continue;
         }
 
@@ -855,20 +933,34 @@ const server = http.createServer((req, res) => {
         if (r.status >= 200 && r.status < 300) {
           recordTokenUsage(candidate, r.usage, requestJson, r.usageText ?? r.text);
           let promoted = null;
-          if (candidate !== model) {
+          if (!imageInput && candidate !== model) {
             try { promoted = promoteModel(model, candidate); }
             catch (error) { console.log(`[models] could not persist promotion to ${candidate}: ${error.message}`); }
-          }
+          } else if (candidate === model) resetFallbackPromotionStreaks(model);
           recordActivity({ requested: model, actual: candidate, outcome: 'success', fallback: candidate !== model,
             promoted: Boolean(promoted), policyVersion: promoted?.version });
+          finishAttempt(attemptTrace, 'success');
+          if (requestTrace) {
+            requestTrace.outcome = 'success'; requestTrace.actual = candidate;
+            requestTrace.fallback = candidate !== model; requestTrace.finishedAt = new Date().toISOString();
+            saveRequestTrace(requestTrace);
+            console.log(`[models] request ${requestTrace.id} completed with ${candidate}${candidate !== model ? ` (fallback for ${model})` : ''}`);
+          }
           if (promoted) syncPromotedModel(candidate);
-          else if (policy?.primary === candidate && candidate !== model && policy.fallbacks.includes(model)) syncPromotedModel(candidate);
+          else if (!imageInput && policy?.primary === candidate && candidate !== model && policy.fallbacks.includes(model)) syncPromotedModel(candidate);
         }
+        if (r.status >= 400) finishAttempt(attemptTrace, 'failed', `HTTP ${r.status}`);
         if (r.streamed) {
           if (candidate !== model) console.log(`[models] ${model} served with fallback ${candidate}`);
           return;
         }
 
+        if (requestTrace) {
+          requestTrace.outcome = r.status >= 400 ? 'failed' : 'success';
+          requestTrace.actual = r.status >= 400 ? undefined : candidate;
+          requestTrace.reason = r.status >= 400 ? `HTTP ${r.status}` : undefined;
+          requestTrace.finishedAt = new Date().toISOString(); saveRequestTrace(requestTrace);
+        }
         // Preserve SSE for OpenAI-compatible streaming clients (including DSH's
         // pi-ai adapter). Replacing text/event-stream with text/plain makes a
         // successful upstream response look like an empty model turn to DSH.
@@ -891,10 +983,19 @@ const server = http.createServer((req, res) => {
     }
 
     if (lastModelFailure) {
+      if (requestTrace) {
+        requestTrace.outcome = 'failed'; requestTrace.reason = '所有可用模型尝试均失败或超出回退时限';
+        requestTrace.finishedAt = new Date().toISOString(); saveRequestTrace(requestTrace);
+        console.log(`[models] request ${requestTrace.id} failed after ${requestTrace.attempts.length} attempts`);
+      }
       const ct = lastModelFailure.text.trimStart().startsWith('{') ? 'application/json' : 'text/plain';
       res.writeHead(lastModelFailure.status, { 'content-type': ct });
       res.end(lastModelFailure.text);
       return;
+    }
+    if (requestTrace) {
+      requestTrace.outcome = 'failed'; requestTrace.reason = '没有可用模型路由';
+      requestTrace.finishedAt = new Date().toISOString(); saveRequestTrace(requestTrace);
     }
     res.writeHead(503, { 'content-type': 'application/json' });
     res.end(JSON.stringify({

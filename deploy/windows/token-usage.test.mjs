@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addUsageRecord, createUsageDay, estimateRequestUsage, normalizeTokenUsage, usageFromSse } from './token-usage.mjs';
+import { addUsageRecord, createUsageDay, estimateRequestUsage, normalizeTokenUsage, usageFromSse, usageSourceFromRequest } from './token-usage.mjs';
 
 test('usage parser reads OpenAI chat and Responses API usage fields', () => {
   assert.deepEqual(normalizeTokenUsage({ prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 }), {
@@ -29,4 +29,19 @@ test('text estimates include prompt and generated text for providers without usa
     'data: {"choices":[{"delta":{"content":"用量统计完成"}}]}\n\ndata: [DONE]\n');
   assert.ok(usage.inputTokens > 0);
   assert.ok(usage.outputTokens > 0);
+});
+
+test('records exact usage by conversation source and recognizes image input', () => {
+  const request = { messages: [{ role: 'user', content: '【用量场景:group】你好' }] };
+  const source = usageSourceFromRequest(request);
+  assert.equal(source, 'group');
+  const day = createUsageDay('2026-10-24');
+  addUsageRecord(day, 'test/model', { prompt_tokens: 20, completion_tokens: 3 },
+    { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, source);
+  assert.equal(day.sources.group.inputTokens, 20);
+  assert.equal(usageSourceFromRequest({ messages: [{ content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }] }] }), 'vision');
+  delete day.sources; // Existing saved days predate source accounting.
+  addUsageRecord(day, 'test/model', { prompt_tokens: 2, completion_tokens: 1 },
+    { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, 'private');
+  assert.equal(day.sources.private.totalTokens, 3);
 });

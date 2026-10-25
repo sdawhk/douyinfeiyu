@@ -26,7 +26,17 @@ export function publicSettings(config) {
   const sticker = config.stickerCooldown || {};
   const groupAffinity = config.groupAffinity || {};
   const azureTts = config.azureTts || {};
+  const xfyunTts = config.xfyunTts || {};
+  const edgeTts = config.edgeTts || {};
+  const singing = config.singing || {};
+  const replyControl = config.replyControl || {};
   return {
+    replyControl: {
+      privateEnabled: replyControl.privateEnabled !== false,
+      groupEnabled: replyControl.groupEnabled !== false,
+      disabledPrivate: Array.isArray(replyControl.disabledPrivate) ? replyControl.disabledPrivate.map(String) : [],
+      disabledGroups: Array.isArray(replyControl.disabledGroups) ? replyControl.disabledGroups.map(String) : []
+    },
     azureTts: {
       enabled: azureTts.enabled === true,
       mode: azureTts.mode === 'always' ? 'always' : 'requested',
@@ -35,6 +45,20 @@ export function publicSettings(config) {
       rate: azureTts.rate || '0%',
       hasKey: Boolean(azureTts.key)
     },
+    xfyunTts: {
+      enabled: xfyunTts.enabled === true,
+      mode: xfyunTts.mode === 'always' ? 'always' : 'requested',
+      appId: xfyunTts.appId || '',
+      voice: xfyunTts.voice || 'x5_lingxiaoxuan_flow',
+      speed: xfyunTts.speed ?? 50,
+      authMode: xfyunTts.authMode === 'signature' ? 'signature' : 'password',
+      hasApiPassword: Boolean(xfyunTts.apiPassword),
+      hasApiKey: Boolean(xfyunTts.apiKey),
+      hasApiSecret: Boolean(xfyunTts.apiSecret)
+    },
+    singing: { enabled: singing.enabled === true, hasApiKey: Boolean(singing.apiKey) },
+    edgeTts: { enabled: edgeTts.enabled === true, mode: edgeTts.mode === 'always' ? 'always' : 'requested',
+      url: edgeTts.workerUrl || edgeTts.url || 'https://tts.wangwangit.com', voice: edgeTts.voice || 'zh-CN-XiaoxiaoNeural' },
     autoSticker: config.autoSticker !== false,
     groupMuteEnabled: config.groupMuteEnabled === true,
     groupReplyCooldownMs: config.groupReplyCooldownMs ?? 20_000,
@@ -129,6 +153,17 @@ export function validateSettings(value) {
   const batch = value.messageBatch;
   const groupAffinity = value.groupAffinity;
   const azureTts = value.azureTts || {};
+  const xfyunTts = value.xfyunTts || {};
+  const singing = value.singing || {};
+  const edgeTts = value.edgeTts || {};
+  const replyControl = value.replyControl;
+  if (!replyControl || typeof replyControl !== 'object') throw Object.assign(new Error('聊天回复开关缺失'), { status: 400 });
+  const replyIds = (ids, name) => {
+    if (!Array.isArray(ids)) throw Object.assign(new Error(`${name}列表无效`), { status: 400 });
+    const unique = [...new Set(ids.map((id) => String(id).trim()).filter(Boolean))];
+    if (unique.length > 100 || unique.some((id) => !/^\d{5,20}$/.test(id))) throw Object.assign(new Error(`${name}列表无效`), { status: 400 });
+    return unique;
+  };
   if (!q || !ql || !ownerCardLike || !qs || !o || !p || !sticker || !batch || !groupAffinity || !Array.isArray(value.groupInterjectionDisabled)) throw Object.assign(new Error('设置内容不完整'), { status: 400 });
   const azureKey = typeof azureTts.key === 'string' ? azureTts.key.trim() : '';
   if (azureTts.clearKey === true && azureKey) throw Object.assign(new Error('清除 Key 与填写新 Key 不能同时进行'), { status: 400 });
@@ -137,6 +172,26 @@ export function validateSettings(value) {
   if (typeof azureTts.voice !== 'string' || !/^[a-z0-9:-]{3,100}$/i.test(azureTts.voice)) throw Object.assign(new Error('Azure 中文音色格式无效'), { status: 400 });
   if (!['-15%', '0%', '+15%'].includes(azureTts.rate || '0%')) throw Object.assign(new Error('语速选项无效'), { status: 400 });
   if (azureTts.mode !== undefined && !['requested', 'always'].includes(azureTts.mode)) throw Object.assign(new Error('语音触发方式无效'), { status: 400 });
+  const xfyunPassword = typeof xfyunTts.apiPassword === 'string' ? xfyunTts.apiPassword.trim() : '';
+  const xfyunKey = typeof xfyunTts.apiKey === 'string' ? xfyunTts.apiKey.trim() : '';
+  const xfyunSecret = typeof xfyunTts.apiSecret === 'string' ? xfyunTts.apiSecret.trim() : '';
+  if (typeof xfyunTts.appId !== 'string' || !/^[a-z0-9]{0,50}$/i.test(xfyunTts.appId)) throw Object.assign(new Error('讯飞 APPID 格式无效'), { status: 400 });
+  if (typeof xfyunTts.voice !== 'string' || !/^[a-z0-9_]{3,100}$/i.test(xfyunTts.voice)) throw Object.assign(new Error('讯飞发音人 ID 格式无效'), { status: 400 });
+  if (!['password', 'signature'].includes(xfyunTts.authMode)) throw Object.assign(new Error('讯飞鉴权方式无效'), { status: 400 });
+  if (!['requested', 'always'].includes(xfyunTts.mode)) throw Object.assign(new Error('讯飞语音触发方式无效'), { status: 400 });
+  for (const [secret, label] of [[xfyunPassword, 'APIPassword'], [xfyunKey, 'APIKey'], [xfyunSecret, 'APISecret']]) {
+    if (secret.length > 512) throw Object.assign(new Error(`讯飞 ${label} 长度无效`), { status: 400 });
+  }
+  for (const [clear, secret] of [[xfyunTts.clearApiPassword, xfyunPassword], [xfyunTts.clearApiKey, xfyunKey], [xfyunTts.clearApiSecret, xfyunSecret]]) {
+    if (clear === true && secret) throw Object.assign(new Error('不能同时清除和填写同一个讯飞密钥'), { status: 400 });
+  }
+  const singingKey = typeof singing.apiKey === 'string' ? singing.apiKey.trim() : '';
+  if (singingKey.length > 512 || (singing.clearApiKey === true && singingKey)) throw Object.assign(new Error('音乐 API Key 格式无效'), { status: 400 });
+  if (!['requested', 'always'].includes(edgeTts.mode)) throw Object.assign(new Error('Edge TTS 触发方式无效'), { status: 400 });
+  if (typeof edgeTts.voice !== 'string' || !/^zh-CN-[A-Za-z]+Neural$/.test(edgeTts.voice)) throw Object.assign(new Error('Edge TTS 中文音色无效'), { status: 400 });
+  if (typeof edgeTts.url !== 'string' || edgeTts.url.length > 250) throw Object.assign(new Error('Edge TTS 地址无效'), { status: 400 });
+  try { const url = new URL(edgeTts.url); if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(url.hostname))) throw new Error(); }
+  catch { throw Object.assign(new Error('Edge TTS 地址须为 HTTPS 或本机 HTTP'), { status: 400 }); }
   const disabled = [...new Set(value.groupInterjectionDisabled.map(String))];
   if (disabled.length > 100 || disabled.some((id) => !/^\d{5,20}$/.test(id))) {
     throw Object.assign(new Error('群号列表无效'), { status: 400 });
@@ -157,6 +212,12 @@ export function validateSettings(value) {
   const leaveAt = integer(groupAffinity.leaveAt, 0, 48, '群好感度退群分数');
   if (leaveAt >= warnAt) throw Object.assign(new Error('退群分数必须低于警告分数'), { status: 400 });
   return {
+    replyControl: {
+      privateEnabled: boolean(replyControl.privateEnabled, '私聊回复'),
+      groupEnabled: boolean(replyControl.groupEnabled, '群聊回复'),
+      disabledPrivate: replyIds(replyControl.disabledPrivate, '不回复的私聊 QQ 号'),
+      disabledGroups: replyIds(replyControl.disabledGroups, '不回复的群号')
+    },
     azureTts: {
       enabled: boolean(azureTts.enabled ?? false, 'Azure 语音回复'),
       mode: azureTts.mode === 'always' ? 'always' : 'requested',
@@ -166,6 +227,22 @@ export function validateSettings(value) {
       ...(azureKey ? { key: azureKey } : {}),
       clearKey: azureTts.clearKey === true
     },
+    xfyunTts: {
+      enabled: boolean(xfyunTts.enabled ?? false, '讯飞语音回复'),
+      mode: xfyunTts.mode,
+      appId: xfyunTts.appId.trim(),
+      voice: xfyunTts.voice,
+      speed: integer(xfyunTts.speed, 0, 100, '讯飞语速'),
+      authMode: xfyunTts.authMode,
+      ...(xfyunPassword ? { apiPassword: xfyunPassword } : {}),
+      ...(xfyunKey ? { apiKey: xfyunKey } : {}),
+      ...(xfyunSecret ? { apiSecret: xfyunSecret } : {}),
+      clearApiPassword: xfyunTts.clearApiPassword === true,
+      clearApiKey: xfyunTts.clearApiKey === true,
+      clearApiSecret: xfyunTts.clearApiSecret === true
+    },
+    singing: { enabled: boolean(singing.enabled ?? false, '唱歌功能'), ...(singingKey ? { apiKey: singingKey } : {}), clearApiKey: singing.clearApiKey === true },
+    edgeTts: { enabled: boolean(edgeTts.enabled ?? false, 'Edge TTS'), mode: edgeTts.mode, url: edgeTts.url.trim(), voice: edgeTts.voice },
     autoSticker: value.autoSticker === undefined ? undefined : boolean(value.autoSticker, '自动收录表情'),
     groupMuteEnabled: value.groupMuteEnabled === undefined ? false : boolean(value.groupMuteEnabled, '群友闭嘴开关'),
     groupReplyCooldownMs: integer(value.groupReplyCooldownMs, 0, 300_000, '群聊冷却时间'),
@@ -260,7 +337,27 @@ export function saveSettingsDocument(expectedVersion, value, configPath = CONFIG
   if (settings.azureTts.clearKey) delete config.azureTts.key;
   else if (!settings.azureTts.key && previousAzureKey) config.azureTts.key = previousAzureKey;
   delete config.azureTts.clearKey;
+  const previousXfyun = config.xfyunTts || {};
+  config.xfyunTts = { ...previousXfyun, ...settings.xfyunTts };
+  for (const [name, clear] of [['apiPassword', 'clearApiPassword'], ['apiKey', 'clearApiKey'], ['apiSecret', 'clearApiSecret']]) {
+    if (settings.xfyunTts[clear]) delete config.xfyunTts[name];
+    else if (!settings.xfyunTts[name] && previousXfyun[name]) config.xfyunTts[name] = previousXfyun[name];
+    delete config.xfyunTts[clear];
+  }
+  if (config.xfyunTts.enabled && (!config.xfyunTts.appId || (config.xfyunTts.authMode === 'signature'
+    ? !(config.xfyunTts.apiKey && config.xfyunTts.apiSecret) : !config.xfyunTts.apiPassword))) {
+    throw Object.assign(new Error('启用讯飞语音前，请填写 APPID 和所选鉴权方式的完整凭据'), { status: 400 });
+  }
+  const previousSingingKey = config.singing?.apiKey;
+  config.singing = { ...config.singing, ...settings.singing };
+  if (settings.singing.clearApiKey) delete config.singing.apiKey;
+  else if (!settings.singing.apiKey && previousSingingKey) config.singing.apiKey = previousSingingKey;
+  delete config.singing.clearApiKey;
+  if (config.singing.enabled && !config.singing.apiKey) throw Object.assign(new Error('启用唱歌前，请填写 Mureka 音乐 API Key'), { status: 400 });
+  config.edgeTts = { ...config.edgeTts, ...settings.edgeTts,
+    workerUrl: settings.edgeTts.url, url: 'http://127.0.0.1:18902' };
   if (settings.autoSticker !== undefined) config.autoSticker = settings.autoSticker;
+  config.replyControl = settings.replyControl;
   config.groupMuteEnabled = settings.groupMuteEnabled;
   config.groupReplyCooldownMs = settings.groupReplyCooldownMs;
   config.messageBatch = { ...config.messageBatch, ...settings.messageBatch };

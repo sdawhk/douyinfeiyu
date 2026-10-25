@@ -24,8 +24,9 @@ test('owner image request resolves a named QQ group and recent owner image', () 
   assert.match(recentGroupSummary(messages), /\[图片\]/);
 });
 
-test('persona distinguishes model tool limits from QQ bridge capability', () => {
+test('persona permits scoped QQ tools without duplicating automatic replies', () => {
   const persona = loadRolePersona('小鲸鱼');
-  assert.match(persona, /QQ 桥接负责收发消息/);
+  assert.match(persona, /本环境已接入 QQ、表情、记忆和安全联网 MCP 工具/);
+  assert.match(persona, /工具发送成功后只输出 \[SILENT\]/);
   assert.doesNotMatch(persona, /本环境没有工具，也没有联网能力/);
 });

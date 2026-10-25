@@ -11,6 +11,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
+import { readSettingsDocument } from './bot-settings.mjs';
+import { canReply } from './reply-control.mjs';
+import { isMuted, groupKey, privateKey } from './mute.mjs';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
@@ -67,6 +70,7 @@ const FEEDBACK_FILE = path.join(STATE_DIR, 'feedback.json');
 const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
 const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
+const TOOL_SIDECAR = process.env.QQ_TOOL_SIDECAR === '1';
 
 // 读取 JSON 文件并容错：Windows 下常见 UTF-8 BOM（\uFEFF）会令 JSON.parse 失败。
 // required=true 时文件缺失或解析失败直接抛错（用于启动必需配置，fail-fast）。
@@ -832,6 +836,7 @@ async function main() {
   // 发送一个本地表情包（读文件 → base64 → image 段，发到群/私聊）。
   // 跨机拓扑：OneBot 在 PC，读不到手机上的本地绝对路径，因此用 base64 直传（不依赖 URL/本地路径）。
   async function sendLocalStickerV2(key, ref, options = {}) {
+    assertToolSendAllowed(key);
     const entry = await getLocalStickerData(ref);
     if (!entry.file || !fs.existsSync(entry.file)) throw new Error(`本地表情 ${entry.id} 的文件不存在，请检查表情包目录配置`);
     if (!fs.statSync(entry.file).isFile()) throw new Error(`本地表情 ${entry.id} 不是文件`);
@@ -871,11 +876,12 @@ async function main() {
       try {
         // 真人发表情前通常会有短暂停顿，避免“文字刚发完表情立刻跟上”的机械感。
         await sleep(randInt(800, 2000));
+        assertToolSendAllowed(key);
         const res = await fetch(`${httpUrl}/${action}`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+            ...(cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.httpAccessToken || cfg.snowluma.accessToken}` } : {})
           },
           body: JSON.stringify(params),
           signal: AbortSignal.timeout(20000)
@@ -952,6 +958,7 @@ async function main() {
 
   // 发送一个收藏表情（按 emoji_id/url/md5 解析，发图片段）。
   async function sendStickerV2(key, stickerRef, options = {}) {
+    assertToolSendAllowed(key);
     // 发送前强制同步一次，确保“刚新增的表情能立即用、刚删除的表情不会继续发”。
     const synced = await syncStickerLibrary(true);
     const entry = findSticker(synced?.entries ?? stickerEntries, stickerRef);
@@ -995,11 +1002,12 @@ async function main() {
       try {
         // 真人发表情前通常会有短暂停顿，避免“文字刚发完表情立刻跟上”的机械感。
         await sleep(randInt(800, 2000));
+        assertToolSendAllowed(key);
         const res = await fetch(`${httpUrl}/${action}`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+            ...(cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.httpAccessToken || cfg.snowluma.accessToken}` } : {})
           },
           body: JSON.stringify(params),
           signal: AbortSignal.timeout(15000)
@@ -1478,7 +1486,7 @@ async function main() {
   // DSH 重启期间收到的 QQ 消息先入队（不丢），DSH 恢复后按序补投。
   let dshReady = false;
   let dshCheckStarted = false;
-  let currentMode = 'chat'; // chat | closed-agent | reserved（仿真模式，由 DSH settings / state/mode.json 驱动）
+  let currentMode = TOOL_SIDECAR ? 'reserved2' : 'chat'; // sidecar 只提供工具状态，不投递 DSH prompt
   let lastMode = currentMode;
   let closedAgentPreset = 'router-standard'; // closed-agent 模式使用的 DSH agent preset
   const queued = new Map(); // key -> { promptText }[]
@@ -1531,12 +1539,34 @@ async function main() {
 
   /** 当前模式是否允许该会话进入 */
   function modeAllowed(key, kind, id, cfg, mode) {
+    if (TOOL_SIDECAR) {
+      const live = readJsonSafe(path.join(ROOT, 'config.json'), cfg);
+      const idText = String(id);
+      const denied = (live.deny?.[kind === 'group' ? 'groups' : 'private'] ?? []).map(String);
+      if (denied.includes(idText)) return false;
+      if (kind === 'group') {
+        const groups = (live.allow?.groups ?? []).map(String);
+        return groups.length === 0 || groups.includes(idText);
+      }
+      const owners = (live.ownerQQs ?? [live.ownerQQ]).map(String);
+      return owners.includes(idText) || live.allow?.privateOpen === true ||
+        (live.allow?.private ?? []).map(String).includes(idText);
+    }
     if (mode === 'closed-agent') {
       // 封闭 agent 模式：仅 owner 私聊
       return key === `private:${String(cfg.ownerQQ ?? '')}`;
     }
     // chat / reserved / reserved2（仿真模式，暂同 chat 白名单）
     return allowed(kind, id, cfg);
+  }
+  function assertToolSendAllowed(key) {
+    if (!TOOL_SIDECAR) return;
+    const [kind, id] = key.split(':');
+    const control = readSettingsDocument().settings.replyControl;
+    if (!canReply(control, kind === 'group', id) ||
+        isMuted(kind === 'group' ? groupKey(id) : privateKey(id))) {
+      throw new Error('该会话已关闭回复或已被禁言');
+    }
   }
 
   /** 当前模式下的会话预设 */
@@ -1857,6 +1887,25 @@ async function main() {
             lastOutboundAt: bridgeStatus.lastOutboundAt,
             activity: readActivityTail(100)
           });
+          return;
+        }
+        if (TOOL_SIDECAR && req.method === 'GET' && url.pathname === '/api/tool-session') {
+          const key = canonicalV2Key(url.searchParams.get('key'));
+          if (!key || !isSessionAllowedInCurrentMode(key)) {
+            sendJson({ ok: false, error: '会话不在允许范围内' }, 403);
+            return;
+          }
+          const st = getSocialV2State(key);
+          const lastSentAt = [...st.recentMessages].reverse().find((m) => m.isSelf)?.time || 0;
+          sendJson({ ok: true, key, token: st.agentToken, lastSentAt });
+          return;
+        }
+        if (TOOL_SIDECAR && req.method === 'GET' && url.pathname === '/api/authorize/process-control') {
+          const token = String(req.headers['x-agent-token'] || '');
+          const live = readJsonSafe(path.join(ROOT, 'config.json'), cfg);
+          const owners = live.ownerQQs ?? [live.ownerQQ];
+          const allowedOwner = owners.some((id) => agentTokenOk(`private:${id}`, token));
+          sendJson({ ok: allowedOwner }, allowedOwner ? 200 : 403);
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/presets') {
@@ -3634,6 +3683,10 @@ async function main() {
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/collect-sticker') {
           if (!stickerEnabled()) { sendJson({ ok: false, error: '表情包体系已关闭' }, 403); return; }
+          if (TOOL_SIDECAR && readSettingsDocument().settings.autoSticker === false) {
+            sendJson({ ok: false, error: '自动收录表情已关闭，请先在管理页面开启' }, 403);
+            return;
+          }
           const body = await readBody();
           const key = String(body.key ?? '').trim();
           const messageRef = String(body.messageId ?? body.seq ?? '').trim();
@@ -5044,6 +5097,7 @@ async function main() {
 
 
   async function onebotSend(kind, id, message, replyToMessageId, atUserId = null) {
+    assertToolSendAllowed(`${kind}:${id}`);
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
@@ -5070,7 +5124,7 @@ async function main() {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+        ...(cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.httpAccessToken || cfg.snowluma.accessToken}` } : {})
       },
       body: JSON.stringify(params),
       signal: AbortSignal.timeout(15000)
@@ -5856,8 +5910,10 @@ async function main() {
       };
       KNOWN_AGENT_TOKENS.add(st.agentToken);
       socialV2.conversations.set(key, st);
-      scheduleProactiveCheckV2(key);
-      setupSleepTimerV2(key);
+      if (!TOOL_SIDECAR) {
+        scheduleProactiveCheckV2(key);
+        setupSleepTimerV2(key);
+      }
     }
     return st;
   }
@@ -7415,6 +7471,7 @@ async function main() {
   }
 
   function scheduleReplyCheckV2(key) {
+    if (TOOL_SIDECAR) return;
     if (cfg.socialV2?.enabled === false) return;
     if (socialV2.paused || currentMode !== 'reserved2') return;
     const st = getSocialV2State(key);
@@ -7535,6 +7592,7 @@ async function main() {
   }
 
   function setupSleepTimerV2(key) {
+    if (TOOL_SIDECAR) return;
     if (cfg.socialV2?.enabled === false) return;
     if (!isSessionAllowedInCurrentMode(key)) return;
     const st = getSocialV2State(key);
@@ -7580,6 +7638,7 @@ async function main() {
   }
 
   function scheduleProactiveCheckV2(key) {
+    if (TOOL_SIDECAR) return;
     if (cfg.socialV2?.proactive?.enabled === false) return;
     if (socialV2.paused || currentMode !== 'reserved2') return;
     if (!isSessionAllowedInCurrentMode(key)) return;
@@ -7702,6 +7761,13 @@ async function main() {
     const quoteTargetIsSelf = await isQuoteTargetSelf(event.message ?? [], kind, id, event.self_id);
     if (!plainContent && !quoteTargetIsSelf) return;
     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
+    if (TOOL_SIDECAR) {
+      const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
+      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner,
+        event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null,
+        extractForwardIds(event.message ?? []));
+      return;
+    }
     const roleState = readRoleState();
 
     // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
@@ -8589,7 +8655,7 @@ async function main() {
   // QQ 侧（SnowLuma OneBot WebSocket 客户端）
   const bot = new SnowLumaWebSocketClient({
     url: cfg.snowluma.wsUrl,
-    accessToken: cfg.snowluma.accessToken || undefined,
+    accessToken: cfg.snowluma.wsAccessToken || cfg.snowluma.accessToken || undefined,
     reconnect: true
   });
 
@@ -8602,6 +8668,7 @@ async function main() {
     try { await handleIncoming('group', event.group_id, event, cfg); } catch (error) { log('处理群消息出错:', error?.message ?? error); }
   });
   bot.onNotice('notify', async (event) => {
+    if (TOOL_SIDECAR) return;
     try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }
   });
 
@@ -8646,13 +8713,13 @@ async function main() {
   // 状态心跳：5 秒写一次 state/bridge-status.json。
   // 心跳时间戳是判断「桥接进程是否还活着」的唯一可靠依据 —— 进程被 Android
   // 后台清理时不会留任何日志，但心跳会立刻停止更新。
-  startStatusHeartbeat();
+  if (!TOOL_SIDECAR) startStatusHeartbeat();
 
   // 本地控制台与 DSH 探活先拉起来：它们不依赖 QQ 侧连接。
   // 这样即使 PC 端 SnowLuma 没开机，桥接也能安静地活着（控制台可访问、状态可查），
   // 而不是首次连接失败就 process.exit(1) → start.sh 每 5 秒重启的崩溃循环
   // （崩溃循环还更容易被 Android 后台清理策略当成异常进程杀掉）。
-  startDshWatch();
+  if (!TOOL_SIDECAR) startDshWatch();
   startConsoleServer();
 
   // 连接成功后的一次性初始化（读昵称、预热表情库）。
@@ -8695,7 +8762,7 @@ async function main() {
     );
   }
 
-  await pumpMux();
+  if (!TOOL_SIDECAR) await pumpMux();
 }
 
 process.on('SIGINT', () => {

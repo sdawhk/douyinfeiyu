@@ -19,9 +19,9 @@ export function parseTokenUsageRequest(text, now = Date.now()) {
   return /昨天|昨日/.test(value) ? offsetDate(today, -1) : today;
 }
 
-export function formatTokenUsage(data) {
+export function formatTokenUsage(data, vision = null) {
   if (!data || !Number.isFinite(data.requests)) return '用量统计服务暂时不可用，请稍后再查。';
-  if (data.requests === 0) return `${data.date} 还没有记录到经过模型代理的成功请求。`;
+  if (data.requests === 0 && !vision?.requests) return `${data.date} 还没有记录到经过模型代理的成功请求。`;
   const fmt = (n) => Number(n || 0).toLocaleString('zh-CN');
   const lines = [`${data.date} 共成功请求 ${fmt(data.requests)} 次。`];
   if (data.exactRequests) {
@@ -30,8 +30,24 @@ export function formatTokenUsage(data) {
   if (data.estimatedRequests) {
     lines.push(`另有 ${fmt(data.estimatedRequests)} 次上游未返回 usage，按文本估算约 ${fmt(data.estimatedInputTokens)} 输入 + ${fmt(data.estimatedOutputTokens)} 输出 = ${fmt(data.estimatedTotalTokens)} tokens；估算值不等于账单用量。`);
   }
+  if (vision?.requests) lines.push(`识图代理另有 ${fmt(vision.requests)} 次，${fmt((vision.totalTokens ?? 0) + (vision.estimatedTotalTokens ?? 0))} tokens（其中估算 ${fmt(vision.estimatedRequests ?? 0)} 次）。`);
   const models = Object.entries(data.models ?? {}).sort((a, b) =>
     ((b[1].totalTokens ?? 0) + (b[1].estimatedTotalTokens ?? 0)) - ((a[1].totalTokens ?? 0) + (a[1].estimatedTotalTokens ?? 0))).slice(0, 5);
   if (models.length) lines.push(`模型：${models.map(([name, item]) => `${name} ${fmt((item.totalTokens ?? 0) + (item.estimatedTotalTokens ?? 0))} tokens`).join('；')}`);
+  const sourceNames = { group: '群聊', private: '私聊', task: '定时/代办', vision: '识图', other: '其他' };
+  const sources = { ...(data.sources ?? {}) };
+  if (vision?.sources) {
+    for (const [key, item] of Object.entries(vision.sources)) {
+      const current = sources[key] ??= { requests: 0, totalTokens: 0, estimatedTotalTokens: 0 };
+      current.requests += item.requests ?? 0;
+      current.totalTokens += item.totalTokens ?? 0;
+      current.estimatedTotalTokens += item.estimatedTotalTokens ?? 0;
+    }
+  }
+  if (Object.keys(sources).length) lines.push(`场景：${Object.entries(sources).map(([name, item]) =>
+    `${sourceNames[name] ?? name} ${fmt(item.requests)} 次 / ${fmt((item.totalTokens ?? 0) + (item.estimatedTotalTokens ?? 0))} tokens`).join('；')}。`);
+  if (Object.values(data.sources ?? {}).reduce((sum, item) => sum + (item.requests ?? 0), 0) < data.requests) {
+    lines.push('场景明细从本次升级后开始记录，升级前请求仍计入上面的总量。');
+  }
   return lines.join('\n');
 }
