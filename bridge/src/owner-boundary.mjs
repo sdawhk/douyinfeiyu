@@ -1,5 +1,11 @@
 export const OWNER_NAME = 'Komorebi';
 
+const OWNER_TOPIC_RE = /主人|认主|归属|谁管你|谁在管你|听谁的|最高权限|Komorebi/i;
+
+export function isOwnerTopic(input) {
+  return OWNER_TOPIC_RE.test(String(input ?? ''));
+}
+
 export function ownerBoundaryPrompt({ senderId, isOwner, ownerIds, botId }) {
   const verified = ownerIds.filter((id) => id !== botId).join('、');
   return [

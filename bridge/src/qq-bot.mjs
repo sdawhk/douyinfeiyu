@@ -60,7 +60,7 @@ import { synthesizeAzureSpeech, wantsVoiceReply } from './azure-tts.mjs';
 import { synthesizeXfyunSpeech } from './xfyun-tts.mjs';
 import { synthesizeEdgeSpeech } from './edge-tts.mjs';
 import { MAX_SPEECH_BYTES, transcribeLocalSpeech } from './local-stt.mjs';
-import { directOwnerIdentityReply, enforceOwnerBoundary, ownerBoundaryPrompt } from './owner-boundary.mjs';
+import { directOwnerIdentityReply, enforceOwnerBoundary, isOwnerTopic, ownerBoundaryPrompt } from './owner-boundary.mjs';
 import { parseSingCommand, generateSong, downloadSong } from './singing.mjs';
 
 const CFG_PATH = new URL('../config.json', import.meta.url);
@@ -1074,7 +1074,7 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
     const groupContext = await ownerGroupContext(key, text);
     if (groupContext) promptText += `${groupContext}\n\n`;
   }
-  if (sender != null) {
+  if (sender != null && isOwnerTopic(text)) {
     promptText += `${ownerBoundaryPrompt({ senderId: String(sender), isOwner: ownerTurn,
       ownerIds: [...OWNERS], botId: BOT_SELF })}\n\n`;
   }
