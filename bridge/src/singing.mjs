@@ -3,10 +3,15 @@ const TERMINAL = new Set(['failed', 'timeouted', 'cancelled']);
 
 export function parseSingCommand(text) {
   const input = String(text ?? '').trim();
+  const original = input.match(/^\/?原创唱歌(?:\s+|：|:)([\s\S]+)$/);
+  if (original) return original[1].trim().slice(0, 200) || null;
   const explicit = input.match(/^\/?唱歌(?:\s+|：|:)([\s\S]+)$/);
   if (explicit) return explicit[1].trim().slice(0, 200) || null;
 
-  const natural = input.match(/^(?:(?:我想听(?:你)?|想听(?:你)?|想让你|给我|帮我|给大家|帮大家)\s*)?(?:唱(?:一首|首|个)?(?:原创)?(?:歌|歌曲)|来(?:一首|首|个)?(?:原创)?(?:歌|歌曲))(?:吧|呗|呀|啊|嘛)?(?:[，,：:\s]+([\s\S]+))?$/);
+  const repeatedVerb = input.match(/^(?:我想听(?:你)?|想听(?:你)?|我想让你|想让你|给我|帮我|给大家|帮大家)\s*唱(?:一首|首|个)?(?:原创)?(?:歌|歌曲)\s*唱(?:一首|首)?\s*([\s\S]+)$/);
+  if (repeatedVerb) return repeatedVerb[1].trim().slice(0, 200) || null;
+
+  const natural = input.match(/^(?:(?:我想听(?:你)?|想听(?:你)?|我想让你|想让你|给我|帮我|给大家|帮大家)\s*)?(?:唱(?:一首|首|个)?(?:原创)?(?:歌|歌曲)|来(?:一首|首|个)?(?:原创)?(?:歌|歌曲))(?:吧|呗|呀|啊|嘛)?(?:[，,：:\s]+([\s\S]+))?$/);
   if (!natural) return null;
   return natural[1]?.trim().slice(0, 200) || '即兴原创短歌';
 }

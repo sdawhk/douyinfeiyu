@@ -16,6 +16,17 @@ export function plainQzoneText(value, maxLength = 800) {
     .trim().slice(0, maxLength);
 }
 
+/** Match a full local post against Qzone's 120-character list preview or its exact tid. */
+export function qzonePostMatchesText(post, text, tid = '') {
+  if (tid && String(post?.tid ?? post?.key ?? '') === String(tid)) return true;
+  const actual = plainQzoneText(post?.content ?? post?.text ?? post?.con ?? post?.summary);
+  const expected = plainQzoneText(text);
+  if (actual && actual === expected) return true;
+  if (!/…$/.test(actual)) return false;
+  const preview = actual.replace(/…+$/, '');
+  return [...preview].length >= 60 && expected.startsWith(preview);
+}
+
 export function qzoneFeedKey(feed) {
   const owner = String(feed?.uin ?? '');
   const tid = String(feed?.key ?? feed?.tid ?? '');

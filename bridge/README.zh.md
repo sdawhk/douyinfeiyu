@@ -23,7 +23,7 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 - **agent 自主收发 QQ**：DSH 的 MCP 客户端（`~/.dsh/profiles/web/cordis.patch.yml` 配置）接入三个 MCP server：
   - `snowluma`（桥接自带 `src/mcp-snowluma-safe.js`）：QQ 动作**安全子集**（查状态/查群/查消息/发消息，发送强制白名单；发送工具支持可选 `replyToMessageId` 引用回复）
   - `snowluma-host`（桥接自带 `src/mcp-host-server.js`）：`snowluma_status`（默认只读探活）；`start_snowluma` / `stop_snowluma` 需显式开启 `snowluma.allowProcessControl: true` 且仅在 `closed-agent` 模式可用
-  - `web-search-safe`（桥接自带 `src/mcp-web-search-safe.js`）：只读 `web_search` / `web_fetch`；搜索优先 Bing，结果为空或请求失败时回退 DuckDuckGo，网页抓取带 SSRF 防护
+  - `web-search-safe`（桥接自带 `src/mcp-web-search-safe.js`）：只读 `web_search` / `web_fetch`；搜索优先 Bing RSS，再试 Bing 网页与 DuckDuckGo，网页抓取带 SSRF 防护。明确询问“是什么梗”“梗的出处”等会先联网检索再回答。
 - **会话模型**：每个 QQ 会话（私聊/群）对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`
 - **性格定制**：QQ 会话默认使用 `qq-chat` agent preset（`~/.dsh/.agent-presets/qq-chat/agent.cordis.yml`），`reserved2` 使用 `qq-chat-v2`（`~/.dsh/.agent-presets/qq-chat-v2/agent.cordis.yml`）；人格与默认 DSH 一致（coding agent），仅附加 QQ 场景规则；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
 - **本地控制台**：桥接自带 Web 控制台 `http://127.0.0.1:3100`——切换运行模式（chat / closed-agent / reserved / reserved2）、设置角色、静默开关、查看活动日志、修改管理员/控制台令牌，全部即时生效；访问需要令牌（`config.json` 的 `consoleToken`，未配置时自动生成并打印在启动日志；控制台内可手动修改或重新生成）
@@ -79,6 +79,28 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `speechRecognition.modelDir` | 本地 SenseVoice 模型目录，默认 `D:/deepseek/state/voice-asr` |
 
 首次启用 QQ 语音识别时运行 `node --use-env-proxy scripts/install-local-stt.mjs`，下载并校验约 240 MB 的离线模型。机器人通过 OneBot 获取 WAV，在本机识别语音后按文字消息处理；识别失败会写入桥接日志。模型文件保存在运行目录，不入库。
+
+### 固定音色克隆
+
+语音回复可接本机 [GPT-SoVITS api_v2](https://github.com/RVC-Boss/GPT-SoVITS/blob/main/api_v2.py)。先按上游说明安装并启动服务，监听 `127.0.0.1:9882`，再在 `http://127.0.0.1:18902/settings` 的「克隆音色」中填写服务地址、参考音频的 Windows 绝对路径及对应的逐字原文，保存后点「测试克隆音色」。试听成功后再启用；默认仅在用户明确要求语音时使用。参考音频需事先放在本机，并确保 GPT-SoVITS 进程可以读取。合成失败时机器人发送文字。请仅使用有权使用的声音。
+
+### 原创歌曲与流萤 RVC
+
+现成歌曲点唱只允许主人使用：“唱歌 歌名”或“翻唱 歌名”会搜索歌曲、默认从约 30 秒处截取 30 秒、转换成流萤音色并发送 QQ 语音；“唱一首雨夜 DJ 版的歌”等自然说法也会进入这条链路，指定“唱10秒钟雨夜”则截取 10 秒。“原唱 歌名”只发原唱片段，“搜歌 歌名”查看候选。搜索会排除标明伴奏、KTV、短剧等结果；歌名不完全匹配时会先列候选，不自动发错歌。确认候选可用“翻唱 雨夜 #2”等序号命令。流萤转换前会检查分离后的人声音量，过低就停止发送。先运行 `scripts/setup-singing-rvc.ps1` 准备模型，再运行 `scripts/setup-song-cover.ps1` 安装 yt-dlp 等依赖。运行设置中的“现成歌曲点唱”可独立开关，不需要 Mureka Key。B 站搜索受限时会试 YouTube；转换失败不会把原唱冒充翻唱发出。
+
+已成功制作的歌曲语音会持久保存在 `bridge/state/song-cache/`。相同歌名、模式、候选、片段位置和音色再次请求时直接复用本地成品，不再重新搜索、下载或做音色转换；原创唱歌也会按主题和音色复用已保存结果。最近一首仍按主人保留一小时，跨群说“这个群也来一首雨爱司凤版”或“唱出来”可直接重发。说“再来一段”“再来一段60秒的”“接着唱”会先查本地是否已有该段，没有才继续制作下一段。
+
+#### 本地歌单试听
+
+群聊和私聊可用 `歌单 [页码]` 查看已核验的本地 30 秒音频，再用 `试听 <歌单显示的12位ID>` 免费试听。机器人全局共用每日 30 次、滚动 10 分钟 3 次的额度；同一会话同时只处理第一条有效试听。试听文件会核对时长、哈希和完整解码，发送超时会暂停同一会话并交由主人私聊 `试听待核对` 处理。主人可私聊 `好友列表 [页码]`、`红包账本`、`余额` 查询。
+
+这些命令由当前运行的 `src/bridge.js` 在模型唤醒前直接处理。试听只有在 OneBot HTTP 对 `send_group_msg` / `send_private_msg` 返回成功状态后才计入额度；发送被拒时会释放预留次数。
+
+当前 OneBot/NapCat 适配器没有经验证的 QQ 红包领取回执或 QQ 钱包查询接口，因此不能自动领取红包或查询真实钱包余额。主人核对实际收款后手动记入的用户额度可用于 `新歌试听 <歌名>`（1 元，30 秒流萤翻唱）和 `唱完整首 <歌名>`（3 元，按同一完整音源分段翻唱）；付费订单会先预留额度，仅在 OneBot 确认发送后结算，结果不确定时由主人核对。`余额` 不会伪称为 QQ 钱包余额。歌单解码扫描还要求可用的 ffmpeg；若本机 ffmpeg 无法启动，可通过环境变量 `DSH_FFMPEG` 指向可用的 ffmpeg 可执行文件后重启桥接。新加入群聊默认不主动插话；主人可在群内发送 `主动插话 开启` 或 `主动插话 关闭`，明确 @ 与命令仍正常响应。
+
+原创歌曲仍用 Mureka：在运行设置填写音乐 API Key 并开启后，由主人发送“原创唱歌 主题”或“/原创唱歌 主题”。开启“原创歌声转换为流萤音色”后，机器人会在人声分离后用 `liuying.pth` 转换歌声并混回伴奏。Windows CPU 环境安装脚本为 `scripts/setup-singing-rvc.ps1`，默认将模型和虚拟环境放在 `D:\deepseek\state\singing-rvc`，不纳入 Git；安装需要网络和约 3 GB 空间。没有可用的 RVC 环境时会明确报错，不发送未转换的原唱语音。CPU 转换会比较慢。
+
+普通语音回复也可独立开启「普通语音转流萤音色」。它先使用当前选中的 GPT-SoVITS、Edge、讯飞或 Azure 服务合成，再直接转换为流萤音色；试听按钮只在本机设置页生成样例，不发送 QQ 消息。此开关与原创歌曲的 RVC 开关和音高分别保存。
 
 > ⚠️ `allowAllWhenEmpty: true` 表示「白名单没填就全部放行」——把 agent 接入 QQ 等于把账号控制权交给了模型，建议先填白名单。
 

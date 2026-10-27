@@ -13,6 +13,10 @@ import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { readSettingsDocument } from './bot-settings.mjs';
 import { canReply } from './reply-control.mjs';
+import { collectExistingGroupIds, initializeGroupInterjectionSettings, isGroupInterjectionEnabled, setGroupInterjectionEnabled } from './group-interjection-settings.mjs';
+import { handleRedPacketCandidateNotice, handleSongLibraryCommand, isSongLibraryCommand, normalizeSongCommandText, shouldRouteSongLibraryCommand } from './song-library-commands.mjs';
+import { callOnebotApi } from './onebot-api.mjs';
+import { makePaidSongPreview, makePaidFullSong } from './paid-song-producer.mjs';
 import { isMuted, groupKey, privateKey } from './mute.mjs';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
@@ -140,7 +144,7 @@ function listRoles() {
 // 用于让 AI 在“不想接话/潜水”时有合法沉默出口，而不是写“（内心戏）”被当成消息发出去。
 const SILENT_MARKER = '[SILENT]';
 function isSilentMarker(text) {
-  return /^\s*\[SILENT\]\s*$/i.test(String(text ?? '').trim());
+  return /^\s*\[(?:SILENT|SKIP)\](?:\s|$)/i.test(String(text ?? ''));
 }
 
 // DSH MCP 发送类工具：一旦 AI 在回合里调用过这些工具，说明消息已经由工具发出，
@@ -259,6 +263,7 @@ function loadConfig() {
       private: normalizeIdList(file.deny?.private ?? file.deny?.privates ?? []),
       groups: normalizeIdList(file.deny?.groups ?? file.deny?.group ?? [])
     },
+    groupInterjectionDisabled: normalizeIdList(file.groupInterjectionDisabled ?? []),
     // 私聊/群聊均未配置白名单时是否放行所有（true 时启动会打警告）
     allowAllWhenEmpty: file.allowAllWhenEmpty === true,
     ackMessage: file.ackMessage ?? '🤔 收到，正在思考…',
@@ -683,6 +688,16 @@ async function segmentsToText(segments, options = {}) {
     }
   }
   return out.join('').trim();
+}
+
+function quickPlainCommandText(segments) {
+  if (typeof segments === 'string') return segments.trim();
+  if (!Array.isArray(segments)) return '';
+  return segments.map((segment) => {
+    if (segment?.type === 'text') return String(segment.data?.text ?? '');
+    if (segment?.type === 'at' && segment.data?.qq !== 'all') return `@${segment.data?.qq ?? ''} `;
+    return '';
+  }).join('').trim();
 }
 
 // 从 OneBot 消息段中提取图片/表情元数据（不下载字节，仅记录定位信息）。
@@ -1898,6 +1913,40 @@ async function main() {
           const st = getSocialV2State(key);
           const lastSentAt = [...st.recentMessages].reverse().find((m) => m.isSelf)?.time || 0;
           sendJson({ ok: true, key, token: st.agentToken, lastSentAt });
+          return;
+        }
+        if (TOOL_SIDECAR && req.method === 'POST' && url.pathname === '/api/qzone/tool') {
+          const body = await readBody();
+          const key = String(body.key ?? '');
+          const token = String(body.token ?? '');
+          const action = String(body.action ?? '');
+          const live = readJsonSafe(path.join(ROOT, 'config.json'), cfg);
+          const owners = (Array.isArray(live.ownerQQs) && live.ownerQQs.length ? live.ownerQQs : [live.ownerQQ]).map(String);
+          const ownerId = /^private:(\d{5,20})$/.exec(key)?.[1];
+          if (!ownerId || !owners.includes(ownerId) || ownerId === String(live.selfQQ ?? '')) {
+            sendJson({ ok: false, error: 'QQ 空间工具只允许主人私聊会话使用' }, 403);
+            return;
+          }
+          if (!token || !agentTokenOk(key, token) || !modeAllowed(key, 'private', Number(ownerId), cfg, currentMode)) {
+            sendJson({ ok: false, error: '会话令牌无效或已失效' }, 403);
+            return;
+          }
+          if (socialV2.paused || !['post', 'list', 'detail', 'comment'].includes(action)) {
+            sendJson({ ok: false, error: 'QQ 空间工具未启用或操作无效' }, 403);
+            return;
+          }
+          try {
+            const response = await fetch('http://127.0.0.1:3101/qzone', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', 'x-console-token': consoleToken },
+              body: JSON.stringify({ action, page: body.page, index: body.index, path: body.path, content: body.content }),
+              signal: AbortSignal.timeout(action === 'post' ? 75_000 : 20_000)
+            });
+            const data = await response.json();
+            sendJson(data, response.ok ? 200 : response.status);
+          } catch (error) {
+            sendJson({ ok: false, error: `QQ 空间桥接暂不可用：${String(error?.message ?? error).slice(0, 120)}` }, 503);
+          }
           return;
         }
         if (TOOL_SIDECAR && req.method === 'GET' && url.pathname === '/api/authorize/process-control') {
@@ -5137,6 +5186,37 @@ async function main() {
     return body.data;
   }
 
+  async function onebotApi(action, params = {}, timeoutMs = 15000) {
+    return callOnebotApi({ httpUrl: cfg.snowluma?.httpUrl,
+      token: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken || '', action, params, timeoutMs });
+  }
+
+  // 点歌语音必须以 OneBot HTTP 成功回执作为发送确认；不能使用 sendToQQ 的吞错路径结算额度。
+  function sendOneBotSegmentsAndConfirm(key, segments, timeoutMs = 60000) {
+    const [kind, id] = key.split(':');
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const params = kind === 'private'
+      ? { user_id: Number(id), message: segments }
+      : { group_id: Number(id), message: segments };
+    let resolveResult;
+    let rejectResult;
+    const result = new Promise((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
+    sendChain = sendChain.then(async () => {
+      try {
+        assertToolSendAllowed(key);
+        const replyControl = readSettingsDocument().settings.replyControl;
+        if (!canReply(replyControl, kind === 'group', id)) throw new Error(`reply disabled for ${key}`);
+        if (isMuted(kind === 'group' ? groupKey(id) : privateKey(id))) throw new Error(`muted for ${key}`);
+        const data = await onebotApi(action, params, timeoutMs);
+        bridgeStatus.lastOutboundAt = Date.now();
+        resolveResult(data);
+      } catch (error) {
+        rejectResult(error);
+      }
+    }).then(() => sleep(cfg.sendDelayMs));
+    return result;
+  }
+
   // ── 图片/表情字节解析（供一代自动内联与二代按需工具） ────────────────────
   function mimeFromBuffer(buf) {
     if (!buf || buf.length < 12) return 'image/jpeg';
@@ -6197,6 +6277,11 @@ async function main() {
   }
 
   loadSocialV2State();
+  initializeGroupInterjectionSettings({
+    existingGroupIds: collectExistingGroupIds({ allowGroupIds: cfg.allow?.groups ?? [],
+      sessions: state.sessions, conversations: socialV2.conversations }),
+    legacyDisabledGroupIds: cfg.groupInterjectionDisabled ?? []
+  });
 
   function isSocialEnabled() {
     return currentMode === 'reserved' && cfg.social?.enabled !== false;
@@ -6515,6 +6600,10 @@ async function main() {
     // 所有"发过消息或已有状态"的群都参与状态机（观望中的群也做主动判定）
     const keys = new Set([...social.states.keys(), ...social.recentMessages.keys()]);
     for (const key of keys) {
+      if (key.startsWith('group:') && !isGroupInterjectionEnabled(key.slice(6))) {
+        cancelSocialTimers(key);
+        continue;
+      }
       const st = socialState(key);
       if (st.phase === 'idle') {
         // ── 观望阶段：第三种触发（主动开话题，仅群聊生效） ─────────────────
@@ -7369,6 +7458,11 @@ async function main() {
   async function sendWakePromptV2(key, reason) {
     if (cfg.socialV2?.enabled === false) return;
     if (currentMode !== 'reserved2' || socialV2.paused) return;
+    if (key.startsWith('group:') && !isGroupInterjectionEnabled(key.slice(6))
+        && !['atMention', 'nameMention', 'explicitCommand'].includes(String(reason).split(':')[0])) {
+      log(`[reserved2] 跳过群 ${key} 的唤醒（${reason}）：该群主动插话已关闭`);
+      return;
+    }
     if (!isSessionAllowedInCurrentMode(key)) {
       log(`[reserved2] 跳过唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
       return;
@@ -7474,6 +7568,7 @@ async function main() {
     if (TOOL_SIDECAR) return;
     if (cfg.socialV2?.enabled === false) return;
     if (socialV2.paused || currentMode !== 'reserved2') return;
+    if (key.startsWith('group:') && !isGroupInterjectionEnabled(key.slice(6))) return;
     const st = getSocialV2State(key);
     // 已有真实唤醒/有限睡眠/回复检查在排队时不再重复安排，避免 AI 被连环唤醒。
     if (st.pendingWakeTimer || st.sleepTimer || st.replyCheckTimer) return;
@@ -7548,6 +7643,11 @@ async function main() {
   function scheduleWakeV2(key, reason) {
     if (cfg.socialV2?.enabled === false) return;
     if (socialV2.paused) return;
+    if (key.startsWith('group:') && !isGroupInterjectionEnabled(key.slice(6))
+        && !['atMention', 'nameMention', 'explicitCommand'].includes(String(reason).split(':')[0])) {
+      log(`[reserved2] 跳过群 ${key} 的主动唤醒（${reason}）：该群默认关闭主动插话`);
+      return;
+    }
     if (!isSessionAllowedInCurrentMode(key)) {
       log(`[reserved2] 跳过计划唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
       return;
@@ -7641,6 +7741,7 @@ async function main() {
     if (TOOL_SIDECAR) return;
     if (cfg.socialV2?.proactive?.enabled === false) return;
     if (socialV2.paused || currentMode !== 'reserved2') return;
+    if (key.startsWith('group:') && !isGroupInterjectionEnabled(key.slice(6))) return;
     if (!isSessionAllowedInCurrentMode(key)) return;
     const st = getSocialV2State(key);
     if (st.proactiveTimer) return;
@@ -7650,6 +7751,7 @@ async function main() {
     const delay = Math.floor(min + Math.random() * (max - min));
     st.proactiveTimer = setTimeout(() => {
       st.proactiveTimer = null;
+      if (key.startsWith('group:') && !isGroupInterjectionEnabled(key.slice(6))) return;
       ensureWakeableV2(st, { key });
       const idleThreshold = Number(p.idleThresholdMs) || 15 * 60 * 1000;
       const idle = Date.now() - (st.lastIncomingAt || 0);
@@ -7724,9 +7826,69 @@ async function main() {
     const key = convKey(kind, id);
     bridgeStatus.lastInboundAt = Date.now(); // 收到任意 QQ 消息即刷新（含被拒的未授权会话，用于证明链路真的在收数据）
     if (event?.self_id != null && bridgeStatus.selfId == null) bridgeStatus.selfId = String(event.self_id);
+    // Packet candidates are passive bookkeeping and must see events outside the chat allow-list.
+    // Honor explicit deny rules and ignore the bot's own echo before recording anything.
+    const packetSender = String(event.user_id ?? event.sender?.user_id ?? '');
+    const packetBotId = String(event.self_id ?? bridgeStatus.selfId ?? '');
+    const packetDenied = (cfg.deny?.[kind] ?? cfg.deny?.[`${kind}s`] ?? []).map(String).includes(String(id));
+    if (packetSender && packetSender !== packetBotId && !packetDenied) {
+      try {
+        const packetCandidateHandled = await handleRedPacketCandidateNotice({
+          event, botId: packetBotId, chatKey: key,
+          ownerIds: (Array.isArray(cfg.ownerQQs) && cfg.ownerQQs.length ? cfg.ownerQQs : [cfg.ownerQQ]).map(String),
+          sendPrivate: async (ownerId, message) => {
+            const data = await onebotApi('send_private_msg', { user_id: Number(ownerId), message: [{ type: 'text', data: { text: message } }] });
+            if (!data || typeof data !== 'object') throw new Error('OneBot did not confirm private message delivery');
+          }
+        });
+        if (packetCandidateHandled) return;
+      } catch (error) { log('[red-packet] candidate handling failed:', error?.message ?? error); }
+    }
     if (!modeAllowed(key, kind, id, cfg, currentMode)) {
       log(`忽略未授权会话 ${key}（当前模式 ${currentMode}，来自 ${event.user_id}）`);
       return;
+    }
+    const isOwner = (Array.isArray(cfg.ownerQQs) && cfg.ownerQQs.length ? cfg.ownerQQs : [cfg.ownerQQ])
+      .some((ownerId) => String(ownerId) === String(event.user_id)
+        && String(ownerId) !== String(event.self_id ?? bridgeStatus.selfId ?? ''));
+    const botMentionedForCommand = Array.isArray(event?.message)
+      && event.message.some((seg) => seg?.type === 'at'
+        && String(seg.data?.qq) === String(event?.self_id ?? bridgeStatus.selfId ?? ''));
+    const fastCommandText = normalizeSongCommandText(quickPlainCommandText(event.message), {
+      selfNickname, selfQQ: event?.self_id ?? bridgeStatus.selfId ?? '', hasBotMention: botMentionedForCommand
+    });
+    if (isSongLibraryCommand(fastCommandText)) {
+      const songCommandGate = () => {
+        const replyControl = readSettingsDocument().settings.replyControl;
+        return {
+          replyEnabled: canReply(replyControl, kind === 'group', id),
+          muted: isMuted(kind === 'group' ? groupKey(id) : privateKey(id))
+        };
+      };
+      // Only consume recognized song commands here. Mute/unmute and other controls
+      // continue to the existing downstream command handling unchanged.
+      if (!shouldRouteSongLibraryCommand(fastCommandText, songCommandGate())) return;
+      try {
+        const songCommandHandled = await handleSongLibraryCommand({
+          text: fastCommandText, key, senderId: String(event.user_id), isGroup: kind === 'group', isOwner,
+          botId: String(event.self_id ?? bridgeStatus.selfId ?? ''),
+          coverEnabled: readSettingsDocument().settings.singing?.coverEnabled === true,
+          makePaidPreview: (query) => makePaidSongPreview(query, { getSettings: () => readSettingsDocument().settings.singing }),
+          makePaidFullSong: (query, orderId, options) => makePaidFullSong(query, { getSettings: () => readSettingsDocument().settings.singing, ...options }),
+          sendText: (message) => shouldRouteSongLibraryCommand(fastCommandText, songCommandGate()) ? sendToQQ(key, message) : undefined,
+          sendRecord: (audio) => sendOneBotSegmentsAndConfirm(key,
+            [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], 60000),
+          getFriendList: async () => {
+            const data = await onebotApi('get_friend_list');
+            return Array.isArray(data) ? data : Array.isArray(data?.friends) ? data.friends : [];
+          }
+        });
+        if (songCommandHandled) return;
+      } catch (error) {
+        log(`[song-library] direct command failed (${key}):`, error?.message ?? error);
+        if (shouldRouteSongLibraryCommand(fastCommandText, songCommandGate())) await sendToQQ(key, '点歌指令暂时处理失败，请稍后再试。');
+        return;
+      }
     }
     const resolveAtName = async (qq) => {
       // 只有群聊才需要把 @QQ号 解析成群名片/昵称；私聊没有群成员概念
@@ -7760,11 +7922,31 @@ async function main() {
     // 因此必须先解析 quoteTargetIsSelf 再做空文本过滤，避免“只引用不附文”被漏掉。
     const quoteTargetIsSelf = await isQuoteTargetSelf(event.message ?? [], kind, id, event.self_id);
     if (!plainContent && !quoteTargetIsSelf) return;
-    const isOwner = (Array.isArray(cfg.ownerQQs) && cfg.ownerQQs.length ? cfg.ownerQQs : [cfg.ownerQQ])
-      .some((id) => String(id) === String(event.user_id));
+    const isOwnerLater = isOwner;
+    const botMentioned = Array.isArray(event?.message)
+      && event.message.some((seg) => seg?.type === 'at'
+        && String(seg.data?.qq) === String(event?.self_id ?? bridgeStatus.selfId ?? ''));
+    const commandText = normalizeSongCommandText(plainContent, {
+      selfNickname, selfQQ: event?.self_id ?? bridgeStatus.selfId ?? '', hasBotMention: botMentioned
+    });
+    if (kind === 'group' && isOwner) {
+      const toggle = commandText.match(/^(?:主动插话\s*(开启|关闭)|开启主动插话|关闭主动插话)$/);
+      if (toggle) {
+        const enabled = toggle[1] ? toggle[1] === '开启' : commandText === '开启主动插话';
+        setGroupInterjectionEnabled(id, enabled);
+        await sendToQQ(key, `本群主动插话已${enabled ? '开启' : '关闭'}；明确 @ 和命令仍会响应。`);
+        return;
+      }
+    }
+    const explicitGroupRequest = kind === 'group' && (
+      quoteTargetIsSelf
+      || botMentioned
+      || /^\//.test(commandText)
+      || /^(?:歌单(?:\s+\d+)?|试听\s+[a-f0-9]{12}|我的点歌额度|新歌试听(?:\s+.+)?|唱完整首(?:\s+.+)?)$/i.test(commandText)
+    );
     if (TOOL_SIDECAR) {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner,
+      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwnerLater,
         event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null,
         extractForwardIds(event.message ?? []));
       return;
@@ -7774,27 +7956,27 @@ async function main() {
     // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
     // 审批只有管理员消息会被消费；群友消息不能因为“审批挂起”而被吞掉，应继续走正常处理。
     const p = pending.get(key);
-    if (p && (p.kind === 'question' || isOwner)) {
-      await handlePendingAnswer(p, plainContent, key, isOwner);
+    if (p && (p.kind === 'question' || isOwnerLater)) {
+      await handlePendingAnswer(p, plainContent, key, isOwnerLater);
       return;
     }
 
     // 静默模式：群友消息不投递给 agent（只记录）；管理员消息照常
-    if (roleState.mode === 'silent' && !isOwner) {
+    if (roleState.mode === 'silent' && !isOwnerLater) {
       appendActivity(`${key}（静默模式）群友 ${event.user_id}：${textContent.slice(0, 80)}`);
       log(`静默模式，忽略群友消息 ${key}`);
       return;
     }
 
     // 控制类话语：仅管理员（ownerQQ）可下达；群友触发直接拦截
-    if (!isOwner && /进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/.test(plainContent)) {
+    if (!isOwnerLater && /进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/.test(plainContent)) {
       await sendToQQ(key, '角色切换仅管理员可在管理端操作，群内不支持。');
       return;
     }
 
     // 管理命令：仅管理员（ownerQQ）可用，且由桥接直接执行（硬性，不经过模型）
     if (plainContent.startsWith('/')) {
-      if (!isOwner) {
+      if (!isOwnerLater) {
         await sendToQQ(key, '管理命令仅管理员可用。');
         return;
       }
@@ -7894,11 +8076,17 @@ async function main() {
       if (!st.bootstrapSent) {
         st.bootstrapSent = true;
         saveSocialV2State();
-        scheduleWakeV2(key, 'bootstrap');
+        if (kind !== 'group' || isGroupInterjectionEnabled(id)) scheduleWakeV2(key, 'bootstrap');
+        else if (explicitGroupRequest) scheduleWakeV2(key, 'explicitCommand');
       } else {
         const reason = evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf);
-        if (reason) {
+        if (kind === 'group' && !isGroupInterjectionEnabled(id)) {
+          if (explicitGroupRequest) scheduleWakeV2(key, 'explicitCommand');
+          else appendActivity(`${key} [reserved2] 新群主动插话关闭，普通群消息只记录：${textContent.slice(0, 80)}`);
+        } else if (reason) {
           scheduleWakeV2(key, reason);
+        } else if (explicitGroupRequest) {
+          scheduleWakeV2(key, 'explicitCommand');
         }
       }
       appendActivity(`${key} [reserved2] 消息已入未读：${textContent.slice(0, 80)}`);
@@ -7912,6 +8100,16 @@ async function main() {
 
     // 角色扮演提示注入（仅注入给 agent，不影响群友之间的正常对话语义）
     const roleHint = currentRoleHint();
+
+    if (kind === 'group' && !isGroupInterjectionEnabled(id) && !explicitGroupRequest) {
+      if (isSocialEnabled()) {
+        const sender = event.sender?.card || event.sender?.nickname || String(event.user_id);
+        appendRecentMessage(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, mediaList, messageRef);
+        appendSummary(key, sender, textContent, plainContent, isOwner, mediaList, messageRef);
+      }
+      appendActivity(`${key} 主动插话关闭，普通群消息仅记录：${textContent.slice(0, 80)}`);
+      return;
+    }
 
     // 群聊里带发送者信息，私聊不用；角色提示注入到消息开头（agent 可见）；
     // 管理员消息带身份标记（供 agent 识别，但其权限仍受工具面硬限制）

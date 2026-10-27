@@ -1,0 +1,255 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const FRAME_SIZE = Math.floor(144 * 128_000 / 44_100);
+const FRAMES = 1150;
+
+test('song catalog validates 30-second media and applies persistent global quota/locks', async (t) => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'song-library-test-'));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
+  const library = await import(`../src/song-library.mjs?test=${Date.now()}`);
+  t.after(() => { library.closeSongLibraryForTests(); delete process.env.DSH_SONG_LIBRARY_DB; });
+
+  const audio = path.join(temp, 'preview.mp3');
+  const frames = Buffer.alloc(FRAME_SIZE * FRAMES);
+  for (let index = 0; index < FRAMES; index++) frames.writeUInt32BE(0xfffb9000, index * FRAME_SIZE);
+  writeFileSync(audio, frames);
+  assert.ok(Math.abs(library.inspectMp3Duration(frames) - 30) < 0.1);
+  const id3Header = Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 10]);
+  assert.ok(Math.abs(library.inspectMp3Duration(Buffer.concat([id3Header, Buffer.alloc(10), frames])) - 30) < 0.1);
+  const vbrFrames = [];
+  let vbrBytes = 0;
+  for (let index = 0; index < FRAMES; index++) {
+    const bitrateIndex = index % 2 ? 10 : 9;
+    const frameLength = Math.floor(144 * (bitrateIndex === 9 ? 128_000 : 160_000) / 44_100);
+    const frame = Buffer.alloc(frameLength);
+    frame.writeUInt32BE((0xfffb0000 | (bitrateIndex << 12)) >>> 0);
+    vbrFrames.push(frame);
+    vbrBytes += frameLength;
+  }
+  const vbrAudio = Buffer.concat(vbrFrames, vbrBytes);
+  assert.ok(Math.abs(library.inspectMp3Duration(vbrAudio) - 30) < 0.1);
+  assert.equal(library.inspectMp3Duration(frames.subarray(0, -200)), null, 'a truncated final frame must be rejected');
+  assert.equal(library.registerSongOutput({ file: audio, title: '测试歌曲', query: '测试歌曲', mode: 'ai', startSeconds: 30, seconds: 30 }, { decodeImpl: () => true }), true);
+  assert.equal(library.registerSongOutput({ file: audio, title: '解码失败样本', query: '坏样本', mode: 'ai', seconds: 30 }, { decodeImpl: () => false }), false);
+  assert.equal(library.listSongs().total, 1);
+  const song = library.listSongs().songs[0];
+  assert.equal(song.title, '测试歌曲');
+  assert.ok(Buffer.isBuffer(library.getVerifiedSongPreview(song.song_id).audio));
+
+  const first = library.reserveFreePreview({ chatKey: 'g12345', senderId: '11111', songId: song.song_id, now: 1_800_000_000_000 });
+  assert.equal(first.ok, true);
+  assert.equal(library.reserveFreePreview({ chatKey: 'g12345', senderId: '22222', songId: song.song_id, now: 1_800_000_000_001 }).reason, 'conversation-busy');
+  assert.equal(library.settleFreePreview(first.requestId, 'failed'), true);
+  const retry = library.reserveFreePreview({ chatKey: 'g12345', senderId: '22222', songId: song.song_id, now: 1_800_000_000_002 });
+  assert.equal(retry.ok, true);
+  assert.equal(library.settleFreePreview(retry.requestId, 'sent'), true);
+
+  library.closeSongLibraryForTests();
+  const recovered = await import(`../src/song-library.mjs?recovery=${Date.now()}`);
+  const stale = recovered.reserveFreePreview({ chatKey: 'p33333', senderId: '33333', songId: song.song_id, now: 1_800_000_000_000 });
+  assert.equal(stale.ok, true);
+  assert.equal(recovered.reconcilePreviewReservations({ now: 1_800_000_180_001, staleAfterMs: 120_000 }), 1);
+  assert.equal(recovered.reserveFreePreview({ chatKey: 'p33333', senderId: '33333', songId: song.song_id, now: 1_800_000_180_002 }).reason, 'conversation-busy');
+  assert.equal(recovered.resolveUncertainPreview(stale.requestId, 'failed'), true);
+
+  recovered.closeSongLibraryForTests();
+  const quotaLib = await import(`../src/song-library.mjs?quota=${Date.now()}`);
+  const anchor = Date.UTC(2026, 9, 26, 16, 0, 0);
+  for (let i = 0; i < 3; i++) {
+    const reservation = quotaLib.reserveFreePreview({ chatKey: `g${10000 + i}`, senderId: `${10000 + i}`, songId: song.song_id, now: anchor });
+    assert.equal(reservation.ok, true);
+    assert.equal(quotaLib.settleFreePreview(reservation.requestId, 'sent'), true);
+  }
+  assert.equal(quotaLib.reserveFreePreview({ chatKey: 'p80000', senderId: '80000', songId: song.song_id, now: anchor }).reason, 'rolling-limit');
+  for (let i = 3; i < 30; i++) {
+    const now = anchor + i * 11 * 60_000;
+    const reservation = quotaLib.reserveFreePreview({ chatKey: `g${10000 + i}`, senderId: `${10000 + i}`, songId: song.song_id, now });
+    assert.equal(reservation.ok, true);
+    assert.equal(quotaLib.settleFreePreview(reservation.requestId, 'sent'), true);
+  }
+  assert.equal(quotaLib.reserveFreePreview({ chatKey: 'g90000', senderId: '90000', songId: song.song_id, now: anchor + 30 * 11 * 60_000 }).reason, 'daily-limit');
+  assert.equal(quotaLib.reserveFreePreview({ chatKey: 'p90001', senderId: '90001', songId: song.song_id, now: anchor + 24 * 60 * 60_000 }).ok, true, 'the UTC+8 daily quota resets at local midnight');
+  quotaLib.closeSongLibraryForTests();
+});
+
+test('red packet candidates remain unverified until one atomic owner approval', async (t) => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'red-packet-test-'));
+  process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
+  const library = await import(`../src/song-library.mjs?red-packet-test=${Date.now()}`);
+  t.after(() => { library.closeSongLibraryForTests(); delete process.env.DSH_SONG_LIBRARY_DB; rmSync(temp, { recursive: true, force: true }); });
+
+  assert.equal(library.hasRedPacketMarker([{ type: 'text', data: { text: '[QQ红包]' } }]), false);
+  const canonical = '[QQ红包]请使用新版手机QQ查收红包。';
+  assert.equal(library.hasRedPacketMarker([{ type: 'text', data: { text: canonical } }]), true);
+  assert.equal(library.hasRedPacketMarker([{ type: 'text', data: { text: `${canonical} 请查收` } }]), false);
+  assert.equal(library.hasRedPacketMarker([{ type: 'text', data: { text: '有人发了QQ红包，快去看' } }]), false);
+  assert.equal(library.hasRedPacketMarker([{ type: 'text', data: { text: canonical } }, { type: 'text', data: { text: 'x' } }]), false);
+  assert.equal(library.hasRedPacketMarker([], canonical), true);
+  assert.equal(library.hasRedPacketMarker([{ type: 'redbag', data: {} }]), true);
+  const args = { botId: '90000', messageId: 'msg-1', senderId: '80000', chatKey: 'group:70000', now: 1_800_000_000_000 };
+  const candidate = library.recordRedPacketCandidate(args);
+  assert.equal(candidate.status, 'pending');
+  assert.equal(library.recordRedPacketCandidate(args).candidate_id, candidate.candidate_id);
+  assert.equal(library.claimRedPacketCandidateNotification(candidate.candidate_id, { now: args.now + 1000 }), true);
+  assert.equal(library.settleRedPacketCandidateNotification(candidate.candidate_id, 'sent'), true);
+  const cooledCandidate = library.recordRedPacketCandidate({ ...args, messageId: 'msg-2', now: args.now + 10_000 });
+  assert.equal(library.claimRedPacketCandidateNotification(cooledCandidate.candidate_id, { now: args.now + 10_000 }), false);
+  assert.equal(library.listPendingRedPacketCandidates().find((item) => item.candidate_id === cooledCandidate.candidate_id).notification_status, 'suppressed');
+  const laterCandidate = library.recordRedPacketCandidate({ ...args, messageId: 'msg-3', now: args.now + 40_000 });
+  assert.equal(library.claimRedPacketCandidateNotification(laterCandidate.candidate_id, { now: args.now + 40_000 }), true);
+  assert.equal(library.settleRedPacketCandidateNotification(laterCandidate.candidate_id, 'failed'), true);
+  assert.equal(library.getVerifiedCreditBalance('80000'), 0);
+  assert.equal(library.approveRedPacketCandidate({ candidateId: candidate.candidate_id, amountCents: 125, receiptRef: 'wallet-record-1' }).ok, true);
+  assert.equal(library.approveRedPacketCandidate({ candidateId: candidate.candidate_id, amountCents: 125, receiptRef: 'wallet-record-2' }).reason, 'not-pending');
+  assert.equal(library.approveRedPacketCandidate({ candidateId: candidate.candidate_id, amountCents: 125, receiptRef: 'wallet-record-1' }).reason, 'not-pending');
+  assert.equal(library.getVerifiedCreditBalance('80000'), 125);
+  assert.equal(library.getVerifiedCreditBalance('90000'), 0);
+});
+
+test('paid song credits reserve atomically and charge once only after confirmed completion', async (t) => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'paid-song-order-test-'));
+  process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
+  const library = await import(`../src/song-library.mjs?paid-test=${Date.now()}`);
+  t.after(() => { library.closeSongLibraryForTests(); delete process.env.DSH_SONG_LIBRARY_DB; rmSync(temp, { recursive: true, force: true }); });
+  const candidate = library.recordRedPacketCandidate({ botId: '90000', messageId: 'paid-credit', senderId: '80000', chatKey: 'private:90000' });
+  library.approveRedPacketCandidate({ candidateId: candidate.candidate_id, amountCents: 300, receiptRef: 'paid-credit-receipt' });
+  const order = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:1', query: '精确歌名', kind: 'full', now: 1000 });
+  assert.equal(order.ok, true);
+  assert.equal(library.getVerifiedCreditBalance('80000'), 0, 'active reservation reduces spendable credit');
+  assert.equal(library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:2', query: '别的歌', kind: 'preview', now: 1001 }).reason, 'insufficient-credit');
+  assert.equal(library.updatePaidSongOrder(order.orderId, { status: 'processing' }), true);
+  assert.equal(library.updatePaidSongOrder(order.orderId, { status: 'completed', confirmedSegments: 2, segmentCount: 3 }), false,
+    'partial full song cannot settle');
+  assert.equal(library.getVerifiedCreditBalance('80000'), 0);
+  assert.equal(library.updatePaidSongOrder(order.orderId, { status: 'failed' }), true);
+  assert.equal(library.getVerifiedCreditBalance('80000'), 300, 'definite failure releases reservation');
+  const retry = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:1', query: '精确歌名', kind: 'full', now: 2000 });
+  assert.equal(retry.ok, true);
+  library.updatePaidSongOrder(retry.orderId, { status: 'processing' });
+  assert.equal(library.updatePaidSongOrder(retry.orderId, { status: 'completed' }), false,
+    'an empty full order cannot complete or charge');
+  assert.equal(library.getVerifiedCreditBalance('80000'), 0, 'the order reservation remains in place');
+  assert.equal(library.savePaidSongSegments(retry.orderId, { sourceIdentity: 'stable-source', title: '精确歌名', segments: [
+    ...Array.from({ length: 4 }, (_, segmentIndex) => ({ segmentIndex, startSeconds: segmentIndex * 30, seconds: 30, cachePath: `retry-${segmentIndex}.mp3` }))
+  ] }), true);
+  assert.equal(library.updatePaidSongOrder(retry.orderId, { status: 'completed', confirmedSegments: 4, segmentCount: 4 }), false,
+    'recorded but unsent full segments cannot settle');
+  for (let index = 0; index < 4; index++) { library.updatePaidSongSegment(retry.orderId, index, 'sending'); library.updatePaidSongSegment(retry.orderId, index, 'sent'); }
+  assert.equal(library.updatePaidSongOrder(retry.orderId, { status: 'completed', confirmedSegments: 4, segmentCount: 4, sourceIdentity: 'stable-source', title: '精确歌名' }), true);
+  assert.equal(library.getPaidSongOrder(retry.orderId).output_path, 'retry-0.mp3', 'completion preserves the persisted first-segment cache path');
+  assert.equal(library.getVerifiedCreditBalance('80000'), 0);
+  assert.equal(library.updatePaidSongOrder(retry.orderId, { status: 'completed', confirmedSegments: 4, segmentCount: 4 }), false,
+    'completed order cannot be charged twice');
+  const extraCandidate = library.recordRedPacketCandidate({ botId: '90000', messageId: 'credit-extra', senderId: '80000', chatKey: 'private:90000' });
+  library.approveRedPacketCandidate({ candidateId: extraCandidate.candidate_id, amountCents: 100, receiptRef: 'credit-extra-ref' });
+  const uncertain = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:3', query: '核对歌曲', kind: 'preview', now: 3000 });
+  library.savePaidSongSegments(uncertain.orderId, { sourceIdentity: 'stable-source-2', title: '核对歌曲', voiceVariant: 'rvc:0', segments: [
+    { segmentIndex: 0, startSeconds: 30, seconds: 30, cachePath: 'preview-cache.mp3' }
+  ] });
+  library.updatePaidSongSegment(uncertain.orderId, 0, 'sending');
+  library.updatePaidSongSegment(uncertain.orderId, 0, 'uncertain');
+  library.updatePaidSongOrder(uncertain.orderId, { status: 'uncertain' });
+  assert.equal(library.listUncertainPaidSongOrders().some((entry) => entry.order_id === uncertain.orderId), true);
+  assert.equal(library.resolvePaidSongOrder(uncertain.orderId, 'sent'), true, 'owner reconciliation settles a confirmed uncertain preview');
+  assert.equal(library.getVerifiedCreditBalance('80000'), 0);
+  assert.equal(library.resolvePaidSongOrder(uncertain.orderId, 'not_sent'), false, 'resolved order cannot be resolved twice');
+  const fullCredit = library.recordRedPacketCandidate({ botId: '90000', messageId: 'full-credit', senderId: '80000', chatKey: 'private:90000' });
+  library.approveRedPacketCandidate({ candidateId: fullCredit.candidate_id, amountCents: 300, receiptRef: 'full-credit-ref' });
+  const full = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:4', query: '整首核对', kind: 'full', now: 4000 });
+  assert.equal(library.savePaidSongSegments(full.orderId, { sourceIdentity: 'same-source-hash', title: '整首核对', segments: [
+    { segmentIndex: 0, startSeconds: 0, seconds: 30, cachePath: 'chunk-0.mp3' },
+    { segmentIndex: 1, startSeconds: 30, seconds: 12, cachePath: 'chunk-1.mp3' }
+  ] }), true);
+  library.updatePaidSongSegment(full.orderId, 0, 'sending');
+  library.updatePaidSongSegment(full.orderId, 0, 'sent');
+  library.updatePaidSongSegment(full.orderId, 1, 'sending');
+  library.updatePaidSongSegment(full.orderId, 1, 'uncertain');
+  library.updatePaidSongOrder(full.orderId, { status: 'uncertain', confirmedSegments: 1 });
+  assert.equal(library.listUncertainPaidSongOrders().find((entry) => entry.order_id === full.orderId).uncertain_segment_index, 1);
+  assert.equal(library.resolvePaidSongOrder(full.orderId, 'sent', { segmentIndex: 1 }), true);
+  assert.equal(library.getVerifiedCreditBalance('80000'), 0, 'the full order charges only after every segment is confirmed');
+  const previewCredit = library.recordRedPacketCandidate({ botId: '90000', messageId: 'empty-preview-credit', senderId: '80000', chatKey: 'private:90000' });
+  library.approveRedPacketCandidate({ candidateId: previewCredit.candidate_id, amountCents: 100, receiptRef: 'empty-preview-credit-ref' });
+  const emptyPreview = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:5', query: '空试听', kind: 'preview', now: 5000 });
+  assert.equal(library.updatePaidSongOrder(emptyPreview.orderId, { status: 'completed' }), false,
+    'a preview without persisted deliverable data cannot settle');
+  assert.equal(library.getVerifiedCreditBalance('80000'), 0, 'empty preview order stays reserved and uncharged');
+});
+
+test('partial paid orders are atomically claimed for a single resume attempt', async (t) => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'paid-song-resume-claim-test-'));
+  process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
+  const library = await import(`../src/song-library.mjs?paid-resume-claim=${Date.now()}`);
+  t.after(() => { library.closeSongLibraryForTests(); delete process.env.DSH_SONG_LIBRARY_DB; rmSync(temp, { recursive: true, force: true }); });
+  const credit = library.recordRedPacketCandidate({ botId: '90000', messageId: 'resume-claim-credit', senderId: '80000', chatKey: 'private:90000' });
+  library.approveRedPacketCandidate({ candidateId: credit.candidate_id, amountCents: 300, receiptRef: 'resume-claim-ref' });
+  const order = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:1', query: '可续传歌', kind: 'full', now: 1000, processPid: -1 });
+  library.savePaidSongSegments(order.orderId, { sourceIdentity: 'stable', title: '可续传歌', voiceVariant: 'rvc:0', segments: [
+    { segmentIndex: 0, startSeconds: 0, seconds: 30, cachePath: 'chunk-0.mp3' },
+    { segmentIndex: 1, startSeconds: 30, seconds: 30, cachePath: 'chunk-1.mp3' }
+  ] });
+  library.updatePaidSongSegment(order.orderId, 0, 'sending');
+  library.updatePaidSongSegment(order.orderId, 0, 'sent');
+  library.updatePaidSongOrder(order.orderId, { status: 'partial', confirmedSegments: 1 });
+  const first = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:1', query: '可续传歌', kind: 'full', now: 2000 });
+  assert.equal(first.resume, true);
+  assert.equal(library.getPaidSongOrder(order.orderId).status, 'processing');
+  assert.notEqual(library.getPaidSongOrder(order.orderId).process_pid, -1, 'resume claim adopts the current live process owner');
+  const second = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:1', query: '可续传歌', kind: 'full', now: 2001 });
+  assert.deepEqual(second, { ok: false, reason: 'conversation-busy' }, 'a second resume claimant cannot run concurrently');
+});
+
+test('resolving one of two uncertain full-song segments keeps the other segment locked', async (t) => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'paid-song-two-uncertain-test-'));
+  process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
+  const library = await import(`../src/song-library.mjs?paid-two-uncertain=${Date.now()}`);
+  t.after(() => { library.closeSongLibraryForTests(); delete process.env.DSH_SONG_LIBRARY_DB; rmSync(temp, { recursive: true, force: true }); });
+  const credit = library.recordRedPacketCandidate({ botId: '90000', messageId: 'two-uncertain-credit', senderId: '80000', chatKey: 'private:90000' });
+  library.approveRedPacketCandidate({ candidateId: credit.candidate_id, amountCents: 300, receiptRef: 'two-uncertain-ref' });
+  const order = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:1', query: '双不确定歌', kind: 'full', now: 1000 });
+  library.savePaidSongSegments(order.orderId, { sourceIdentity: 'stable', title: '双不确定歌', voiceVariant: 'rvc:0', segments: [
+    ...Array.from({ length: 3 }, (_, segmentIndex) => ({ segmentIndex, startSeconds: segmentIndex * 30, seconds: 30, cachePath: `chunk-${segmentIndex}.mp3` }))
+  ] });
+  library.updatePaidSongSegment(order.orderId, 0, 'sending');
+  library.updatePaidSongSegment(order.orderId, 0, 'sent');
+  for (const index of [1, 2]) { library.updatePaidSongSegment(order.orderId, index, 'sending'); library.updatePaidSongSegment(order.orderId, index, 'uncertain'); }
+  library.updatePaidSongOrder(order.orderId, { status: 'uncertain', confirmedSegments: 1 });
+  assert.equal(library.resolvePaidSongOrder(order.orderId, 'sent', { segmentIndex: 1 }), true);
+  assert.equal(library.getPaidSongOrder(order.orderId).status, 'uncertain', 'remaining uncertain segment keeps order frozen');
+  assert.equal(library.listUncertainPaidSongOrders().find((item) => item.order_id === order.orderId).uncertain_segment_index, 2);
+  assert.equal(library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:1', query: '双不确定歌', kind: 'full', now: 2000 }).reason,
+    'conversation-busy', 'unresolved delivery cannot be resumed or resent');
+  assert.equal(library.resolvePaidSongOrder(order.orderId, 'not_sent', { segmentIndex: 2 }), true);
+  assert.equal(library.getPaidSongOrder(order.orderId).status, 'partial', 'order becomes resumable only after every uncertain segment is resolved');
+  assert.equal(library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:1', query: '双不确定歌', kind: 'full', now: 2001 }).resume, true);
+});
+
+test('dead-process paid orders recover immediately while current-process orders stay untouched', async (t) => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'paid-song-crash-recovery-test-'));
+  process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
+  const library = await import(`../src/song-library.mjs?paid-crash-recovery=${Date.now()}`);
+  t.after(() => { library.closeSongLibraryForTests(); delete process.env.DSH_SONG_LIBRARY_DB; rmSync(temp, { recursive: true, force: true }); });
+  const credit = library.recordRedPacketCandidate({ botId: '90000', messageId: 'crash-recovery-credit', senderId: '80000', chatKey: 'private:90000' });
+  library.approveRedPacketCandidate({ candidateId: credit.candidate_id, amountCents: 900, receiptRef: 'crash-recovery-ref' });
+  const dead = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:dead', query: '崩溃中订单', kind: 'full', now: 1000, processPid: -1 });
+  library.savePaidSongSegments(dead.orderId, { sourceIdentity: 'stable', title: '崩溃中订单', voiceVariant: 'rvc:0', segments: [
+    { segmentIndex: 0, startSeconds: 0, seconds: 30, cachePath: 'dead-0.mp3' },
+    { segmentIndex: 1, startSeconds: 30, seconds: 30, cachePath: 'dead-1.mp3' }
+  ] });
+  library.updatePaidSongSegment(dead.orderId, 0, 'sending');
+  const alive = library.reservePaidSongOrder({ senderId: '80000', chatKey: 'group:alive', query: '仍在制作', kind: 'full', now: 1001 });
+  library.savePaidSongSegments(alive.orderId, { sourceIdentity: 'live-source', title: '仍在制作', voiceVariant: 'rvc:0', segments: [
+    { segmentIndex: 0, startSeconds: 0, seconds: 30, cachePath: 'live-0.mp3' }
+  ] });
+  library.updatePaidSongSegment(alive.orderId, 0, 'sending');
+  library.listUncertainPaidSongOrders();
+  assert.equal(library.getPaidSongOrder(dead.orderId).status, 'uncertain', 'dead-process sending segment is frozen for owner reconciliation');
+  assert.equal(library.listPaidSongSegments(dead.orderId)[0].status, 'uncertain');
+  assert.equal(library.getPaidSongOrder(alive.orderId).status, 'processing', 'live process order is not changed by recovery');
+  assert.equal(library.listPaidSongSegments(alive.orderId)[0].status, 'sending');
+});

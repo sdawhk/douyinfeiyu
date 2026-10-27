@@ -160,6 +160,37 @@ async function authorizeRead(key, token) {
 
 const server = new McpServer({ name: 'snowluma-safe', version: '0.1.0' });
 
+async function qzoneTool(action, args) {
+  try {
+    const data = await agentApi('/api/qzone/tool', {
+      method: 'POST', body: JSON.stringify({ action, ...args }), timeoutMs: action === 'post' ? 80_000 : 25_000
+    });
+    return { content: [{ type: 'text', text: data.result }] };
+  } catch (error) {
+    return { content: [{ type: 'text', text: `QQ 空间操作失败：${error?.message ?? error}` }], isError: true };
+  }
+}
+
+server.tool('qq_post_qzone',
+  '在自己的 QQ 空间发布一条完整说说。仅主人私聊会话可用；内容会经过公开文本检查、重复话题检查与发送后回读确认。不要把私聊、群聊原文或工具诊断直接公开；发送结果不确定时先查动态，不要立即重试。',
+  { key: z.string().describe('当前主人私聊会话 key，格式 private:QQ号'), token: z.string().describe('当前会话令牌'), content: z.string().describe('要公开发布的完整说说正文') },
+  (args) => qzoneTool('post', args));
+
+server.tool('qq_list_my_qzone',
+  '分页查看机器人自己最近发布的 QQ 空间说说。只返回摘要；先用此工具确定动态序号，再查看详情。仅主人私聊会话可用。',
+  { key: z.string().describe('当前主人私聊会话 key'), token: z.string().describe('当前会话令牌'), page: z.number().int().min(1).max(11).optional().describe('页码，默认 1；每页 10 条') },
+  (args) => qzoneTool('list', args));
+
+server.tool('qq_qzone_detail',
+  '查看机器人自己某条 QQ 空间说说的内容预览、评论及楼中楼。index 是 qq_list_my_qzone 给出的全局序号。仅主人私聊会话可用。',
+  { key: z.string().describe('当前主人私聊会话 key'), token: z.string().describe('当前会话令牌'), index: z.number().int().min(1).max(110).describe('动态全局序号') },
+  (args) => qzoneTool('detail', args));
+
+server.tool('qq_comment_qzone',
+  '回复机器人自己说说下的指定评论或楼中楼。先用 qq_qzone_detail 确认评论路径；路径如 1 或 1.1。仅主人私聊会话可用，回复内容最多 500 字。',
+  { key: z.string().describe('当前主人私聊会话 key'), token: z.string().describe('当前会话令牌'), index: z.number().int().min(1).max(110).describe('动态全局序号'), path: z.string().regex(/^\d+(?:\.\d+)*$/).describe('评论路径，例如 1.1'), content: z.string().min(1).max(500).describe('回复正文') },
+  (args) => qzoneTool('comment', args));
+
 server.tool(
   'qq_status',
   '查询 QQ 机器人登录状态与账号信息（只读）。',
