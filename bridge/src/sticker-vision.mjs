@@ -18,6 +18,12 @@ try {
   }
 } catch {}
 
+export function visionRetryAfterMs(models = DEFAULT_MODELS, now = Date.now()) {
+  const choices = Array.isArray(models) && models.length ? models : DEFAULT_MODELS;
+  const until = choices.map((model) => modelCooldownUntil.get(model) || 0);
+  return until.every((value) => value > now) ? Math.min(...until) - now : 0;
+}
+
 function coolUnsupportedModel(model, status) {
   const until = Date.now() + 60 * 60_000;
   modelCooldownUntil.set(model, until);

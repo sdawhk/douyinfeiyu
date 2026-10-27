@@ -4,9 +4,12 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readSettingsDocument, saveSettingsDocument } from './bot-settings.mjs';
+import { synthesizeAzureSpeech } from './azure-tts.mjs';
 import { synthesizeXfyunSpeech } from './xfyun-tts.mjs';
 import { synthesizeEdgeSpeech } from './edge-tts.mjs';
+import { synthesizeVoiceClone } from './voice-clone-tts.mjs';
 import { generateSong, downloadSong } from './singing.mjs';
+import { applyLiuyingSpeech, applyLiuyingVoice } from './rvc-singing.mjs';
 import { readStickerSemantics, setStickerSemantics } from './sticker-semantics.mjs';
 import { readImageAnalyses } from './image-analysis-store.mjs';
 import { modelStatus, modelCatalog, testModel, saveModelPolicy, syncPromotedModel } from './model-management.mjs';
@@ -362,12 +365,44 @@ async function handle(req, res) {
     } catch (error) { return json(res, 400, { error: error.message }); }
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/settings/voice-clone-test') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机设置页面测试音色' });
+    try {
+      const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
+      const file = await synthesizeVoiceClone('你好，我是小鲸鱼。现在可以用自己的声音说话啦。', config.voiceClone);
+      const audio = Buffer.from(file.slice('base64://'.length), 'base64');
+      res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': audio.length,
+        'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end(audio);
+    } catch (error) { return json(res, 400, { error: error.message }); }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/settings/speech-rvc-test') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机设置页面测试流萤语音' });
+    try {
+      const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
+      let file;
+      if (config.voiceClone?.enabled) file = await synthesizeVoiceClone('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。', config.voiceClone);
+      else if (config.edgeTts?.enabled) file = await synthesizeEdgeSpeech('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。', { ...config.edgeTts, url: config.edgeTts.workerUrl || config.edgeTts.url });
+      else if (config.xfyunTts?.enabled) file = await synthesizeXfyunSpeech('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。', config.xfyunTts);
+      else if (config.azureTts?.enabled) file = await synthesizeAzureSpeech('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。',
+        { ...config.azureTts, outputFormat: 'riff-24khz-16bit-mono-pcm' });
+      else throw new Error('请先配置并启用一种语音合成服务');
+      const raw = Buffer.from(file.slice('base64://'.length), 'base64');
+      const audio = await applyLiuyingSpeech(raw, { pitch: config.speechRvc?.pitch ?? 0 });
+      res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': audio.length,
+        'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end(audio);
+    } catch (error) { return json(res, 400, { error: error.message }); }
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/settings/singing-test') {
     if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机设置页面测试唱歌' });
     try {
       const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
       const song = await generateSong('小鲸鱼在晴天里和朋友一起散步', config.singing);
-      const audio = await downloadSong(song.url);
+      let audio = await downloadSong(song.url);
+      if (config.singing?.rvcEnabled === true) audio = await applyLiuyingVoice(audio, { pitch: config.singing.rvcPitch ?? 0 });
       res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': audio.length,
         'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       return res.end(audio);

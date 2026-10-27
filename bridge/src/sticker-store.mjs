@@ -15,6 +15,7 @@ import { archiveImage, nameFor } from './image-archive.mjs';
 
 const DIR = process.env.STICKER_LIBRARY_ROOT || 'D:\\deepseek\\stickers';
 const INDEX = process.env.STICKER_INDEX_PATH || join(DIR, 'index.json');
+const ALIASES = process.env.STICKER_ALIAS_PATH || join(DIR, 'aliases.json');
 const IMAGE_ROOT = process.env.IMAGE_LIBRARY_ROOT || 'D:\\deepseek\\images';
 
 function ensureDir() {
@@ -30,6 +31,13 @@ function readIndex() {
   } catch {
     return {};
   }
+}
+
+function readAliases() {
+  try {
+    const value = JSON.parse(readFileSync(ALIASES, 'utf8'));
+    return value && !Array.isArray(value) && typeof value === 'object' ? value : {};
+  } catch { return {}; }
 }
 
 function writeIndex(idx) {
@@ -58,6 +66,9 @@ export function saveSticker(key, b64, mime = 'image/jpeg', options = {}) {
   // 2) 只记引用，不复制文件
   const idx = readIndex();
   const status = options.status === 'pending' || options.status === 'rejected' ? options.status : 'approved';
+  const existing = Object.entries(idx).find(([, record]) => record?.ref === archived.file
+    && record.status !== 'pending' && record.status !== 'rejected');
+  if (existing) return { ...existing[1], duplicateKey: existing[0] };
   if (status === 'approved') {
     for (const record of Object.values(idx)) {
       if (record?.ref === archived.file) record.status = 'approved';
@@ -162,6 +173,9 @@ export function findSticker(keyword) {
   if (!k) return null;
   const exact = keys.find((x) => x.toLowerCase() === k);
   if (exact) return exact;
+  const aliases = readAliases();
+  const oldKey = Object.keys(aliases).find((x) => x.toLowerCase() === k);
+  if (oldKey && keys.includes(aliases[oldKey])) return aliases[oldKey];
   const matches = keys.filter((x) => x.toLowerCase().includes(k));
   return matches.length === 1 ? matches[0] : null;
 }

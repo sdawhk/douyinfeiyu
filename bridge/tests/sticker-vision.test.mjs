@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inspectStickerImage } from '../src/sticker-vision.mjs';
+import { inspectStickerImage, visionRetryAfterMs } from '../src/sticker-vision.mjs';
 
 test('vision result includes DeepSeek theme, action and emotion', async () => {
   const result = await inspectStickerImage('abc', 'image/png', {
@@ -48,4 +48,6 @@ test('a failing visual route cools down instead of being called for every image'
   await assert.rejects(inspectStickerImage('abc', 'image/png', options), /HTTP 503/);
   await assert.rejects(inspectStickerImage('abc', 'image/png', options), /cooling down/);
   assert.equal(calls, 1);
+  assert.ok(visionRetryAfterMs(options.models) > 0);
+  assert.equal(visionRetryAfterMs(['vision-available-test']), 0);
 });
