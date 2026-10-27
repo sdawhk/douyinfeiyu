@@ -52,6 +52,18 @@ export function parseBingResults(html, query) {
   return { query, results };
 }
 
+export function parseBingRssResults(xml, query) {
+  const results = [];
+  for (const [, item] of String(xml ?? '').matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)) {
+    const field = (name) => item.match(new RegExp(`<${name}>([\\s\\S]*?)<\\/${name}>`, 'i'))?.[1] ?? '';
+    const result = cleanResult(decodeHtml(field('title')), decodeHtml(field('link')),
+      decodeHtml(field('description')), 'Bing RSS');
+    if (result) results.push(result);
+    if (results.length >= MAX_SEARCH_RESULTS) break;
+  }
+  return { query, results };
+}
+
 export function parseDuckDuckGoResults(html, query) {
   const source = String(html ?? '');
   const anchors = [...source.matchAll(/<a\b(?=[^>]*\bclass=["'][^"']*\bresult__a\b[^"']*["'])[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)];
@@ -106,12 +118,17 @@ async function readSearchResponse(response) {
 async function fetchSearchHtml(url, fetchImpl) {
   const response = await fetchImpl(url, {
     headers: {
-      'user-agent': 'Mozilla/5.0',
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36',
       'accept-language': 'zh-CN,zh;q=0.9',
     },
     signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
   });
   return readSearchResponse(response);
+}
+
+export function needsFreshSearch(text) {
+  const value = String(text ?? '');
+  return /热点|新闻|头条|网络热梗|网络梗|最新.{0,8}梗|(?:什么|啥|哪来的|出处|来源|意思|含义|解释|科普).{0,16}梗|梗.{0,16}(?:什么意思|啥意思|出处|来源|解释|科普)|今日.*(消息|发生|进展)|最近.*(消息|新闻|热点|进展)|最新.*(消息|新闻|进展|版本|政策|价格)|当前.*(天气|股价|汇率|政策|赛事)|现在.*(天气|价格|股价|汇率)|查(?:一下|一查|找找).*(新闻|热点|资料|信息|网页)|搜(?:一下|一搜|搜搜)/i.test(value);
 }
 
 export async function searchWeb(query, fetchImpl = fetch) {
@@ -123,6 +140,16 @@ export async function searchWeb(query, fetchImpl = fetch) {
   if (!clean) throw new Error('查询词为空，已拒绝。');
 
   const attempts = [
+    {
+      source: 'Bing RSS',
+      url: () => {
+        const url = new URL('https://www.bing.com/search');
+        url.searchParams.set('format', 'rss');
+        url.searchParams.set('q', clean);
+        return url;
+      },
+      parse: parseBingRssResults,
+    },
     {
       source: 'Bing',
       url: () => {

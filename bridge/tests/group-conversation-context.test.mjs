@@ -34,3 +34,23 @@ test('preserves whether a previous group message addressed another member', () =
   }, 1_000);
   assert.match(context.format('group-a', 1_001), /@其他群友 2/);
 });
+
+test('selects the immediate exchange and earlier turns from the current speaker', () => {
+  const context = new GroupConversationContext();
+  for (let index = 1; index <= 8; index++) {
+    context.remember('group-a', { senderId: index === 2 ? 'alice' : 'other', text: `消息${index}` }, index * 100);
+  }
+  const selected = context.format('group-a', 900, { senderId: 'alice' });
+  assert.match(selected, /消息2/);
+  assert.doesNotMatch(selected, /消息3/);
+  assert.match(selected, /消息5/);
+  assert.match(selected, /消息8/);
+});
+
+test('describes media-only context without exposing raw placeholders', () => {
+  const context = new GroupConversationContext();
+  context.remember('group-a', { senderId: 'alice', text: '[图片] [图片]' }, 100);
+  const selected = context.format('group-a', 200);
+  assert.match(selected, /发送了媒体内容（内容未识别）/);
+  assert.doesNotMatch(selected, /\[图片\]/);
+});

@@ -16,23 +16,30 @@ export class GroupConversationContext {
     const recent = (this.groups.get(key) ?? []).filter((item) => at - item.at <= this.windowMs);
     const cleanedText = String(text).replace(/[\r\n\t]+/g, ' ').trim().slice(0, this.maxTextLength);
     if (cleanedText) {
+      const contextText = /^(?:\[(?:图片|表情|动画表情|语音|视频)\]\s*)+$/u.test(cleanedText)
+        ? '发送了媒体内容（内容未识别）' : cleanedText;
       recent.push({
         at,
         senderId: String(senderId ?? ''),
         senderName: String(senderName).replace(/[\r\n\t]+/g, ' ').trim().slice(0, 60),
-        text: cleanedText,
+        text: contextText,
         directionHint: String(directionHint).replace(/[\r\n\t]+/g, ' ').trim().slice(0, 100)
       });
     }
     this.groups.set(key, recent.slice(-this.maxEntries));
   }
 
-  format(groupId, now = Date.now()) {
+  format(groupId, now = Date.now(), { senderId = null } = {}) {
     const key = String(groupId);
     const recent = (this.groups.get(key) ?? []).filter((item) => now - item.at <= this.windowMs);
     this.groups.set(key, recent);
     if (!recent.length) return '';
-    const lines = recent.map((item) => {
+    // Keep the immediate exchange plus a few earlier turns from this speaker.
+    // Quoted messages are provided separately by the QQ reference parser.
+    const latest = senderId == null ? recent : recent.slice(-4);
+    const sameSpeaker = senderId == null ? [] : recent.slice(0, -4)
+      .filter((item) => item.senderId === String(senderId)).slice(-2);
+    const lines = [...sameSpeaker, ...latest].map((item) => {
       const time = new Date(item.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
       const speaker = item.senderName
         ? `${item.senderName}（QQ ${item.senderId}）`

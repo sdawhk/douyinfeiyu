@@ -1,12 +1,64 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeModelReply } from '../src/reply-output-safety.mjs';
+import { sanitizeModelReply, replyQualityIssue, repeatsRecentReply } from '../src/reply-output-safety.mjs';
 
 test('keeps ordinary conversational replies unchanged', () => {
   const result = sanitizeModelReply('这免死金牌听着挺可靠，金币都拿出来担保了。');
   assert.equal(result.text, '这免死金牌听着挺可靠，金币都拿出来担保了。');
   assert.equal(result.blocked, false);
   assert.equal(result.leaked, false);
+});
+
+test('blocks leaked sticker send status text', () => {
+  for (const text of ['[sticker] sent', '[sticker] sent 开心']) {
+    const result = sanitizeModelReply(text);
+    assert.equal(result.text, '', text);
+    assert.equal(result.leaked, true, text);
+    assert.equal(result.blocked, true, text);
+  }
+});
+
+test('blocks replies made only of QQ media placeholders', () => {
+  for (const text of ['[图片] [图片]', '[表情][图片]', '<|analysis|>ignore<|final|>[视频]']) {
+    const result = sanitizeModelReply(text);
+    assert.equal(result.text, '', text);
+    assert.equal(result.blocked, true, text);
+    assert.equal(result.leaked, true, text);
+  }
+});
+
+test('removes media placeholders from an otherwise useful reply', () => {
+  const result = sanitizeModelReply('我平时看游戏视频 [图片] 偶尔看电影解说 [sticker:开心]');
+  assert.equal(result.text, '我平时看游戏视频 偶尔看电影解说 [sticker:开心]');
+  assert.equal(result.blocked, false);
+  assert.equal(result.leaked, true);
+});
+
+test('flags obvious non-answers to a question without rejecting short real answers', () => {
+  assert.equal(replyQualityIssue('你喜欢看什么视频？', '[sticker:开心]'), 'missing-answer');
+  assert.equal(replyQualityIssue('你喜欢看什么视频？', '哈哈'), 'generic-non-answer');
+  assert.equal(replyQualityIssue('你喜欢看什么视频？', '你喜欢看什么视频？'), 'echoed-question');
+  assert.equal(replyQualityIssue('你喜欢看什么视频？', '游戏实况'), '');
+  assert.equal(replyQualityIssue('到了吗？', '到了'), '');
+  assert.equal(replyQualityIssue('来看看', '哈哈'), '');
+});
+
+test('detects repeated reply wording without confusing the same topic for repetition', () => {
+  const recent = ['我平时看游戏实况，偶尔看电影解说。[sticker:开心]'];
+  assert.equal(repeatsRecentReply('我平时看游戏实况，偶尔看电影解说。', recent), true);
+  assert.equal(repeatsRecentReply('电影解说我只看悬疑题材，你呢？', recent), false);
+});
+
+test('blocks silent control markers with model metadata attached', () => {
+  for (const text of [
+    '[SILENT]',
+    '[silent] {amount: 1, reasoning: "do not answer"}',
+    '[SKIP] internal routing payload'
+  ]) {
+    const result = sanitizeModelReply(text);
+    assert.equal(result.text, '', text);
+    assert.equal(result.blocked, true, text);
+  }
 });
 
 test('blocks analysis written as a user-facing narration', () => {
