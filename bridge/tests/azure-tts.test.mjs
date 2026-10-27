@@ -26,5 +26,9 @@ test('speech is opt-in by phrase unless automatic mode is selected', () => {
   assert.equal(wantsVoiceReply('发句语音'), true);
   assert.equal(wantsVoiceReply('给我发个语音'), true);
   assert.equal(wantsVoiceReply('语音回答我'), true);
+  assert.equal(wantsVoiceReply('背一首静夜思语音背'), true);
+  assert.equal(wantsVoiceReply('语音朗读静夜思'), true);
+  assert.equal(wantsVoiceReply('朗读静夜思给我听'), true);
+  assert.equal(wantsVoiceReply('语音功能怎么样'), false);
   assert.equal(wantsVoiceReply('今天天气不错', 'always'), true);
 });

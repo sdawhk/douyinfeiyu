@@ -37,6 +37,9 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.equal(before.settings.azureTts.hasKey, true);
     assert.equal(before.settings.xfyunTts.hasApiPassword, true);
     assert.equal(before.settings.singing.hasApiKey, true);
+    assert.equal(before.settings.singing.coverEnabled, true);
+    assert.deepEqual(before.settings.voiceClone, { enabled: false, mode: 'requested',
+      endpoint: 'http://127.0.0.1:9882', refAudio: '', refText: '' });
     const next = structuredClone(before.settings);
     next.groupReplyCooldownMs = 12_000;
     next.replyControl = { privateEnabled: false, groupEnabled: true, disabledPrivate: ['123456789'], disabledGroups: ['839367702'] };
@@ -48,6 +51,8 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     next.stickerCooldown.privateRequestMs = 0;
     next.pokeInteraction.pokeBack = true;
     next.autoSticker = false;
+    next.voiceClone = { enabled: false, mode: 'requested', endpoint: 'http://127.0.0.1:9882',
+      refAudio: 'D:\\voices\\reference.wav', refText: '你好，我是小鲸鱼。' };
     next.pokeInteraction.replies = '戳到啦\n在呢';
     const after = saveSettingsDocument(before.version, next, file);
     assert.notEqual(after.version, before.version);
@@ -63,6 +68,7 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.deepEqual(saved.messageBatch, next.messageBatch);
     assert.equal(saved.pokeInteraction.pokeBack, true);
     assert.equal(saved.autoSticker, false);
+    assert.deepEqual(saved.voiceClone, next.voiceClone);
     assert.equal(saved.pokeInteraction.replies, '戳到啦\n在呢');
     assert.equal(saved.azureTts.key, 'azure-private-key');
     assert.equal(saved.xfyunTts.apiPassword, 'tts-private-password');
@@ -86,8 +92,24 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.throws(() => validateSettings({ ...next, qzoneSocial: { ...next.qzoneSocial, allowedFriends: ['not-a-qq'] } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, qzoneSocial: { ...next.qzoneSocial, commentThreshold: next.qzoneSocial.likeThreshold - 1 } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, ownerCardLike: { ...next.ownerCardLike, time: '25:00' } }), { status: 400 });
+    assert.throws(() => validateSettings({ ...next, voiceClone: { ...next.voiceClone, endpoint: 'https://example.com' } }), { status: 400 });
   } finally {
     unlinkSync(file);
     try { unlinkSync(`${file}.bak`); } catch { /* no backup was written before a failed save */ }
+  }
+});
+
+test('existing-song cover can be enabled without a Mureka key', () => {
+  const file = path.join(tmpdir(), `bot-cover-${randomBytes(8).toString('hex')}.json`);
+  writeFileSync(file, JSON.stringify({ singing: { enabled: false, coverEnabled: true } }));
+  try {
+    const before = readSettingsDocument(file);
+    assert.equal(before.settings.singing.coverEnabled, true);
+    const after = saveSettingsDocument(before.version, before.settings, file);
+    assert.equal(after.settings.singing.coverEnabled, true);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).singing.apiKey, undefined);
+  } finally {
+    unlinkSync(file);
+    try { unlinkSync(`${file}.bak`); } catch { /* no backup */ }
   }
 });

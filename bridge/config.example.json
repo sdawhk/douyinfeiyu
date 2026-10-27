@@ -31,12 +31,26 @@
     "workerUrl": "https://tts.wangwangit.com",
     "voice": "zh-CN-XiaoxiaoNeural"
   },
+  "voiceClone": {
+    "enabled": false,
+    "mode": "requested",
+    "endpoint": "http://127.0.0.1:9882",
+    "refAudio": "",
+    "refText": ""
+  },
+  "speechRvc": {
+    "enabled": false,
+    "pitch": 0
+  },
   "speechRecognition": {
     "modelDir": "D:/deepseek/state/voice-asr"
   },
   "singing": {
     "enabled": false,
-    "apiKey": ""
+    "coverEnabled": true,
+    "apiKey": "",
+    "rvcEnabled": false,
+    "rvcPitch": 0
   },
   "stickerVisionBaseUrl": "http://127.0.0.1:18901/v1",
   "stickerVisionModels": [

@@ -112,11 +112,25 @@
           <div class="field-grid"><label class="field"><span class="field-name">服务地址</span><input id="edgeTtsUrl" type="url" maxlength="250" placeholder="https://tts.wangwangit.com"><small class="hint">可填项目公开服务或自行部署的 Worker 地址。</small></label><label class="field"><span class="field-name">中文音色</span><select id="edgeTtsVoice"><option value="zh-CN-XiaoxiaoNeural">晓晓（女声）</option><option value="zh-CN-XiaoyiNeural">晓伊（女声）</option><option value="zh-CN-YunxiNeural">云希（男声）</option><option value="zh-CN-YunyangNeural">云扬（男声）</option></select></label><label class="field"><span class="field-name">回复方式</span><select id="edgeTtsMode"><option value="requested">仅明确要求语音时</option><option value="always">所有普通回复</option></select></label></div>
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:18px"><button id="edgeTtsTest" type="button" style="border:1px solid var(--lime);background:transparent;color:var(--lime);padding:9px 15px">测试朗读</button><audio id="edgeTtsPreview" controls hidden></audio><small class="hint">先保存地址与音色；测试不会发 QQ 消息。</small></div>
         </div></section>
-        <section><div class="section-head"><div><div class="tag">SINGING</div><h2>原创唱歌</h2><p>用音乐模型生成真正带旋律和伴奏的人声歌曲，与 Edge TTS 分开配置。</p></div></div><div class="section-body">
-          <label class="switch-row"><span><strong>启用“/唱歌 主题”</strong><small id="singingKeyStatus">默认关闭；只允许主人主动点歌。</small></span><input id="singingEnabled" type="checkbox"></label>
+        <section><div class="section-head"><div><div class="tag">LOCAL VOICE CLONE</div><h2>克隆音色</h2><p>使用本机 GPT-SoVITS api_v2，以一段固定参考音频合成机器人的 QQ 语音。</p></div></div><div class="section-body">
+          <label class="switch-row"><span><strong>启用克隆音色</strong><small>启用后优先于 Edge TTS、讯飞和 Azure；服务异常时发送文字。</small></span><input id="voiceCloneEnabled" type="checkbox"></label>
+          <div class="field-grid"><label class="field"><span class="field-name">本机服务地址</span><input id="voiceCloneEndpoint" type="url" maxlength="250" placeholder="http://127.0.0.1:9882"><small class="hint">GPT-SoVITS api_v2 需先在本机启动。</small></label><label class="field"><span class="field-name">回复方式</span><select id="voiceCloneMode"><option value="requested">仅明确要求语音时</option><option value="always">所有普通回复</option></select></label><label class="field"><span class="field-name">参考音频绝对路径</span><input id="voiceCloneRefAudio" type="text" maxlength="500" placeholder="D:\voices\reference.wav"><small class="hint">建议 3–10 秒清晰人声；此路径必须能被本机语音服务读取。</small></label><label class="field"><span class="field-name">参考音频逐字原文</span><textarea id="voiceCloneRefText" rows="3" maxlength="500" placeholder="请填写音频中说出的原话"></textarea></label></div>
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:18px"><button id="voiceCloneTest" type="button" style="border:1px solid var(--lime);background:transparent;color:var(--lime);padding:9px 15px">测试克隆音色</button><audio id="voiceClonePreview" controls hidden></audio><small class="hint">先保存设置再试听；不会发送 QQ 消息。</small></div>
+        </div></section>
+        <section><div class="section-head"><div><div class="tag">LIUYING RVC · SPEECH</div><h2>普通语音转流萤音色</h2><p>先由当前启用的 TTS 合成朗读，再转换成流萤音色；不影响原创歌曲设置。</p></div></div><div class="section-body">
+          <label class="switch-row"><span><strong>启用普通语音 RVC 转换</strong><small>转换机器人发出的普通朗读语音；CPU 处理会增加等待时间，失败时回退为文字。</small></span><input id="speechRvcEnabled" type="checkbox"></label>
+          <label class="field"><span class="field-name">流萤变调</span><div class="input-wrap"><input id="speechRvcPitch" type="number" min="-12" max="12" step="1"><span>半音</span></div><small class="hint">默认 0。需先配置并启用一种语音合成服务，且本机 RVC 环境可用。</small></label>
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:18px"><button id="speechRvcTest" type="button" style="border:1px solid var(--lime);background:transparent;color:var(--lime);padding:9px 15px">试听流萤普通语音</button><audio id="speechRvcPreview" controls hidden></audio><small class="hint">先保存语音服务与 RVC 设置；只试听，不发 QQ 消息。</small></div>
+        </div></section>
+        <section><div class="section-head"><div><div class="tag">SINGING</div><h2>歌曲点唱与原创唱歌</h2><p>现成歌曲由本机搜歌并转换流萤音色；原创歌曲另用 Mureka 生成。</p></div></div><div class="section-body">
+          <label class="switch-row"><span><strong>启用现成歌曲点唱</strong><small>主人和群友均可在已允许回复的群聊点歌；“唱歌 歌名”或“翻唱 歌名”会转换流萤音色，“原唱 歌名”只发原唱片段，不需要 Mureka Key。</small></span><input id="coverEnabled" type="checkbox"></label>
+          <div class="callout">先运行本机点唱依赖安装脚本。默认截取 30 秒；转换失败不会把原唱当成流萤翻唱发出。群友可发送“点歌帮助”查看说明、“歌单”查看每页 10 首已审核试听、“试听 <12位ID>”播放；发送“搜歌 歌名”查看候选，再用“翻唱 歌名 #2”等命令选择第 2 个结果。</div>
+          <label class="switch-row"><span><strong>启用原创歌曲</strong><small id="singingKeyStatus">只允许主人在私聊或群聊点歌；生成完成后发送 QQ 语音。</small></span><input id="singingEnabled" type="checkbox"></label>
           <div class="field-grid"><label class="field"><span class="field-name">Mureka 音乐 API Key</span><input id="singingApiKey" type="password" autocomplete="new-password" maxlength="512" placeholder="留空保留已保存的 Key"><small class="hint">Spark 对话 Key 和 Edge TTS 都不能代替音乐 API Key。</small></label></div>
           <label class="switch-row"><span><strong>清除音乐 API Key</strong></span><input id="singingClearApiKey" type="checkbox"></label>
-          <div class="callout">发送“/唱歌 海边的夏天”后，机器人生成一首原创歌曲并作为 QQ 语音发送。每次只生成 1 首；模型尽量做短歌，但实际时长由服务决定。页面测试也会产生一次生成费用。</div>
+          <label class="switch-row"><span><strong>原创歌声转换为流萤音色</strong><small>开启后分离人声与伴奏，转换人声再混回；首次运行需要本机安装 RVC CPU 环境。</small></span><input id="singingRvcEnabled" type="checkbox"></label>
+          <label class="field"><span class="field-name">流萤变调</span><div class="input-wrap"><input id="singingRvcPitch" type="number" min="-12" max="12" step="1"><span>半音</span></div><small class="hint">默认 0；现成歌曲翻唱与原创歌曲 RVC 转换共用此音高。</small></label>
+          <div class="callout">发送“/原创唱歌 海边的夏天”才会调用 Mureka 生成原创歌曲。每次只生成 1 首；页面测试也会产生一次生成费用。</div>
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:18px"><button id="singingTest" type="button" style="border:1px solid var(--lime);background:transparent;color:var(--lime);padding:9px 15px">生成并试听一次</button><audio id="singingPreview" controls hidden></audio></div>
         </div></section>
         <section><div class="section-head"><div><div class="tag">MESSAGE BATCH</div><h2>连续消息合并</h2><p>同一人在同一会话连续发言时，收齐后只调用一次聊天模型。</p></div></div><div class="section-body"><label class="switch-row"><span><strong>合并连续文字消息</strong><small>明确命令、引用和带图消息立即走原有流程；保存后约 5 秒生效。</small></span><input id="batchEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">最后一条消息后的等待</span><div class="input-wrap"><input id="batchIdle" type="number" min="1" max="15" step="1"><span>秒</span></div></label><label class="field"><span class="field-name">最长等待</span><div class="input-wrap"><input id="batchMax" type="number" min="5" max="30" step="1"><span>秒</span></div><small class="hint">连续发言不断时，到达上限就提交当前一批。</small></label></div></div></section>
@@ -150,7 +164,11 @@
             clearApiPassword:$('xfyunTtsClearPassword').checked, clearApiKey:$('xfyunTtsClearApiKey').checked,
             clearApiSecret:$('xfyunTtsClearApiSecret').checked },
           edgeTts: { enabled:$('edgeTtsEnabled').checked, mode:$('edgeTtsMode').value, url:$('edgeTtsUrl').value.trim(), voice:$('edgeTtsVoice').value },
-          singing: { enabled:$('singingEnabled').checked, apiKey:$('singingApiKey').value, clearApiKey:$('singingClearApiKey').checked },
+          voiceClone: { enabled:$('voiceCloneEnabled').checked, mode:$('voiceCloneMode').value,
+            endpoint:$('voiceCloneEndpoint').value.trim(), refAudio:$('voiceCloneRefAudio').value.trim(), refText:$('voiceCloneRefText').value.trim() },
+          speechRvc: { enabled:$('speechRvcEnabled').checked, pitch:number('speechRvcPitch') },
+          singing: { enabled:$('singingEnabled').checked, coverEnabled:$('coverEnabled').checked, apiKey:$('singingApiKey').value, clearApiKey:$('singingClearApiKey').checked,
+            rvcEnabled:$('singingRvcEnabled').checked, rvcPitch:number('singingRvcPitch') },
           groupReplyCooldownMs: number('groupCooldown') * 1000,
           messageBatch: { enabled:$('batchEnabled').checked, idleMs:number('batchIdle') * 1000, maxMs:number('batchMax') * 1000 },
           groupAffinity: { enabled:$('groupAffinityEnabled').checked, previewOnly:$('groupAffinityPreview').checked, warnAt:number('groupAffinityWarn'), leaveAt:number('groupAffinityLeave'), dropAfterWarning:number('groupAffinityDrop'), protectedGroups:$('groupAffinityProtected').value.split(/\r?\n/).map((id) => id.trim()).filter(Boolean) },
@@ -198,7 +216,7 @@
         }
       }
       function draw(data) {
-        const required = ['replyControl', 'dailyQzone', 'qzoneLikeReply', 'ownerCardLike', 'qzoneSocial', 'ownerProactive', 'pokeInteraction', 'stickerCooldown', 'messageBatch', 'groupAffinity', 'azureTts', 'xfyunTts', 'edgeTts', 'singing'];
+        const required = ['replyControl', 'dailyQzone', 'qzoneLikeReply', 'ownerCardLike', 'qzoneSocial', 'ownerProactive', 'pokeInteraction', 'stickerCooldown', 'messageBatch', 'groupAffinity', 'azureTts', 'xfyunTts', 'edgeTts', 'voiceClone', 'speechRvc', 'singing'];
         if (!data?.settings || required.some((key) => !data.settings[key])) {
           throw new Error('设置页面与管理服务版本不一致，请重启本机设置服务后重新读取。');
         }
@@ -219,8 +237,13 @@
         $('xfyunKeyStatus').textContent = `APIPassword ${s.xfyunTts.hasApiPassword ? '已保存' : '未填写'}；APIKey / APISecret ${s.xfyunTts.hasApiKey && s.xfyunTts.hasApiSecret ? '已保存' : '未填齐'}。`;
         $('edgeTtsEnabled').checked = s.edgeTts.enabled; $('edgeTtsUrl').value = s.edgeTts.url;
         $('edgeTtsVoice').value = s.edgeTts.voice; $('edgeTtsMode').value = s.edgeTts.mode;
-        $('singingEnabled').checked = s.singing.enabled; $('singingApiKey').value = ''; $('singingClearApiKey').checked = false;
-        $('singingKeyStatus').textContent = s.singing.hasApiKey ? '音乐 Key 已保存；只有主人可以点歌。' : '音乐 Key 尚未填写；功能默认关闭。';
+        $('voiceCloneEnabled').checked = s.voiceClone.enabled; $('voiceCloneMode').value = s.voiceClone.mode;
+        $('voiceCloneEndpoint').value = s.voiceClone.endpoint; $('voiceCloneRefAudio').value = s.voiceClone.refAudio;
+        $('voiceCloneRefText').value = s.voiceClone.refText;
+        $('speechRvcEnabled').checked = s.speechRvc.enabled; $('speechRvcPitch').value = s.speechRvc.pitch;
+        $('singingEnabled').checked = s.singing.enabled; $('coverEnabled').checked = s.singing.coverEnabled; $('singingApiKey').value = ''; $('singingClearApiKey').checked = false;
+        $('singingRvcEnabled').checked = s.singing.rvcEnabled; $('singingRvcPitch').value = s.singing.rvcPitch;
+        $('singingKeyStatus').textContent = s.singing.hasApiKey ? '音乐 Key 已保存；只有主人可以请求原创歌。' : '音乐 Key 尚未填写；原创歌需填写后开启，现成歌曲点唱不受影响。';
         otherDisabled = s.groupInterjectionDisabled.filter((id) => !groups.includes(id));
         $('groupCooldown').value = s.groupReplyCooldownMs / 1000;
         $('batchEnabled').checked = s.messageBatch.enabled;
@@ -289,7 +312,11 @@
       $('reload').addEventListener('click', load); $('save').addEventListener('click', save);
       $('xfyunTtsTest').addEventListener('click', testXfyunTts);
       $('edgeTtsTest').addEventListener('click', () => testAudio('edgeTtsTest', '/api/settings/edge-tts-test', 'edgeTtsPreview', '正在合成朗读语音…', 45000));
-      $('singingTest').addEventListener('click', () => testAudio('singingTest', '/api/settings/singing-test', 'singingPreview', '正在生成原创歌曲，可能需要几分钟…', 300000));
+      $('voiceCloneTest').addEventListener('click', () => testAudio('voiceCloneTest', '/api/settings/voice-clone-test', 'voiceClonePreview', '正在合成克隆音色…', 130000));
+      $('speechRvcTest').addEventListener('click', () => testAudio('speechRvcTest', '/api/settings/speech-rvc-test', 'speechRvcPreview', '正在合成并转换普通语音；CPU 处理可能需要几分钟…', 900000));
+      $('singingTest').addEventListener('click', () => testAudio('singingTest', '/api/settings/singing-test', 'singingPreview',
+        $('singingRvcEnabled').checked ? '正在生成原创歌曲并转换流萤音色；CPU 处理可能需要十几分钟…' : '正在生成原创歌曲，可能需要几分钟…',
+        $('singingRvcEnabled').checked ? 1800000 : 300000));
       setInterval(() => { if (!busy && version && JSON.stringify(values()) === original) load(); }, 30_000);
       load();
     })();

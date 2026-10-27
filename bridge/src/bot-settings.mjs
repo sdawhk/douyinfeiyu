@@ -28,6 +28,8 @@ export function publicSettings(config) {
   const azureTts = config.azureTts || {};
   const xfyunTts = config.xfyunTts || {};
   const edgeTts = config.edgeTts || {};
+  const voiceClone = config.voiceClone || {};
+  const speechRvc = config.speechRvc || {};
   const singing = config.singing || {};
   const replyControl = config.replyControl || {};
   return {
@@ -56,9 +58,13 @@ export function publicSettings(config) {
       hasApiKey: Boolean(xfyunTts.apiKey),
       hasApiSecret: Boolean(xfyunTts.apiSecret)
     },
-    singing: { enabled: singing.enabled === true, hasApiKey: Boolean(singing.apiKey) },
+    singing: { enabled: singing.enabled === true, coverEnabled: singing.coverEnabled !== false, hasApiKey: Boolean(singing.apiKey),
+      rvcEnabled: singing.rvcEnabled === true, rvcPitch: Number.isInteger(singing.rvcPitch) ? singing.rvcPitch : 0 },
     edgeTts: { enabled: edgeTts.enabled === true, mode: edgeTts.mode === 'always' ? 'always' : 'requested',
       url: edgeTts.workerUrl || edgeTts.url || 'https://tts.wangwangit.com', voice: edgeTts.voice || 'zh-CN-XiaoxiaoNeural' },
+    voiceClone: { enabled: voiceClone.enabled === true, mode: voiceClone.mode === 'always' ? 'always' : 'requested',
+      endpoint: voiceClone.endpoint || 'http://127.0.0.1:9882', refAudio: voiceClone.refAudio || '', refText: voiceClone.refText || '' },
+    speechRvc: { enabled: speechRvc.enabled === true, pitch: Number.isInteger(speechRvc.pitch) ? speechRvc.pitch : 0 },
     autoSticker: config.autoSticker !== false,
     groupMuteEnabled: config.groupMuteEnabled === true,
     groupReplyCooldownMs: config.groupReplyCooldownMs ?? 20_000,
@@ -156,6 +162,8 @@ export function validateSettings(value) {
   const xfyunTts = value.xfyunTts || {};
   const singing = value.singing || {};
   const edgeTts = value.edgeTts || {};
+  const voiceClone = value.voiceClone || {};
+  const speechRvc = value.speechRvc || {};
   const replyControl = value.replyControl;
   if (!replyControl || typeof replyControl !== 'object') throw Object.assign(new Error('聊天回复开关缺失'), { status: 400 });
   const replyIds = (ids, name) => {
@@ -187,11 +195,26 @@ export function validateSettings(value) {
   }
   const singingKey = typeof singing.apiKey === 'string' ? singing.apiKey.trim() : '';
   if (singingKey.length > 512 || (singing.clearApiKey === true && singingKey)) throw Object.assign(new Error('音乐 API Key 格式无效'), { status: 400 });
+  const singingPitch = integer(singing.rvcPitch ?? 0, -12, 12, '流萤变调');
   if (!['requested', 'always'].includes(edgeTts.mode)) throw Object.assign(new Error('Edge TTS 触发方式无效'), { status: 400 });
   if (typeof edgeTts.voice !== 'string' || !/^zh-CN-[A-Za-z]+Neural$/.test(edgeTts.voice)) throw Object.assign(new Error('Edge TTS 中文音色无效'), { status: 400 });
   if (typeof edgeTts.url !== 'string' || edgeTts.url.length > 250) throw Object.assign(new Error('Edge TTS 地址无效'), { status: 400 });
   try { const url = new URL(edgeTts.url); if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(url.hostname))) throw new Error(); }
   catch { throw Object.assign(new Error('Edge TTS 地址须为 HTTPS 或本机 HTTP'), { status: 400 }); }
+  if (!['requested', 'always'].includes(voiceClone.mode)) throw Object.assign(new Error('克隆音色回复方式无效'), { status: 400 });
+  if (typeof voiceClone.endpoint !== 'string' || voiceClone.endpoint.length > 250) throw Object.assign(new Error('克隆音色服务地址无效'), { status: 400 });
+  try {
+    const url = new URL(voiceClone.endpoint);
+    if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+      || url.username || url.password || url.search || url.hash || !['', '/', '/tts'].includes(url.pathname)) throw new Error();
+  } catch { throw Object.assign(new Error('克隆音色服务只接受本机 HTTP 地址'), { status: 400 }); }
+  if (typeof voiceClone.refAudio !== 'string' || voiceClone.refAudio.length > 500
+    || (voiceClone.refAudio && !/^(?:[a-z]:\\|\\\\)/i.test(voiceClone.refAudio))) throw Object.assign(new Error('参考音频须填写 Windows 绝对路径'), { status: 400 });
+  if (typeof voiceClone.refText !== 'string' || voiceClone.refText.length > 500) throw Object.assign(new Error('参考音频原文过长'), { status: 400 });
+  if (voiceClone.enabled && (!voiceClone.refAudio.trim() || !voiceClone.refText.trim())) {
+    throw Object.assign(new Error('启用克隆音色前，请填写参考音频路径和逐字原文'), { status: 400 });
+  }
+  const speechRvcPitch = integer(speechRvc.pitch ?? 0, -12, 12, '普通语音流萤变调');
   const disabled = [...new Set(value.groupInterjectionDisabled.map(String))];
   if (disabled.length > 100 || disabled.some((id) => !/^\d{5,20}$/.test(id))) {
     throw Object.assign(new Error('群号列表无效'), { status: 400 });
@@ -241,8 +264,12 @@ export function validateSettings(value) {
       clearApiKey: xfyunTts.clearApiKey === true,
       clearApiSecret: xfyunTts.clearApiSecret === true
     },
-    singing: { enabled: boolean(singing.enabled ?? false, '唱歌功能'), ...(singingKey ? { apiKey: singingKey } : {}), clearApiKey: singing.clearApiKey === true },
+    singing: { enabled: boolean(singing.enabled ?? false, '原创唱歌功能'), coverEnabled: boolean(singing.coverEnabled ?? true, '现成歌曲点唱'), rvcEnabled: boolean(singing.rvcEnabled ?? false, '流萤音色转换'), rvcPitch: singingPitch,
+      ...(singingKey ? { apiKey: singingKey } : {}), clearApiKey: singing.clearApiKey === true },
     edgeTts: { enabled: boolean(edgeTts.enabled ?? false, 'Edge TTS'), mode: edgeTts.mode, url: edgeTts.url.trim(), voice: edgeTts.voice },
+    voiceClone: { enabled: boolean(voiceClone.enabled ?? false, '克隆音色'), mode: voiceClone.mode,
+      endpoint: voiceClone.endpoint.trim(), refAudio: voiceClone.refAudio.trim(), refText: voiceClone.refText.trim() },
+    speechRvc: { enabled: boolean(speechRvc.enabled ?? false, '普通语音流萤转换'), pitch: speechRvcPitch },
     autoSticker: value.autoSticker === undefined ? undefined : boolean(value.autoSticker, '自动收录表情'),
     groupMuteEnabled: value.groupMuteEnabled === undefined ? false : boolean(value.groupMuteEnabled, '群友闭嘴开关'),
     groupReplyCooldownMs: integer(value.groupReplyCooldownMs, 0, 300_000, '群聊冷却时间'),
@@ -356,6 +383,8 @@ export function saveSettingsDocument(expectedVersion, value, configPath = CONFIG
   if (config.singing.enabled && !config.singing.apiKey) throw Object.assign(new Error('启用唱歌前，请填写 Mureka 音乐 API Key'), { status: 400 });
   config.edgeTts = { ...config.edgeTts, ...settings.edgeTts,
     workerUrl: settings.edgeTts.url, url: 'http://127.0.0.1:18902' };
+  config.voiceClone = { ...config.voiceClone, ...settings.voiceClone };
+  config.speechRvc = { ...config.speechRvc, ...settings.speechRvc };
   if (settings.autoSticker !== undefined) config.autoSticker = settings.autoSticker;
   config.replyControl = settings.replyControl;
   config.groupMuteEnabled = settings.groupMuteEnabled;

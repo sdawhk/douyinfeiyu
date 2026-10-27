@@ -17,7 +17,7 @@ export async function synthesizeAzureSpeech(text, config, fetchImpl = fetch) {
     headers: {
       'Ocp-Apim-Subscription-Key': key,
       'Content-Type': 'application/ssml+xml',
-      'X-Microsoft-OutputFormat': 'raw-24khz-16bit-mono-truesilk',
+      'X-Microsoft-OutputFormat': config?.outputFormat || 'raw-24khz-16bit-mono-truesilk',
       'User-Agent': 'qq-bridge'
     },
     body: azureSpeechSsml(text, config),
@@ -30,5 +30,5 @@ export async function synthesizeAzureSpeech(text, config, fetchImpl = fetch) {
 }
 
 export function wantsVoiceReply(input, mode = 'requested') {
-  return mode === 'always' || /(?:语音说|用语音|(?:给我)?发(?:个|句|条|段)?语音|说出来|语音回复|语音回答)/i.test(String(input ?? ''));
+  return mode === 'always' || /(?:用语音|语音(?:说|背|朗读|念|复述|回复|回答)|(?:给我)?(?:发|来|录)(?:个|句|条|段)?语音|(?:说|念|朗读|背诵).{0,20}(?:给我听|出来))/i.test(String(input ?? ''));
 }
