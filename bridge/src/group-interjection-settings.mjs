@@ -60,6 +60,20 @@ export function isGroupInterjectionEnabled(groupId) {
   return load().groups[id] === true;
 }
 
+export function groupInterjectionSettingsSnapshot() {
+  return { ...load().groups };
+}
+
+export function setGroupInterjectionSettings(groupIds, disabledGroupIds) {
+  const current = load();
+  const disabled = new Set(disabledGroupIds.map(String));
+  for (const groupId of groupIds) {
+    const id = String(groupId);
+    if (/^\d{5,20}$/.test(id)) current.groups[id] = !disabled.has(id);
+  }
+  save();
+}
+
 export function setGroupInterjectionEnabled(groupId, enabled) {
   const id = String(groupId);
   if (!/^\d{5,20}$/.test(id) || typeof enabled !== 'boolean') throw new Error('invalid group interjection setting');

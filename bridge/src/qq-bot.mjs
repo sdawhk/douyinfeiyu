@@ -2214,8 +2214,7 @@ function shouldReplyInGroup(ev, text, groupId, messageReferences = {}) {
   });
   if (directed !== null) return directed;
 
-  if (settingsDocument.settings.groupInterjectionDisabled.includes(String(groupId))
-      || !isGroupInterjectionEnabled(groupId)) return false;
+  if (!isGroupInterjectionEnabled(groupId)) return false;
 
   // 其他情况：同一群冷却时间（默认 20 秒），避免连续刷
   const cooldown = settingsDocument.settings.groupReplyCooldownMs;

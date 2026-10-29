@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readSettingsDocument, saveSettingsDocument } from './bot-settings.mjs';
+import { groupInterjectionSettingsSnapshot, setGroupInterjectionSettings } from './group-interjection-settings.mjs';
 import { synthesizeAzureSpeech } from './azure-tts.mjs';
 import { synthesizeXfyunSpeech } from './xfyun-tts.mjs';
 import { synthesizeEdgeSpeech } from './edge-tts.mjs';
@@ -195,6 +196,13 @@ function knownGroups(configured, disabled) {
   return [...ids].sort();
 }
 
+function settingsWithInterjectionState(document) {
+  const state = groupInterjectionSettingsSnapshot();
+  const groups = knownGroups(document.groups, [...Object.keys(state), ...document.settings.groupInterjectionDisabled]);
+  return { ...document, groups, settings: { ...document.settings,
+    groupInterjectionDisabled: groups.filter((id) => state[id] !== true) } };
+}
+
 function settingsStatus(version, settings) {
   const heartbeat = readJsonFile(SETTINGS_HEARTBEAT);
   const qzone = readJsonFile(QZONE_STATE);
@@ -322,9 +330,9 @@ async function handle(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/settings') {
     try {
       const document = readSettingsDocument();
-      return json(res, 200, { ...document,
-        groups: knownGroups(document.groups, document.settings.groupInterjectionDisabled),
-        status: settingsStatus(document.version, document.settings) });
+      const current = settingsWithInterjectionState(document);
+      return json(res, 200, { ...current,
+        status: settingsStatus(current.version, current.settings) });
     } catch (error) { return json(res, 500, { error: error.message }); }
   }
 
@@ -415,7 +423,19 @@ async function handle(req, res) {
     try { body = await readBody(req); }
     catch (error) { return json(res, error.status || 400, { error: error.message }); }
     try {
-      return await serialMutation(() => json(res, 200, saveSettingsDocument(body.version, body.settings)));
+      return await serialMutation(() => {
+        const requestedDisabled = body.settings?.groupInterjectionDisabled ?? [];
+        if (!Array.isArray(requestedDisabled)
+            || !requestedDisabled.every((id) => /^\d{5,20}$/.test(String(id)))) {
+          throw Object.assign(new Error('群插话设置格式无效'), { status: 400 });
+        }
+        const saved = saveSettingsDocument(body.version,
+          { ...body.settings, groupInterjectionDisabled: [] });
+        const state = groupInterjectionSettingsSnapshot();
+        const groups = knownGroups(saved.groups, [...Object.keys(state), ...requestedDisabled]);
+        setGroupInterjectionSettings(groups, requestedDisabled);
+        return json(res, 200, settingsWithInterjectionState(saved));
+      });
     } catch (error) { return json(res, error.status || 500, { error: error.message || '保存设置失败' }); }
   }
 
