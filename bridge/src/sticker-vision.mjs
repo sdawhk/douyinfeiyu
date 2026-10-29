@@ -37,6 +37,52 @@ function coolUnsupportedModel(model, status) {
   } catch {}
 }
 
+function clearModelCooldown(model) {
+  modelCooldownUntil.delete(model);
+  modelCooldownReason.delete(model);
+  try {
+    const saved = JSON.parse(readFileSync(UNSUPPORTED_CACHE, 'utf8'));
+    if (!Object.hasOwn(saved, model)) return;
+    delete saved[model];
+    writeFileSync(UNSUPPORTED_CACHE, JSON.stringify(saved), 'utf8');
+  } catch {}
+}
+
+async function responseData(response) {
+  if (typeof response.text === 'function') {
+    const raw = await response.text();
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+  try { return await response.json(); } catch { return null; }
+}
+
+function failureDetail(data) {
+  const error = data?.error && typeof data.error === 'object' ? data.error : data;
+  if (!error || typeof error !== 'object') return '';
+  const fields = [error.code, error.type, error.param, error.message]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => value.replace(/data:image\/[a-z0-9.+-]+;base64,[^\s"']+/gi, '[image-data]')
+      .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, 160));
+  return [...new Set(fields)].join(' ').slice(0, 220);
+}
+
+function noteHttpFailure(model, status, data) {
+  const detail = failureDetail(data);
+  const unsupported = status === 404
+    || ([400, 422].includes(status) && /(?:model|route).*(?:not found|unsupported|invalid)|(?:unsupported|not supported).*(?:model|vision|image)|vision.*not supported/i.test(detail));
+  const reason = `HTTP ${status}${detail ? ` ${detail}` : ''}`;
+  if (unsupported) {
+    coolUnsupportedModel(model, status);
+  } else {
+    const duration = status === 429 ? 2 * 60_000
+      : status >= 500 ? 60_000
+        : status >= 400 ? 30_000 : 60_000;
+    modelCooldownUntil.set(model, Date.now() + duration);
+    modelCooldownReason.set(model, `${reason}; cooling down`);
+  }
+  return `${model}: ${reason}`;
+}
+
 const PROMPT = '分析这张图片，用于本地图片库分类和检索。判断它是不是聊天表情包或梗图；区分真实拍摄照片和插画、表情、截图、文档、二维码等非照片。'
   + '按图片库的复用价值判断：有清晰表情/动作/梗、可再次用于聊天，或包含值得留存的明确内容时 valuable=true；普通随手拍、模糊无内容或重复信息时 valuable=false。不要按人物外貌、身份、隐私或个人偏好评判价值。'
   + '检查是否有性暗示/擦边内容（挑逗姿势、性化文字或明显以性刺激为目的的画面），以及令人强烈不适的真实恶心/血腥画面（呕吐物、粪便、体液、腐烂、蛆虫、严重伤口或露骨伤害）；还有仇恨歧视、羞辱骚扰、隐私泄露或明显恶意内容。普通成人话题、医学科普、普通食物、轻微玩笑和非写实卡通不要误判。前两类分别标 sexual_suggestive=true、gross_or_graphic=true；任何不适宜持久保存的内容都标 appropriate=false。无法确定时 confidence 应低于 0.75，两个类别标记为 false。'
@@ -48,7 +94,7 @@ const PROMPT = '分析这张图片，用于本地图片库分类和检索。判�
 
 export async function inspectStickerImage(b64, mime, options = {}) {
   const baseUrl = String(options.baseUrl || 'http://127.0.0.1:18901/v1').replace(/\/+$/, '');
-  const models = options.models || DEFAULT_MODELS;
+  const models = Array.isArray(options.models) && options.models.length ? options.models : DEFAULT_MODELS;
   const fetcher = options.fetcher || fetch;
   let lastFailure = 'no vision model configured';
 
@@ -70,16 +116,9 @@ export async function inspectStickerImage(b64, mime, options = {}) {
         }),
         signal: AbortSignal.timeout(50_000)
       });
-      const data = await response.json();
+      const data = await responseData(response);
       if (!response.ok) {
-        lastFailure = `${model}: HTTP ${response.status}`;
-        if ([400, 404, 422, 429, 500, 502, 503, 504].includes(response.status) || model.includes(':free')) {
-          if ([400, 404, 422].includes(response.status)) coolUnsupportedModel(model, response.status);
-          else {
-            modelCooldownUntil.set(model, Date.now() + (model.includes(':free') ? 10 : 3) * 60_000);
-            modelCooldownReason.set(model, `HTTP ${response.status}; cooling down`);
-          }
-        }
+        lastFailure = noteHttpFailure(model, response.status, data);
         continue;
       }
       // The local pool can silently switch to text-only free models. Their
@@ -91,6 +130,7 @@ export async function inspectStickerImage(b64, mime, options = {}) {
         modelCooldownReason.set(model, `served by non-vision model ${servedBy}; cooling down`);
         continue;
       }
+      clearModelCooldown(model);
       const content = data.choices?.[0]?.message?.content;
       const answer = typeof content === 'string' ? content
         : Array.isArray(content) ? content.map((part) => part.text || '').join('') : '';
@@ -98,6 +138,8 @@ export async function inspectStickerImage(b64, mime, options = {}) {
       const result = json ? JSON.parse(json) : null;
       if (typeof result?.sticker !== 'boolean' || typeof result?.caption !== 'string') {
         lastFailure = `${model}: invalid vision response`;
+        modelCooldownUntil.set(model, Date.now() + 30_000);
+        modelCooldownReason.set(model, 'invalid vision response; cooling down');
         continue;
       }
       const confidence = Math.max(0, Math.min(1, Number(result.confidence) || 0));
@@ -138,7 +180,7 @@ const DUPLICATE_PROMPT = '比较当前图片和候选图片。只有它们是同
 export async function compareImageDuplicates(b64, mime, candidates, options = {}) {
   if (!Array.isArray(candidates) || !candidates.length) return null;
   const baseUrl = String(options.baseUrl || 'http://127.0.0.1:18901/v1').replace(/\/+$/, '');
-  const models = options.models || DEFAULT_MODELS;
+  const models = Array.isArray(options.models) && options.models.length ? options.models : DEFAULT_MODELS;
   const fetcher = options.fetcher || fetch;
   const compared = candidates.slice(0, 3).filter((item) => item?.b64 && item?.mime && item?.ref);
   if (!compared.length) return null;
@@ -159,19 +201,14 @@ export async function compareImageDuplicates(b64, mime, candidates, options = {}
         body: JSON.stringify({ model, max_tokens: 160, stream: false, messages: [{ role: 'user', content }] }),
         signal: AbortSignal.timeout(45_000)
       });
-      const data = await response.json();
+      const data = await responseData(response);
       if (!response.ok) {
-        if ([400, 404, 422, 429, 500, 502, 503, 504].includes(response.status) || model.includes(':free')) {
-          if ([400, 404, 422].includes(response.status)) coolUnsupportedModel(model, response.status);
-          else {
-            modelCooldownUntil.set(model, Date.now() + (model.includes(':free') ? 10 : 3) * 60_000);
-            modelCooldownReason.set(model, `HTTP ${response.status}; cooling down`);
-          }
-        }
+        noteHttpFailure(model, response.status, data);
         continue;
       }
       const servedBy = String(data.model || model);
       if (!models.includes(servedBy) && servedBy !== 'nemotron-3.5-super-vl-free') continue;
+      clearModelCooldown(model);
       const answer = data.choices?.[0]?.message?.content;
       const text = typeof answer === 'string' ? answer
         : Array.isArray(answer) ? answer.map((part) => part.text || '').join('') : '';

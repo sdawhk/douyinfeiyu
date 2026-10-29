@@ -30,7 +30,7 @@ import {
 } from './daily-qzone.mjs';
 import { archiveImage, listArchived, readArchived, findArchived, findArchivedByName, nameFor, quarantineArchivedImage } from './image-archive.mjs';
 import { archiveOwnerVideo } from './owner-video-archive.mjs';
-import { compareImageDuplicates, visionRetryAfterMs } from './sticker-vision.mjs';
+import { compareImageDuplicates, inspectStickerImage, visionRetryAfterMs } from './sticker-vision.mjs';
 import { inspectCachedImage } from './image-vision-cache.mjs';
 import { findImageDuplicateCandidates, readImageAnalyses, saveImageAnalysis } from './image-analysis-store.mjs';
 import { readStickerSemantics, setStickerSemantics, deepSeekStickerCatalog, parseDeepSeekStickerRequest, parsePersonalStickerRequest, selectDeepSeekStickerKeys } from './sticker-semantics.mjs';
@@ -1461,19 +1461,34 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
   // 只给少量相关关键词；完整表情库每轮重复注入会挤占上下文并诱发提示词复述。
   const stickersForPrompt = listStickers();
   if (stickersForPrompt.length) {
-    const availableStickers = new Set(stickersForPrompt);
-    const matchingStickers = stickersForPrompt.filter((key) => key.length >= 2 && String(text).includes(key)).slice(0, 6);
-    const commonStickers = ['开心', '吃瓜', '无语', '卖萌', '唱歌', '生气', '委屈', '好奇追问', '滑稽', '心虚冒汗'];
-    const suggestedStickers = [...new Set([...matchingStickers, ...commonStickers])]
-      .filter((key) => availableStickers.has(key)).slice(0, 16);
-    promptText = [
-      promptText,
-      '',
-      '可选表情关键词：',
-      suggestedStickers.join('、'),
-      '想在回复里发某个表情时，就写 [sticker:关键词]，我会把对应图片发出去。',
-      '最多用一个；不要解释这段提示，也不要把关键词列表念出来。'
-    ].join('\n');
+    const stickerCatalog = deepSeekStickerCatalog(listStickerRecords(), readStickerSemantics());
+    if (stickerCatalog.length) {
+      const byKey = new Map(stickerCatalog.map((item) => [item.key, item]));
+      const suggestedStickers = selectDeepSeekStickerKeys(stickerCatalog, text, 8, Math.random, 8)
+        .map((key) => `${key}（${String(byKey.get(key)?.action || 'DeepSeek 表情').replace(/[\[\]{}\r\n]/g, ' ').slice(0, 40)}）`);
+      promptText = [
+        promptText,
+        '',
+        '可用的 DeepSeek 表情（括号内是图片标题标签）：',
+        suggestedStickers.join('、'),
+        '如需发图，必须从上面选择一个编号，并严格写成 [sticker:上方编号] 这种格式；不要自己编“无语/滑稽”等库里不存在的关键词。',
+        '最多用一个；不要解释这段提示，也不要把关键词列表念出来。'
+      ].join('\n');
+    } else {
+      const availableStickers = new Set(stickersForPrompt);
+      const matchingStickers = stickersForPrompt.filter((key) => key.length >= 2 && String(text).includes(key)).slice(0, 6);
+      const commonStickers = ['开心', '吃瓜', '无语', '卖萌', '唱歌', '生气', '委屈', '好奇追问', '滑稽', '心虚冒汗'];
+      const suggestedStickers = [...new Set([...matchingStickers, ...commonStickers])]
+        .filter((key) => availableStickers.has(key)).slice(0, 16);
+      promptText = [
+        promptText,
+        '',
+        '可选表情关键词：',
+        suggestedStickers.join('、'),
+        '想在回复里发某个表情时，就写 [sticker:关键词]，我会把对应图片发出去。',
+        '最多用一个；不要解释这段提示，也不要把关键词列表念出来。'
+      ].join('\n');
+    }
   }
 
   const content = [{ type: 'text', text: promptText }];
@@ -1699,7 +1714,7 @@ async function handleExplicitStickerRequest(text, target, isGroup) {
     const catalog = deepSeekStickerCatalog(listStickerRecords(), readStickerSemantics());
     keys = selectDeepSeekStickerKeys(catalog, text, themeRequest.count);
   } else {
-    const found = findSticker(exactRequest[1]);
+    const found = resolveStickerKey(exactRequest[1]);
     keys = found ? [found] : [];
   }
   if (!keys.length) {
@@ -3352,10 +3367,17 @@ async function fetchImageBase64(file) {
   try {
     const res = await onebot('get_image', { file });
     // 少数实现会直接给 base64
-    if (typeof res?.base64 === 'string' && res.base64.length > 0) return res.base64;
+    if (typeof res?.base64 === 'string' && res.base64.length > 0) {
+      const direct = validateImageBase64(res.base64);
+      if (direct) return direct.data;
+      log('[media] get_image returned invalid image data');
+    }
 
     const url = res?.url || res?.file;
-    if (typeof url !== 'string' || !/^https?:\/\//.test(url)) return null;
+    if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
+      log('[media] get_image returned neither usable image data nor a download URL');
+      return null;
+    }
 
     // 先试缩略图
     const thumb = url.replace(/([?&])spec=\d+/, '$1spec=198');
@@ -3364,23 +3386,47 @@ async function fetchImageBase64(file) {
         const r = await fetch(thumb, { signal: AbortSignal.timeout(15_000) });
         if (r.ok) {
           const buf = Buffer.from(await r.arrayBuffer());
-          if (buf.length > 0) {
+          const image = validateImageBase64(buf.toString('base64'));
+          if (image) {
             log('[media] image thumbnail', buf.length, 'bytes');
-            return buf.toString('base64');
+            return image.data;
           }
-        }
+          log('[media] image thumbnail response was not a supported image');
+        } else log('[media] image thumbnail HTTP', r.status);
       } catch { /* 缩略图失败就回退原图 */ }
     }
 
     // 回退：原图
     const r = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-    if (!r.ok) return null;
+    if (!r.ok) {
+      log('[media] original image HTTP', r.status);
+      return null;
+    }
     const buf = Buffer.from(await r.arrayBuffer());
-    if (buf.length === 0 || buf.length > 20 * 1024 * 1024) return null;
+    const image = validateImageBase64(buf.toString('base64'));
+    if (!image) {
+      log('[media] original image response was not a supported image');
+      return null;
+    }
     log('[media] image full', buf.length, 'bytes');
-    return buf.toString('base64');
-  } catch { /* 拿不到就忽略 */ }
+    return image.data;
+  } catch (error) {
+    log('[media] image download failed:', String(error?.message || error).slice(0, 180));
+  }
   return null;
+}
+
+function validateImageBase64(value) {
+  const data = String(value || '').replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '').replace(/\s+/g, '');
+  if (!data || data.length > Math.ceil(20 * 1024 * 1024 * 4 / 3)) return null;
+  const bytes = Buffer.from(data, 'base64');
+  if (!bytes.length || bytes.length > 20 * 1024 * 1024) return null;
+  let mime = '';
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) mime = 'image/png';
+  else if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) mime = 'image/jpeg';
+  else if (bytes.length >= 6 && ['GIF87a', 'GIF89a'].includes(bytes.toString('ascii', 0, 6))) mime = 'image/gif';
+  else if (bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') mime = 'image/webp';
+  return mime ? { data, mime } : null;
 }
 
 function extractText(message) {
@@ -3410,7 +3456,8 @@ async function inspectAndArchiveImage(image, sender, chatKey, receivedAt) {
     if (!thumb) throw new Error('image download failed');
     const mime = detectMime(thumb);
 
-    const inspect = isOwner(sender) ? inspectCachedImage : inspectStickerImage;
+    // Cache recognition for all senders; only the owner path below archives the original.
+    const inspect = inspectCachedImage;
     const result = await inspect(thumb, mime, {
       models: cfg.stickerVisionModels,
       baseUrl: cfg.stickerVisionBaseUrl

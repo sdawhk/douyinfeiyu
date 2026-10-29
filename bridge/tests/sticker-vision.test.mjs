@@ -51,3 +51,21 @@ test('a failing visual route cools down instead of being called for every image'
   assert.ok(visionRetryAfterMs(options.models) > 0);
   assert.equal(visionRetryAfterMs(['vision-available-test']), 0);
 });
+
+test('request-specific HTTP 400 falls through without disabling the vision model for an hour', async () => {
+  let calls = 0;
+  const result = await inspectStickerImage('abc', 'image/png', {
+    models: ['vision-bad-image-test', 'vision-fallback-test'], baseUrl: 'http://localhost:1/v1',
+    fetcher: async () => {
+      calls++;
+      if (calls === 1) return { ok: false, status: 400,
+        json: async () => ({ error: { code: 'invalid_image', message: 'image payload is invalid' } }) };
+      return { ok: true, json: async () => ({ model: 'vision-fallback-test', choices: [{ message: { content:
+        JSON.stringify({ sticker: false, caption: '一张风景照片', confidence: 0.9 }) } }] }) };
+    }
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.caption, '一张风景照片');
+  assert.ok(visionRetryAfterMs(['vision-bad-image-test']) > 0);
+  assert.ok(visionRetryAfterMs(['vision-bad-image-test']) < 60 * 60_000);
+});
