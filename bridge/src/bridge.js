@@ -776,6 +776,12 @@ async function main() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   acquireLock();
   loadState();
+  try {
+    const owners = (Array.isArray(cfg.ownerQQs) && cfg.ownerQQs.length ? cfg.ownerQQs : [cfg.ownerQQ])
+      .filter(Boolean).map(String).filter((id) => id !== String(cfg.selfQQ ?? ''));
+    const migrated = markFreeQuotaExemptSenders(owners);
+    if (migrated) log(`[song-library] excluded ${migrated} historic owner preview(s) from free quota`);
+  } catch (error) { log('[song-library] owner quota migration failed:', error?.message ?? error); }
 
   // OneBot 后端（SnowLuma/NapCat 等）常把图片托管在自己的内网 HTTP 服务上，
   // 默认 SSRF 防护会把这些私网 URL 全部拦掉，导致 AI 永远读不到图。
