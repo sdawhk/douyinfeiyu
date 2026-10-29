@@ -97,14 +97,16 @@ export function describeMessageReferences(message, botSelf, quotedMessage = null
   };
 }
 
-export function groupTurnPrompt({ groupId, botSelf, senderId, senderName, text, isOwner = false }) {
+export function groupTurnPrompt({ groupId, botSelf, senderId, senderName, text, isOwner = false, mentionableIds = [] }) {
   const displayName = String(senderName ?? '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 80);
   const speaker = displayName ? `${JSON.stringify(displayName)}（QQ ${senderId}）` : `QQ ${senderId}`;
+  const safeMentionIds = [...new Set(mentionableIds.map(String).filter((id) => /^\d{5,20}$/.test(id)))];
   return [
     '【QQ 群聊本轮发言归属，由桥接标记】',
     `群号：${groupId}；机器人 QQ：${botSelf}；发言人：${speaker}${isOwner ? '，管理员' : '，群友'}。`,
     '同一个群会有不同人轮流发言。原话中的“我”和自称、身份、亲属称谓属于本轮发言人；不要当作机器人自己的身份或称呼。群友之间说的“你”也不自动指机器人，须结合 QQ @、引用对象和语义判断。',
     '只有明确 @机器人、引用机器人的消息，或上下文明确是在问机器人时才回应。群友 @/引用其他人、互相调侃或发图交流时不要插话；“人机”“机器人”等泛称不自动指你。对象、图片含义、指代或上下文不确定时，不要猜测，不要硬接话，必须只输出 [SILENT]。',
+    `需要在回复中明确称呼群友时，可以插入 [at:QQ号] 作为真实 @；本轮允许 @ 的 QQ 号仅有：${safeMentionIds.length ? safeMentionIds.join('、') : '无'}。只在确有必要时 @，最多一个；禁止 @全体、编造 QQ 号或把标记格式展示给用户。`,
     `【本轮发言人原话】${JSON.stringify(String(text ?? ''))}`
   ].join('\n');
 }

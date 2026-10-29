@@ -667,6 +667,27 @@ async function sendText(target, text, isGroup) {
   }
 }
 
+async function sendReplyText(target, text, isGroup, allowedMentionIds = []) {
+  const safeIds = new Set(allowedMentionIds.map(String).filter((id) => /^\d{5,20}$/.test(id)));
+  const segments = [];
+  const source = String(text);
+  const pattern = /\[at:([^\]]+)\]/gi;
+  let cursor = 0;
+  for (const match of source.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) segments.push({ type: 'text', data: { text: source.slice(cursor, index) } });
+    const id = String(match[1]).trim();
+    if (isGroup && safeIds.has(id)) segments.push({ type: 'at', data: { qq: id } });
+    cursor = index + match[0].length;
+  }
+  if (!segments.length) {
+    await sendText(target, source.replace(pattern, ''), isGroup);
+    return;
+  }
+  if (cursor < source.length) segments.push({ type: 'text', data: { text: source.slice(cursor) } });
+  await sendSegments(target, segments, isGroup);
+}
+
 /**
  * 分条策略：默认【不拆】，一条消息发完。
  *
@@ -1597,7 +1618,7 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
  * 做法：先发标记前/后的文字，中间把对应表情图真的发出去。
  * 没有标记时行为与原来一致（纯文本）。
  */
-async function sendReply(target, text, isGroup, voiceRequested = false) {
+async function sendReply(target, text, isGroup, voiceRequested = false, allowedMentionIds = []) {
   const safe = sanitizeModelReply(text);
   if (safe.leaked) log('[reply] final send guard detected internal reasoning', isGroup ? 'group' : 'private', target);
   if (safe.blocked) return false;
@@ -1609,7 +1630,7 @@ async function sendReply(target, text, isGroup, voiceRequested = false) {
   const useAzure = !useClone && !useEdge && !useXfyun && settingsDocument.settings.azureTts.enabled;
   if (voiceRequested && (useClone || useEdge || useXfyun || useAzure)) {
     try {
-      const speechText = String(text).replace(/\[sticker:[^\]]*\]/g, '').trim();
+      const speechText = String(text).replace(/\[sticker:[^\]]*\]/g, '').replace(/\[at:[^\]]+\]/gi, '').trim();
       if (!speechText) throw new Error('语音文本为空');
       let file = useClone ? await synthesizeVoiceClone(speechText, runtimeVoiceClone)
         : useEdge ? await synthesizeEdgeSpeech(speechText, runtimeEdgeTts)
@@ -1634,7 +1655,7 @@ async function sendReply(target, text, isGroup, voiceRequested = false) {
   const MAX_STICKERS = 1;
   const hits = [...String(text).matchAll(re)].slice(0, MAX_STICKERS);
   if (!hits.length) {
-    await sendText(target, text, isGroup);
+    await sendReplyText(target, text, isGroup, allowedMentionIds);
     return true;
   }
 
@@ -1643,11 +1664,11 @@ async function sendReply(target, text, isGroup, voiceRequested = false) {
   for (const m of hits) {
     const before = text.slice(cursor, m.index).trim();
     if (before) {
-      await sendText(target, before, isGroup);
+      await sendReplyText(target, before, isGroup, allowedMentionIds);
       sent = true;
     }
 
-    const key = findSticker(m[1].trim());
+    const key = resolveStickerKey(m[1].trim());
     const path = key ? getStickerPath(key) : null;
     if (path) {
       const reservation = reserveStickerSend(target, isGroup);
@@ -1678,10 +1699,19 @@ async function sendReply(target, text, isGroup, voiceRequested = false) {
   // 必须清掉，否则会当成正文原样发出去，看起来像胡言乱语。
   const after = text.slice(cursor).replace(/\[sticker:[^\]]*\]/g, '').trim();
   if (after) {
-    await sendText(target, after, isGroup);
+    await sendReplyText(target, after, isGroup, allowedMentionIds);
     sent = true;
   }
   return sent;
+}
+
+function resolveStickerKey(keyword) {
+  const direct = findSticker(keyword);
+  if (direct) return direct;
+  const catalog = deepSeekStickerCatalog(listStickerRecords(), readStickerSemantics());
+  const [fallback] = selectDeepSeekStickerKeys(catalog, keyword, 1);
+  if (fallback) log('[sticker] mapped legacy keyword to DeepSeek image:', keyword, '->', fallback);
+  return fallback || null;
 }
 
 async function sendStoredSticker(target, isGroup, key) {
@@ -2336,6 +2366,8 @@ async function processMessage(ev) {
     botSelf: currentBotQQ,
     senderId: sender,
     senderName: ev.sender?.card || ev.sender?.nickname || '',
+    mentionableIds: [...new Set([sender, ...messageReferences.mentions, messageReferences.quotedUserId]
+      .filter((id) => id && String(id) !== String(currentBotQQ) && /^\d{5,20}$/.test(String(id))))],
     directed: explicitGroupReplyDecision({
       botSelf: currentBotQQ, text, references: messageReferences,
       isOwner: isOwner(sender), keywords: MUST_REPLY_WORDS
@@ -3107,7 +3139,8 @@ async function processMessage(ev) {
       const voiceMode = settingsDocument.settings.voiceClone.enabled ? runtimeVoiceClone.mode
         : settingsDocument.settings.edgeTts.enabled ? runtimeEdgeTts.mode
         : settingsDocument.settings.xfyunTts.enabled ? runtimeXfyunTts.mode : runtimeAzureTts.mode;
-      const sent = await sendReply(target, reply, isGroup, wantsVoiceReply(text, voiceMode));
+      const sent = await sendReply(target, reply, isGroup, wantsVoiceReply(text, voiceMode), groupSpeaker?.mentionableIds ?? []);
+      if (!isGroup && isOwner(sender)) rememberOwnerProfileProposal(sender, chatKey, reply, sent);
       log(sent
         ? `[turn:${traceId}] sent target=${target} chars=${reply.length}`
         : `[turn:${traceId}] skipped reason=unsafe-reply target=${target}`);
