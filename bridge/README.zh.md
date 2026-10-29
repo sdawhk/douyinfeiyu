@@ -21,8 +21,8 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 - **QQ 侧**：`@snowluma/sdk` 的 `SnowLumaWebSocketClient`（OneBot v11 WebSocket 客户端，自动重连）
 - **DSH 侧**：复用官方 `@deepseek-ai/dsh-host-apiproxy` 的 `AbstractApiClient` 与 zod schema，桥接进程实现 Node 传输层（fetch unary + WebSocket 下行事件流）
 - **agent 自主收发 QQ**：DSH 的 MCP 客户端（`~/.dsh/profiles/web/cordis.patch.yml` 配置）接入三个 MCP server：
-  - `snowluma`（桥接自带 `src/mcp-snowluma-safe.js`）：QQ 动作**安全子集**（查状态/查群/查消息/发消息，发送强制白名单；发送工具支持可选 `replyToMessageId` 引用回复）
-  - `snowluma-host`（桥接自带 `src/mcp-host-server.js`）：`snowluma_status`（默认只读探活）；`start_snowluma` / `stop_snowluma` 需显式开启 `snowluma.allowProcessControl: true` 且仅在 `closed-agent` 模式可用
+  - `snowluma`（桥接自带 `src/mcp-snowluma-safe.js`）：QQ 动作**安全子集**（查状态/查群/查消息/发消息，发送强制白名单；另有仅主人私聊可用的机器人自身昵称/签名修改工具，需提供明确授权原话）
+  - `snowluma-host`（桥接自带 `src/mcp-host-server.js`）：`snowluma_status` 仅主人私聊可用；`start_snowluma` / `stop_snowluma` 需显式开启 `snowluma.allowProcessControl: true` 且仅在 `closed-agent` 模式可用
   - `web-search-safe`（桥接自带 `src/mcp-web-search-safe.js`）：只读 `web_search` / `web_fetch`；搜索优先 Bing RSS，再试 Bing 网页与 DuckDuckGo，网页抓取带 SSRF 防护。明确询问“是什么梗”“梗的出处”等会先联网检索再回答。
 - **会话模型**：每个 QQ 会话（私聊/群）对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`
 - **性格定制**：QQ 会话默认使用 `qq-chat` agent preset（`~/.dsh/.agent-presets/qq-chat/agent.cordis.yml`），`reserved2` 使用 `qq-chat-v2`（`~/.dsh/.agent-presets/qq-chat-v2/agent.cordis.yml`）；人格与默认 DSH 一致（coding agent），仅附加 QQ 场景规则；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
@@ -78,6 +78,8 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `consoleToken` | 控制台访问令牌；留空时启动自动生成并保存到 `state/console-token` |
 | `speechRecognition.modelDir` | 本地 SenseVoice 模型目录，默认 `D:/deepseek/state/voice-asr` |
 
+机器人启动后会读取 OneBot 好友列表，将所有 QQ 好友合并进 `allow.private`；成为新好友时立即同步，另每 5 分钟刷新一次。原有手动白名单会保留，`deny.private` 仍优先拦截。
+
 首次启用 QQ 语音识别时运行 `node --use-env-proxy scripts/install-local-stt.mjs`，下载并校验约 240 MB 的离线模型。机器人通过 OneBot 获取 WAV，在本机识别语音后按文字消息处理；识别失败会写入桥接日志。模型文件保存在运行目录，不入库。
 
 ### 固定音色克隆
@@ -86,17 +88,17 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 
 ### 原创歌曲与流萤 RVC
 
-现成歌曲点唱只允许主人使用：“唱歌 歌名”或“翻唱 歌名”会搜索歌曲、默认从约 30 秒处截取 30 秒、转换成流萤音色并发送 QQ 语音；“唱一首雨夜 DJ 版的歌”等自然说法也会进入这条链路，指定“唱10秒钟雨夜”则截取 10 秒。“原唱 歌名”只发原唱片段，“搜歌 歌名”查看候选。搜索会排除标明伴奏、KTV、短剧等结果；歌名不完全匹配时会先列候选，不自动发错歌。确认候选可用“翻唱 雨夜 #2”等序号命令。流萤转换前会检查分离后的人声音量，过低就停止发送。先运行 `scripts/setup-singing-rvc.ps1` 准备模型，再运行 `scripts/setup-song-cover.ps1` 安装 yt-dlp 等依赖。运行设置中的“现成歌曲点唱”可独立开关，不需要 Mureka Key。B 站搜索受限时会试 YouTube；转换失败不会把原唱冒充翻唱发出。
+现成歌曲点唱只允许主人使用：“唱歌 歌名”或“翻唱 歌名”会搜索歌曲、默认从约 30 秒处截取 60 秒、转换成流萤音色并发送 QQ 语音；整首歌按不超过 60 秒的片段发送；“唱一首雨夜 DJ 版的歌”等自然说法也会进入这条链路，指定“唱10秒钟雨夜”则截取 10 秒。“原唱 歌名”只发原唱片段，“搜歌 歌名”查看候选。搜索会排除标明伴奏、KTV、短剧等结果；歌名不完全匹配时会先列候选，不自动发错歌。确认候选可用“翻唱 雨夜 #2”等序号命令。流萤转换前会检查分离后的人声音量，过低就停止发送。先运行 `scripts/setup-singing-rvc.ps1` 准备模型，再运行 `scripts/setup-song-cover.ps1` 安装 yt-dlp 等依赖。运行设置中的“现成歌曲点唱”可独立开关，不需要 Mureka Key。B 站搜索受限时会试 YouTube；转换失败不会把原唱冒充翻唱发出。
 
 已成功制作的歌曲语音会持久保存在 `bridge/state/song-cache/`。相同歌名、模式、候选、片段位置和音色再次请求时直接复用本地成品，不再重新搜索、下载或做音色转换；原创唱歌也会按主题和音色复用已保存结果。最近一首仍按主人保留一小时，跨群说“这个群也来一首雨爱司凤版”或“唱出来”可直接重发。说“再来一段”“再来一段60秒的”“接着唱”会先查本地是否已有该段，没有才继续制作下一段。
 
 #### 本地歌单试听
 
-群聊和私聊可用 `歌单 [页码]` 查看已核验的本地 30 秒音频，再用 `试听 <歌单显示的12位ID>` 免费试听。机器人全局共用每日 30 次、滚动 10 分钟 3 次的额度；同一会话同时只处理第一条有效试听。试听文件会核对时长、哈希和完整解码，发送超时会暂停同一会话并交由主人私聊 `试听待核对` 处理。主人可私聊 `好友列表 [页码]`、`红包账本`、`余额` 查询。
+群聊和私聊可用 `歌单 [页码]` 查看已核验的本地 30 秒音频，再用 `试听1` 等歌单序号免费试听。群友全局共用每日 30 次、滚动 10 分钟 3 次的额度；主人的试听免计次。同一 QQ 消息在两个桥接入口之间只处理一次，同一会话同时只处理第一条有效试听。试听文件会核对时长、哈希和完整解码，发送超时会暂停同一会话并交由主人私聊 `试听待核对` 处理。主人可私聊 `好友列表 [页码]`、`红包账本`、`余额` 查询。
 
 这些命令由当前运行的 `src/bridge.js` 在模型唤醒前直接处理。试听只有在 OneBot HTTP 对 `send_group_msg` / `send_private_msg` 返回成功状态后才计入额度；发送被拒时会释放预留次数。
 
-当前 OneBot/NapCat 适配器没有经验证的 QQ 红包领取回执或 QQ 钱包查询接口，因此不能自动领取红包或查询真实钱包余额。主人核对实际收款后手动记入的用户额度可用于 `新歌试听 <歌名>`（1 元，30 秒流萤翻唱）和 `唱完整首 <歌名>`（3 元，按同一完整音源分段翻唱）；付费订单会先预留额度，仅在 OneBot 确认发送后结算，结果不确定时由主人核对。`余额` 不会伪称为 QQ 钱包余额。歌单解码扫描还要求可用的 ffmpeg；若本机 ffmpeg 无法启动，可通过环境变量 `DSH_FFMPEG` 指向可用的 ffmpeg 可执行文件后重启桥接。新加入群聊默认不主动插话；主人可在群内发送 `主动插话 开启` 或 `主动插话 关闭`，明确 @ 与命令仍正常响应。
+当前 OneBot/NapCat 适配器没有经验证的 QQ 红包领取回执或 QQ 钱包查询接口，因此不能自动领取红包或查询真实钱包余额。主人核对实际收款后手动记入的现金额度按每 100 分折算 3 个可互换点歌单位，余分累计并向下取整；`新歌试听 <歌名>` 消耗 1 单位（30 秒流萤翻唱），`唱完整首 <歌名>` 消耗 3 单位（按同一完整音源分段翻唱），单位可由现金折算和赠送额度混用。付费订单会先预留单位，仅在 OneBot 确认发送后结算，结果不确定时由主人核对。旧版整首赠送权益继续单独核销。`余额` 不会伪称为 QQ 钱包余额。歌单解码扫描还要求可用的 ffmpeg；若本机 ffmpeg 无法启动，可通过环境变量 `DSH_FFMPEG` 指向可用的 ffmpeg 可执行文件后重启桥接。新加入群聊默认不主动插话；主人可在群内发送 `主动插话 开启` 或 `主动插话 关闭`，开关与管理页面共用持久化状态，重启后保留；明确 @ 与命令仍正常响应。
 
 原创歌曲仍用 Mureka：在运行设置填写音乐 API Key 并开启后，由主人发送“原创唱歌 主题”或“/原创唱歌 主题”。开启“原创歌声转换为流萤音色”后，机器人会在人声分离后用 `liuying.pth` 转换歌声并混回伴奏。Windows CPU 环境安装脚本为 `scripts/setup-singing-rvc.ps1`，默认将模型和虚拟环境放在 `D:\deepseek\state\singing-rvc`，不纳入 Git；安装需要网络和约 3 GB 空间。没有可用的 RVC 环境时会明确报错，不发送未转换的原唱语音。CPU 转换会比较慢。
 

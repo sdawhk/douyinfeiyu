@@ -24,7 +24,7 @@
    `start_snowluma` / `stop_snowluma` / `findSnowLumaPids()` 依赖
    `powershell.exe`、`taskkill.exe`、`cmd.exe /c start`，Android 上都不存在。
    现在非 Windows 宿主上这两个工具不注册、PID 查询直接返回空数组（失败关闭），
-   只保留 `snowluma_status` 的 HTTP 探活——它照样能探本机或局域网内 Windows 上的 OneBot 网关。
+   只保留 `snowluma_status` 的 HTTP 探活；主人私聊携带会话令牌时仍可探本机或局域网内 Windows 上的 OneBot 网关。
 
 3. 新增 `start.sh` / `restart.sh`
    `start.bat` / `restart.bat` 的等价物（bat 保留未删，方便回到 Windows 用）。
