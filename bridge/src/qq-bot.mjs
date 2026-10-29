@@ -1497,8 +1497,9 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
       const outline = proj?.values?.turnOutline ?? [];
       for (const turn of outline) {
         if (turn.turn > rec.lastTurn && turn.response) {
+          const completeReply = await waitForCompleteReply(rec.sessionId, rec.lastTurn);
           rec.lastTurn = turn.turn;
-          return turn.response;
+          return completeReply;
         }
       }
     }

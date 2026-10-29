@@ -5,6 +5,7 @@ const ENGLISH_RECAP_ANALYSIS = /(?:^[^.!?\n]{1,100}\bsaid\s+["“][\s\S]{0,260}?
 const MEDIA_PLACEHOLDER = /\[(?:图片|动画表情|表情|语音|视频|文件|非文本消息)\]/g;
 const GROUP_CONTEXT_LEAK = /\[(?:Image|图片)\s*:\s*\d{1,2}:\d{2}\b[^\]\n]{0,200}\]|(?:QQ\s*)?\d{5,20}[）)]\s*刚刚发了一条消息\s*[:：]|看不到原文图片里的内容[\s\S]{0,100}从语境来看/i;
 const CONTROL_MARKER = /\[\s*(?:SILENT|SKIP)\s*\]/i;
+const INTERNAL_STATUS_MARKER = /\[\s*sl\s*:\s*\d{1,3}\s*%\s*\]/gi;
 const PROMPT_OR_DRAFT_LEAK = /DeepSeek\s*主题表情及动作\s*[\/／]\s*情[绪緒]|(?:过|過)长的提示[词詞]内容已忽略|聚焦[于於]核心回[应應]|回复听话的内容|\*{1,2}\s*(?:回复|最终回复)\s*[:：]\s*\*{1,2}|【(?:回复格式|QQ 工具会话|本会话近期已经回复)】|系统提示[，,]不要复述给用户|表情包仓库[，,]可用关键词/i;
 
 export function sanitizeModelReply(value) {
@@ -19,6 +20,11 @@ export function sanitizeModelReply(value) {
     .join('\n').trim();
   const stickerStatusLeaked = text !== originalText;
   text = text.replace(/\[sticker\]\s*sent\b/gi, '').trim();
+  if (!text) return { text: '', leaked: true, blocked: true };
+
+  const beforeStatusCleanup = text;
+  text = text.replace(INTERNAL_STATUS_MARKER, '').replace(/[ \t]{2,}/g, ' ').trim();
+  const statusMarkerLeaked = text !== beforeStatusCleanup;
   if (!text) return { text: '', leaked: true, blocked: true };
 
   // QQ history uses these labels for media. They are not images or useful replies.
@@ -36,7 +42,7 @@ export function sanitizeModelReply(value) {
 
   const reasoning = text.search(REASONING_MARKER);
   const final = text.match(FINAL_MARKER);
-  let leaked = stickerStatusLeaked || mediaPlaceholderLeaked;
+  let leaked = stickerStatusLeaked || mediaPlaceholderLeaked || statusMarkerLeaked;
   if (reasoning >= 0 && final && final.index > reasoning) {
     text = text.slice(final.index + final[0].length).trim();
     leaked = true;
@@ -72,7 +78,10 @@ export function replyQualityIssue(input, reply) {
   const answer = String(reply ?? '').replace(/\[sticker:[^\]]+\]/g, '').trim();
   if (!answer) return 'missing-answer';
   const compact = (value) => value.replace(/[\s，。！？!?.,、~～]+/gu, '').toLocaleLowerCase();
-  if (compact(answer) === compact(question)) return 'echoed-question';
+  const compactQuestion = compact(question);
+  const compactAnswer = compact(answer);
+  if (compactAnswer === compactQuestion
+      || (compactQuestion.length >= 6 && compactAnswer.startsWith(compactQuestion))) return 'echoed-question';
   if (/^(?:[哈呵嘿嗯哦啊]+|收到|你猜|[?？!！。,.，~～])+$/u.test(answer)) return 'generic-non-answer';
   return '';
 }
