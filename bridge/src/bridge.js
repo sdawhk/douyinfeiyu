@@ -15,7 +15,10 @@ import { readSettingsDocument } from './bot-settings.mjs';
 import { canReply } from './reply-control.mjs';
 import { collectExistingGroupIds, initializeGroupInterjectionSettings, isGroupInterjectionEnabled, setGroupInterjectionEnabled } from './group-interjection-settings.mjs';
 import { handleRedPacketCandidateNotice, handleSongLibraryCommand, isSongLibraryCommand, normalizeSongCommandText, shouldRouteSongLibraryCommand } from './song-library-commands.mjs';
+import { markFreeQuotaExemptSenders } from './song-library.mjs';
 import { callOnebotApi } from './onebot-api.mjs';
+import { listArchived } from './image-archive.mjs';
+import { readImageAnalyses } from './image-analysis-store.mjs';
 import { makePaidSongPreview, makePaidFullSong } from './paid-song-producer.mjs';
 import { isMuted, groupKey, privateKey } from './mute.mjs';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
@@ -7870,7 +7873,9 @@ async function main() {
       if (!shouldRouteSongLibraryCommand(fastCommandText, songCommandGate())) return;
       try {
         const songCommandHandled = await handleSongLibraryCommand({
-          text: fastCommandText, key, senderId: String(event.user_id), isGroup: kind === 'group', isOwner,
+          text: fastCommandText, key, senderId: String(event.user_id),
+          sourceMessageId: event.message_id ?? event.msg_id ?? event.message_seq,
+          isGroup: kind === 'group', isOwner,
           botId: String(event.self_id ?? bridgeStatus.selfId ?? ''),
           coverEnabled: readSettingsDocument().settings.singing?.coverEnabled === true,
           makePaidPreview: (query) => makePaidSongPreview(query, { getSettings: () => readSettingsDocument().settings.singing }),

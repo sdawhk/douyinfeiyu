@@ -70,7 +70,7 @@ export async function makePaidFullSong(query, { getSettings, searchImpl = search
   const results = await searchImpl(query);
   const exact = results.filter((item) => isExactSongMatch(query, item.title));
   if (!exact.length) throw new Error('没有找到与所点歌名完全匹配的音源，请提供准确歌名');
-  const source = await makeSegments(query, { chunkSeconds: 30, searchImpl: async () => exact });
+  const source = await makeSegments(query, { chunkSeconds: 60, searchImpl: async () => exact });
   if (!exact.some((item) => item.url === source.url) || !source.sourceIdentity) throw new Error('整首音源不在完全匹配候选中或缺少稳定来源标识');
   const segments = [];
   for (const segment of source.segments) {

@@ -74,9 +74,10 @@ import { directOwnerIdentityReply, enforceOwnerBoundary, isOwnerTopic, ownerBoun
 import { parseSingCommand, generateSong, downloadSong } from './singing.mjs';
 import { parseExistingSongCommand, parseRecentSongReplayRequest, searchExistingSongs, makeExistingSongClip, isExactSongMatch } from './song-cover.mjs';
 import { loadSongOutput, saveSongOutput } from './song-output-cache.mjs';
+import { songDeliveryJournal } from './song-delivery-journal.mjs';
 import { applyLiuyingSpeech, applyLiuyingVoice, LIUYING_SINGING_VOCAL_PROFILE, LIUYING_SINGING_VOCAL_VARIANT } from './rvc-singing.mjs';
 import { collectExistingGroupIds, initializeGroupInterjectionSettings, isGroupInterjectionEnabled, setGroupInterjectionEnabled } from './group-interjection-settings.mjs';
-import { getFreeQuota, getVerifiedCreditBalance, getVerifiedSongPreview, hasRedPacketMarker, listSongs, listUncertainPreviews, ownerLedgerSummary, redPacketCapabilityStatus, reconcilePreviewReservations, refreshSongLibrary, registerSongOutput, reserveFreePreview, resolveUncertainPreview, settleFreePreview } from './song-library.mjs';
+import { getVerifiedCreditBalance, getVerifiedSongPreview, hasRedPacketMarker, listSongs, listUncertainPreviews, markFreeQuotaExemptSenders, ownerLedgerSummary, redPacketCapabilityStatus, reconcilePreviewReservations, refreshSongLibrary, registerSongOutput, reserveFreePreview, resolveUncertainPreview, settleFreePreview } from './song-library.mjs';
 
 const CFG_PATH = new URL('../config.json', import.meta.url);
 const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
@@ -112,6 +113,12 @@ let songPreviewRecoveryDone = false;
 let botNickname = '';
 const songCandidateCache = new Map();
 const recentSongOutputs = new Map();
+function songDeliveryFailureStatus(error) {
+  return error?.uncertain === true || error?.name === 'AbortError' || error?.name === 'TimeoutError'
+    || /timeout|timed out|aborted|econnreset|epipe|fetch failed|socket hang up/i.test(String(error?.message ?? error))
+    ? 'uncertain' : 'failed';
+}
+const inboundMessageIds = new Map();
 const RECENT_SONG_DIR = fileURLToPath(new URL('../state/', import.meta.url));
 const RECENT_SONG_TTL_MS = 60 * 60_000;
 function persistSongArtifact(saved) {
@@ -133,11 +140,13 @@ function persistSongArtifact(saved) {
     }
   } catch (error) { log('[song-cache] save failed:', error?.message ?? error); }
 }
-function rememberSongOutput(sender, { audio, title, query, mode, url, source, duration, seconds, startSeconds, candidate, pitch, voiceProfile }) {
+function rememberSongOutput(sender, { audio, title, query, mode, url, source, duration, seconds, startSeconds, candidate, pitch, voiceProfile }, chatKey = '') {
   const key = String(sender);
   if (!/^\d{5,20}$/.test(key) || !Buffer.isBuffer(audio) || audio.length > 12 * 1024 * 1024) return;
-  const saved = { audio, title, query, mode, url, source, duration, seconds, startSeconds, candidate, pitch, voiceProfile: voiceProfile ?? 'original', at: Date.now() };
+  const saved = { audio, title, query, mode, url, source, duration, seconds, startSeconds, candidate, pitch,
+    voiceProfile: voiceProfile ?? 'original', chatKey: String(chatKey ?? ''), at: Date.now() };
   recentSongOutputs.set(key, saved);
+  songDeliveryJournal.record({ chatKey, title: title || query, mode, status: 'sent', seconds });
   try {
     mkdirSync(RECENT_SONG_DIR, { recursive: true });
     writeFileSync(join(RECENT_SONG_DIR, `recent-song-${key}.bin`), audio);
@@ -161,6 +170,7 @@ function recentSongOutput(sender) {
       url: String(meta.url ?? ''), source: String(meta.source ?? ''), duration: Number(meta.duration) || null,
       candidate: Number(meta.candidate) || 1, pitch: Number.isFinite(Number(meta.pitch)) ? Number(meta.pitch) : null,
       voiceProfile: String(meta.voiceProfile ?? 'original'),
+      chatKey: String(meta.chatKey ?? ''),
       seconds: Number(meta.seconds) || 30,
       startSeconds: Number.isFinite(Number(meta.startSeconds)) ? Number(meta.startSeconds) : 30, at: meta.at };
     recentSongOutputs.set(key, saved);
@@ -181,6 +191,11 @@ function recentSongCandidates(key) {
   return null;
 }
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+
+async function sendSongChatter(target, chatKey, kind, isGroup) {
+  try { await sendText(target, songChatterLine(chatKey, kind), isGroup); }
+  catch (error) { log('[song-chatter] follow-up failed:', error?.message ?? error); }
+}
 const SETTINGS_HEARTBEAT = 'D:\\deepseek\\state\\settings-heartbeat.json';
 function refreshSettings() {
   try {
@@ -586,6 +601,14 @@ async function sendSegments(target, segments, isGroup) {
   // QQ voice uploads can take longer than ordinary text messages, even when
   // the audio is already cached locally. Give OneBot time to finish Highway upload.
   const timeoutMs = segments.some((segment) => segment?.type === 'record') ? 60_000 : 10_000;
+  if (segments.some((segment) => segment?.type === 'record')) {
+    if (!canReply(settingsDocument.settings.replyControl, isGroup, target)) {
+      throw new Error(`reply disabled for ${isGroup ? 'group' : 'private'}:${target}`);
+    }
+    await callOnebotApi({ httpUrl: HTTP_URL, token: HTTP_TOKEN, action,
+      params: { [key]: Number(target), message: segments }, timeoutMs });
+    return;
+  }
   await onebot(action, { [key]: Number(target), message: segments }, timeoutMs);
 }
 
@@ -1205,15 +1228,25 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
   }
   if (ownerTurn) {
     promptText += `${OWNER_TURN_GUIDANCE}\n\n`;
-    if (/(?:语音|唱歌|唱首|音乐)/i.test(text)) {
-      const canCover = settingsDocument.settings.singing.coverEnabled;
-      const canCreate = settingsDocument.settings.singing.enabled && settingsDocument.settings.singing.hasApiKey;
-      promptText += `【当前媒体能力】QQ 桥接可以发送普通语音；Edge TTS 当前使用晓晓（zh-CN-XiaoxiaoNeural）朗读。${canCover ? '现成歌曲点唱已开启，主人可用“唱歌 歌名”或“翻唱 歌名”让流萤音色翻唱，也可用“原唱 歌名”发送原唱片段。' : '现成歌曲点唱当前未开启。'}${canCreate ? '“原创唱歌 主题”可生成原创歌曲。' : '原创唱歌需另行启用 Mureka；不要把它当作现成歌曲点唱的前置条件。'}主人明确要求用语音朗读或背诵时，回复正文要直接完成所说的内容；作品名明确就念作品本身，标题有歧义先简短确认，不要只评论题目或插入玩笑。若只说“发句语音”而未指定内容，就简短说一句自然的话。\n\n`;
-    }
     const friendContext = await ownerFriendContext(key, text);
     if (friendContext) promptText += `${friendContext}\n\n`;
     const groupContext = await ownerGroupContext(key, text);
     if (groupContext) promptText += `${groupContext}\n\n`;
+  }
+  if (/(?:语音|音频|唱|歌曲|歌单|点歌|翻唱|原唱|试听|音乐)/i.test(text)) {
+    const canCover = settingsDocument.settings.singing.coverEnabled === true;
+    const canCreate = settingsDocument.settings.singing.enabled && settingsDocument.settings.singing.hasApiKey;
+    promptText += `【歌曲与语音能力】QQ 桥接支持普通语音发送和歌单试听；${canCover ? '新歌翻唱点唱已开启，可按点歌命令制作并发送歌曲语音' : '新歌翻唱点唱当前关闭'}；原创歌曲生成功能${canCreate ? '已开启' : '未开启'}。歌曲制作与发送由桥接实际执行。不得声称机器人只能发文字和表情；也不得把制作请求当成已完成。能力权限仍按现有命令规则执行。\n`;
+    const deliveries = songDeliveryJournal.recent(key, { withinMs: 24 * 60 * 60_000, limit: 4 });
+    if (deliveries.length) {
+      const facts = deliveries.map((item) => {
+        const state = item.status === 'sent' ? '已确认发送' : item.status === 'uncertain' ? '发送结果待核对'
+          : item.status === 'partial' ? '分段发送中断' : '未发送成功';
+        return `《${item.title}》${state}${item.seconds ? `（${item.seconds} 秒）` : ''}`;
+      });
+      promptText += `【桥接歌曲执行记录】${facts.join('；')}。这些状态来自实际发送链路；回答追问时依据记录，不得猜测或否认已确认的发送。\n`;
+    }
+    promptText += '\n';
   }
   if (wantsVoiceReply(text, 'requested')
       && !parseExistingSongCommand(text, { botNickname, botSelf: BOT_SELF, hasBotMention: false })
@@ -1978,10 +2011,13 @@ const MUST_REPLY_WORDS = [
 const GROUP_TURN_MAX_AGE_MS = 180_000;
 
 function shouldReplyInGroup(ev, text, groupId, messageReferences = {}) {
-  const normalizedText = normalizeBotCommandText(text, messageReferences);
+  const normalizedText = normalizeSongCommandText(normalizeBotCommandText(text, messageReferences), {
+    selfNickname: botNickname, selfQQ: BOT_SELF, hasBotMention: messageReferences.hasBotMention
+  });
   if (parseExistingSongCommand(text, {
     botNickname, botSelf: BOT_SELF, hasBotMention: messageReferences.hasBotMention
-  }) || /^(?:歌单(?:\s+\d{1,4})?|试听\s+[a-f0-9]{12}|点歌帮助|点歌说明|怎么点歌|如何点歌|点歌怎么用)$/i.test(normalizedText)) return true;
+  }) || isSongLibraryCommand(normalizedText)
+    || /^(?:点歌帮助|点歌说明|怎么点歌|如何点歌|点歌怎么用)$/i.test(normalizedText)) return true;
   if (settingsDocument.settings.groupMuteEnabled
       && /^(?:闭嘴|闭嘴吧|别说话|不许说话|不要说话|可以讲话|可以说话|能说话|解除禁言|你可以说了|开口|解禁)[。！!…]*$|^\/(?:闭嘴|mute|解禁|unmute|开口)$/i.test(String(text ?? '').trim())) {
     return true;
@@ -2218,8 +2254,10 @@ async function processMessage(ev) {
 
   if (isSongLibraryCommand(t0)) {
     const handled = await handleSongLibraryCommand({
-      text: t0, key: chatKey, senderId: sender, isGroup,
+      text: t0, key: chatKey, senderId: sender,
+      sourceMessageId: ev.message_id ?? ev.msg_id ?? ev.message_seq, isGroup,
       isOwner: isOwner(sender) && sender !== String(currentBotQQ ?? ''), botId: String(currentBotQQ ?? ''),
+      onSongDelivery: (event) => songDeliveryJournal.record({ ...event, chatKey }),
       coverEnabled: settingsDocument.settings.singing?.coverEnabled === true,
       makePaidPreview: (query) => makePaidSongPreview(query, { getSettings: () => settingsDocument.settings.singing }),
       makePaidFullSong: (query, orderId, options) => makePaidFullSong(query, { getSettings: () => settingsDocument.settings.singing, ...options }),
@@ -2239,7 +2277,7 @@ async function processMessage(ev) {
     if (handled) return;
   }
 
-  const songCommand = t0.match(/^(?:歌单(?:\s+(\d{1,4}))?|试听\s+([a-f0-9]{12})|我的点歌额度|新歌试听(?:\s+.+)?|唱完整首(?:\s+.+)?)$/i);
+  const songCommand = t0.match(/^(?:歌单(?:\s+(\d{1,4}))?|试听\s*(\d{1,4}|[a-f0-9]{12})|我的点歌额度|新歌试听(?:\s+.+)?|唱完整首(?:\s+.+)?)$/i);
   if (songCommand) {
     if (!songPreviewRecoveryDone) {
       const reconciled = reconcilePreviewReservations();
@@ -2265,7 +2303,7 @@ async function processMessage(ev) {
           return;
         }
         const lines = result.songs.map((song, index) => `${result.offset + index + 1}. ${song.title}（ID ${song.song_id}）`);
-        await sendText(target, `本地歌单 ${page}/${pages}（共 ${result.total} 首）\n${lines.join('\n')}\n试听：试听 后面的 12 位 ID`, isGroup);
+        await sendText(target, `本地歌单 ${page}/${pages}（共 ${result.total} 首）\n${lines.join('\n')}\n试听序号：试听1、试听2……`, isGroup);
       } catch (error) {
         log('[song-library] list failed:', error?.message ?? error);
         await sendText(target, '歌单读取暂时失败，请稍后再试。', isGroup);
@@ -2278,26 +2316,30 @@ async function processMessage(ev) {
         songLibraryLoaded = true;
         log(`[song-library] startup scan indexed=${scan.indexed} rejected=${scan.rejected}`);
       }
-      const songId = songCommand[2].toLowerCase();
+      const requestedSong = songCommand[2].toLowerCase();
+      const songId = /^\d+$/.test(requestedSong)
+        ? listSongs({ offset: Number(requestedSong) - 1, limit: 1 }).songs[0]?.song_id
+        : requestedSong;
+      if (!songId) {
+        await sendText(target, `歌单里没有第 ${requestedSong} 首，请先发送“歌单”查看。`, isGroup);
+        return;
+      }
       const song = getVerifiedSongPreview(songId);
       if (!song) {
         await sendText(target, '这个编号没有可用的 30 秒试听文件，请刷新歌单后重试。', isGroup);
         return;
       }
-      const reservation = reserveFreePreview({ chatKey, senderId: sender, songId, now: Date.now() });
+      const reservation = reserveFreePreview({ chatKey, senderId: sender, songId, exemptFromQuota: true, now: Date.now() });
       if (!reservation.ok) {
         const message = reservation.reason === 'conversation-busy' ? '这个会话正在处理前一首试听，本轮只执行第一位点歌人的请求。'
-          : reservation.reason === 'daily-limit' ? '机器人今天的免费试听次数已用完。'
-            : reservation.reason === 'rolling-limit' ? '试听有点密，10 分钟内最多 3 次，稍后再试。'
-              : '这首歌已不在可试听歌单里。';
+          : '这首歌已不在可试听歌单里。';
         await sendText(target, message, isGroup);
         return;
       }
       try {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${song.audio.toString('base64')}` } }], isGroup);
         settleFreePreview(reservation.requestId, 'sent');
-        const quota = getFreeQuota();
-        await sendText(target, `《${song.title}》试听已发送。免费额度：今日 ${quota.dailyUsed}/${quota.dailyLimit}，近 10 分钟 ${quota.rollingUsed}/${quota.rollingLimit}。`, isGroup);
+        await sendText(target, `《${song.title}》试听已发送，歌单试听免费、不限次数。`, isGroup);
       } catch (error) {
         const uncertain = error?.name === 'AbortError' || error?.name === 'TimeoutError'
           || /timeout|timed out|aborted|econnreset|econnrefused|epipe|fetch failed|socket hang up/i.test(String(error?.message ?? error));
@@ -2375,8 +2417,9 @@ async function processMessage(ev) {
 
   const replayRequest = parseRecentSongReplayRequest(text, { hasBotMention: messageReferences.hasBotMention });
   if (replayRequest) {
-    if (!isOwner(sender) && !isGroup) {
-      if (canReply(settingsDocument.settings.replyControl, isGroup, target)) await sendText(target, '私聊点歌目前只有主人可以使用；群聊可以直接点歌。', false);
+    if (shouldBlockLegacySongRequest(isOwner(sender))) {
+      if (canReply(settingsDocument.settings.replyControl, isGroup, target))
+        await sendText(target, '歌单里的歌曲可发送“试听序号”免费听 30 秒；新歌请用“新歌试听 歌名”或“唱完整首 歌名”，按本人点歌单位结算。', isGroup);
       return;
     }
     if (!canReply(settingsDocument.settings.replyControl, isGroup, target)) return;
@@ -2400,8 +2443,8 @@ async function processMessage(ev) {
         await sendText(target, `最近一首是《${saved.title}》，你说的《${replayRequest.song}》和它不匹配；请直接说“唱${replayRequest.song}”开始点歌。`, isGroup);
         return;
       }
-      const seconds = replayRequest.seconds ?? saved.seconds ?? 30;
-      const startSeconds = (saved.startSeconds ?? 30) + seconds;
+      const seconds = replayRequest.seconds ?? saved.seconds ?? 60;
+      const startSeconds = (saved.startSeconds ?? 30) + (saved.seconds ?? 60);
       if (saved.duration && startSeconds >= saved.duration - 5) {
         await sendText(target, `《${saved.title}》已经唱到结尾了。`, isGroup);
         return;
@@ -2412,10 +2455,12 @@ async function processMessage(ev) {
       if (cachedSegment) {
         try {
           await sendSegments(target, [{ type: 'record', data: { file: `base64://${cachedSegment.audio.toString('base64')}` } }], isGroup);
-          rememberSongOutput(sender, { ...cachedSegment, audio: cachedSegment.audio });
+          rememberSongOutput(sender, { ...cachedSegment, audio: cachedSegment.audio }, chatKey);
           log('[song-cache] reused continuation', cachedSegment.title, `start=${startSeconds}`, isGroup ? 'group' : 'private', target);
+          await sendSongChatter(target, chatKey, 'replay', isGroup);
         } catch (error) {
           log('[song-cache] send failed:', error?.message ?? error);
+          songDeliveryJournal.record({ chatKey, title: cachedSegment.title, mode: cachedSegment.mode, status: songDeliveryFailureStatus(error), seconds: cachedSegment.seconds });
           await sendText(target, `本地歌曲发送失败：${String(error?.message ?? error).slice(0, 100)}`, isGroup).catch(() => {});
         }
         return;
@@ -2442,10 +2487,12 @@ async function processMessage(ev) {
             candidate: saved.candidate ?? 1, pitch: saved.mode === 'ai' ? (runtimeSinging.rvcPitch ?? 0) : null,
             voiceProfile: saved.mode === 'ai' ? LIUYING_SINGING_VOCAL_PROFILE : 'original' };
           await sendSegments(target, [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], isGroup);
-          rememberSongOutput(sender, output);
+          rememberSongOutput(sender, output, chatKey);
           log('[song-continue] sent', clip.title, `start=${clip.startSeconds}`, isGroup ? 'group' : 'private', target);
+          await sendSongChatter(target, chatKey, 'replay', isGroup);
         } catch (error) {
           log('[song-continue] failed:', error?.message ?? error);
+            songDeliveryJournal.record({ chatKey, title: saved.title, mode: saved.mode, status: songDeliveryFailureStatus(error), seconds });
           if (!isMuted(chatKey) && canReply(settingsDocument.settings.replyControl, isGroup, target)) {
             await sendText(target, '下一段翻唱没成功，未发送语音。', isGroup).catch(() => {});
           }
@@ -2460,9 +2507,12 @@ async function processMessage(ev) {
       }
       try {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${saved.audio.toString('base64')}` } }], isGroup);
+        rememberSongOutput(sender, { ...saved, audio: saved.audio }, chatKey);
         log('[song-replay] sent', saved.title, isGroup ? 'group' : 'private', target);
+        await sendSongChatter(target, chatKey, 'replay', isGroup);
       } catch (error) {
         log('[song-replay] failed:', error?.message ?? error);
+        songDeliveryJournal.record({ chatKey, title: saved.title, mode: saved.mode, status: songDeliveryFailureStatus(error), seconds: saved.seconds });
         await sendText(target, `刚才那首歌发送失败：${String(error?.message ?? error).slice(0, 100)}`, isGroup).catch(() => {});
       }
       return;
@@ -2478,14 +2528,14 @@ async function processMessage(ev) {
   }) || (replayRequest?.song ? { mode: 'ai', song: replayRequest.song, candidate: 1 } : null);
   if (coverRequest) {
     const songCacheKey = `${chatKey}:${sender}:${coverRequest.song.toLowerCase()}`;
-    log(`[song-cover] accepted mode=${coverRequest.mode} song=${coverRequest.song.slice(0, 80)} seconds=${coverRequest.seconds ?? 30}`);
+    log(`[song-cover] accepted mode=${coverRequest.mode} song=${coverRequest.song.slice(0, 80)} seconds=${coverRequest.seconds ?? 60}`);
     if (!canReply(settingsDocument.settings.replyControl, isGroup, target)) return;
     if (!settingsDocument.settings.singing.coverEnabled) {
       await sendText(target, '现成歌曲点唱未开启，请在运行设置中启用。', isGroup);
       return;
     }
-    if (!isOwner(sender) && !isGroup) {
-      await sendText(target, '私聊点歌目前只有主人可以使用；群聊可以直接点歌。', false);
+    if (shouldBlockLegacySongRequest(isOwner(sender), coverRequest.mode)) {
+      await sendText(target, '群友可以免费、不限次数试听歌单里的歌曲；新歌点歌和整首制作目前仅主人可用。', isGroup);
       return;
     }
     if (!coverRequest.song) {
@@ -2493,16 +2543,38 @@ async function processMessage(ev) {
       return;
     }
     if (coverRequest.mode === 'search') {
+      const sendSearchReply = async message => {
+        try {
+          await sendText(target, message, isGroup);
+        } catch (sendError) {
+          log('[song-search] reply failed:', sendError?.message ?? sendError);
+        }
+      };
+      try {
+        await sendText(target, `正在搜索《${coverRequest.song}》，会依次查询可用音源，请稍等。`, isGroup);
+      } catch (sendError) {
+        log('[song-search] progress reply failed:', sendError?.message ?? sendError);
+      }
       try {
         const results = await searchExistingSongs(coverRequest.song);
         rememberSongCandidates(songCacheKey, results);
-        await sendText(target, results.map((item, index) => `${index + 1}. ${item.title}${item.duration ? `（${Math.round(item.duration)} 秒）` : ''}`).join('\n'), isGroup);
+        if (results.length === 0) {
+          await sendSearchReply(`没有找到《${coverRequest.song}》的匹配歌曲，请换个歌名再试。`);
+        } else {
+          await sendSearchReply(results.map((item, index) => `${index + 1}. ${item.title}${item.duration ? `（${Math.round(item.duration)} 秒）` : ''}`).join('\n'));
+        }
       } catch (error) {
-        await sendText(target, `搜歌失败：${String(error?.message ?? error).slice(0, 120)}`, isGroup);
+        const errorMessage = String(error?.message ?? error);
+        log('[song-search] failed:', errorMessage);
+        if (errorMessage.includes('没有找到歌名匹配')) {
+          await sendSearchReply(`没有找到《${coverRequest.song}》的匹配歌曲，请换个歌名再试。`);
+        } else {
+          await sendSearchReply('搜索暂时失败，请稍后再试。');
+        }
       }
       return;
     }
-    const requestedSeconds = coverRequest.seconds ?? 30;
+    const requestedSeconds = coverRequest.seconds ?? 60;
     const voiceVariant = coverRequest.mode === 'ai' ? LIUYING_SINGING_VOCAL_VARIANT(runtimeSinging.rvcPitch ?? 0) : 'original';
     const cacheRequest = { query: coverRequest.song, mode: coverRequest.mode,
       candidate: coverRequest.candidate, startSeconds: 30, seconds: requestedSeconds, voiceVariant };
@@ -2510,16 +2582,19 @@ async function processMessage(ev) {
     const sameRecentRequest = recentOutput
       && recentOutput.query.normalize('NFKC').toLowerCase().replace(/雨愛/g, '雨爱').replace(/司[鳳風风]/g, '司凤')
         === coverRequest.song.normalize('NFKC').toLowerCase().replace(/雨愛/g, '雨爱').replace(/司[鳳風风]/g, '司凤')
-      && recentOutput.mode === coverRequest.mode && (recentOutput.candidate ?? 1) === coverRequest.candidate
+      && recentOutput.mode === coverRequest.mode && recentOutput.seconds === requestedSeconds
+      && (recentOutput.candidate ?? 1) === coverRequest.candidate
       && (coverRequest.mode !== 'ai' || recentOutput.voiceProfile === LIUYING_SINGING_VOCAL_PROFILE);
     const cachedSong = loadSongOutput(cacheRequest) || (sameRecentRequest ? recentOutput : null);
     if (cachedSong) {
       try {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${cachedSong.audio.toString('base64')}` } }], isGroup);
-        rememberSongOutput(sender, { ...cachedSong, audio: cachedSong.audio });
+        rememberSongOutput(sender, { ...cachedSong, audio: cachedSong.audio }, chatKey);
         log('[song-cache] reused', coverRequest.mode, cachedSong.title, isGroup ? 'group' : 'private', target);
+        await sendSongChatter(target, chatKey, 'preview', isGroup);
       } catch (error) {
         log('[song-cache] send failed:', error?.message ?? error);
+        songDeliveryJournal.record({ chatKey, title: cachedSong.title, mode: cachedSong.mode, status: songDeliveryFailureStatus(error), seconds: cachedSong.seconds });
         await sendText(target, `本地歌曲发送失败：${String(error?.message ?? error).slice(0, 100)}`, isGroup).catch(() => {});
       }
       return;
@@ -2554,10 +2629,12 @@ async function processMessage(ev) {
           candidate: coverRequest.candidate, pitch: coverRequest.mode === 'ai' ? (runtimeSinging.rvcPitch ?? 0) : null,
           voiceProfile: coverRequest.mode === 'ai' ? LIUYING_SINGING_VOCAL_PROFILE : 'original' };
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], isGroup);
-        rememberSongOutput(sender, output);
+        rememberSongOutput(sender, output, chatKey);
         log('[song-cover] sent', coverRequest.mode, clip.title, isGroup ? 'group' : 'private', target);
+        await sendSongChatter(target, chatKey, 'preview', isGroup);
       } catch (error) {
         log('[song-cover] failed:', error?.message ?? error);
+          songDeliveryJournal.record({ chatKey, title: coverRequest.song, mode: coverRequest.mode, status: songDeliveryFailureStatus(error), seconds: requestedSeconds });
         if (!isMuted(chatKey) && canReply(settingsDocument.settings.replyControl, isGroup, target)) {
           await sendText(target, `这次${coverRequest.mode === 'ai' ? '翻唱' : '点歌'}没成功，未发送语音。`, isGroup).catch(() => {});
         }
@@ -2588,10 +2665,12 @@ async function processMessage(ev) {
     if (cachedGenerated) {
       try {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${cachedGenerated.audio.toString('base64')}` } }], isGroup);
-        rememberSongOutput(sender, { ...cachedGenerated, audio: cachedGenerated.audio });
+        rememberSongOutput(sender, { ...cachedGenerated, audio: cachedGenerated.audio }, chatKey);
         log('[song-cache] reused generated song', cachedGenerated.title, isGroup ? 'group' : 'private', target);
+        await sendSongChatter(target, chatKey, 'generated', isGroup);
       } catch (error) {
         log('[song-cache] generated send failed:', error?.message ?? error);
+        songDeliveryJournal.record({ chatKey, title: cachedGenerated.title, mode: 'generated', status: songDeliveryFailureStatus(error), seconds: cachedGenerated.seconds });
         await sendText(target, `本地原创歌曲发送失败：${String(error?.message ?? error).slice(0, 100)}`, isGroup).catch(() => {});
       }
       return;
@@ -2612,6 +2691,7 @@ async function processMessage(ev) {
           }
         } catch (audioError) {
           log('[singing] audio processing failed:', audioError?.message ?? audioError);
+          songDeliveryJournal.record({ chatKey, title: `原创歌曲：${singTheme}`, mode: 'generated', status: 'failed', detail: '音频处理失败' });
           await sendText(target, `歌曲已生成，但${runtimeSinging.rvcEnabled === true ? '流萤音色转换' : '音频处理'}失败，未发送语音：${String(audioError?.message ?? audioError).slice(0, 100)}\n原始歌曲：${song.url}`, isGroup);
           return;
         }
@@ -2621,13 +2701,16 @@ async function processMessage(ev) {
             pitch: runtimeSinging.rvcEnabled === true ? (runtimeSinging.rvcPitch ?? 0) : null,
             voiceProfile: runtimeSinging.rvcEnabled === true ? LIUYING_SINGING_VOCAL_PROFILE : 'original' };
           await sendSegments(target, [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], isGroup);
-          rememberSongOutput(sender, output);
+          rememberSongOutput(sender, output, chatKey);
+          await sendSongChatter(target, chatKey, 'generated', isGroup);
         } catch (sendError) {
           log('[singing] QQ voice failed:', sendError?.message ?? sendError);
+          songDeliveryJournal.record({ chatKey, title: `原创歌曲：${singTheme}`, mode: 'generated', status: songDeliveryFailureStatus(sendError) });
           await sendText(target, `歌曲已生成，QQ 语音发送失败，可以听这里：${song.url}`, isGroup);
         }
       } catch (error) {
         log('[singing] generation failed:', error?.message ?? error);
+        songDeliveryJournal.record({ chatKey, title: `原创歌曲：${singTheme}`, mode: 'generated', status: 'failed', detail: '歌曲生成失败' });
         if (!isMuted(chatKey) && canReply(settingsDocument.settings.replyControl, isGroup, target)) {
           await sendText(target, `这次唱歌没成功：${String(error?.message ?? error).slice(0, 100)}`, isGroup).catch(() => {});
         }

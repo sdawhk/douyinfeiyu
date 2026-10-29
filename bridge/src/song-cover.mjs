@@ -37,6 +37,7 @@ export function parseExistingSongCommand(text, { botNickname = '', botSelf = '',
   const natural = input.match(/^(?<modal>(?:可以|能|可不可以|能不能|麻烦)\s*)?(?<addressee>(?:给我|帮我|给大家|帮大家|我想让你|我想听你|想听你)\s*)?(?<voice>用语音\s*)?(?<verb>唱|来)(?<singword>歌唱|歌)?(?<measure>一首|首|个|一下|一段|段)?\s*(?:(?<seconds>\d{1,3})\s*秒(?:钟)?\s*)?(?<song>.+)$/);
   if (natural) {
     const { modal, addressee, voice, verb, singword, measure, seconds: duration, song: requestedSong } = natural.groups;
+    if (verb === '来' && !modal && !addressee && !voice && !singword && !measure && !duration) return null;
     if (singword === '歌' && !modal && !addressee && !voice && !measure && !duration) return null;
     if (!modal && !addressee && !voice && !measure && !duration &&
         (!/^[\p{Script=Han}a-zA-Z0-9·_-]{2,20}$/u.test(requestedSong.trim()) || /^(?:什么|怎么|为啥|为什么|得|的|到|了|过|不|出来|起来|下去|完|好听|难听|那么|这么)/.test(requestedSong))) return null;
@@ -58,6 +59,7 @@ export function parseRecentSongReplayRequest(text, { hasBotMention = false } = {
   const anotherGroup = input.match(/^(?:这个群|本群|这里)(?:也)?来一首\s*(.+?)(?:吧|呀|啊)?[！!。.]?$/);
   if (anotherGroup) return { song: anotherGroup[1].trim().slice(0, 80) };
   if (/^(?:唱出来|用语音唱出来|再发一遍|重发刚才那首|把刚才那首发出来)[！!。.]?$/.test(input)) return { song: '' };
+  if (/^唱(?:下一段|后面一段|接下来一段)[！!。.]?$/.test(input)) return { song: '', continuation: true };
   const continuation = input.match(/^(?:再来|再唱|接着唱)(?:一段|一首|段)?(?:语音)?(?:的)?(?:可以)?(?:直接)?(?:发)?\s*(?:(\d{1,3})\s*秒(?:钟)?(?:的)?(?:一段|段)?)?(?:吗)?(?:吧|呀|啊)?[？?！!。.]?$/);
   if (continuation) {
     const seconds = continuation[1] === undefined ? undefined : Number(continuation[1]);
@@ -215,7 +217,7 @@ export async function searchExistingSongs(query, { fetchImpl = fetch, runImpl = 
   throw new Error(`没有找到歌名匹配、含人声的歌曲录音${errors.length ? `（${errors.join('；')}）` : ''}`);
 }
 
-export async function makeExistingSongClip(query, { seconds = 30, startSeconds = 30, candidate = 1,
+export async function makeExistingSongClip(query, { seconds = 60, startSeconds = 30, candidate = 1,
   fetchImpl = fetch, runImpl = run, searchImpl = searchExistingSongs,
   requireExact = false, ffmpeg = FFMPEG, ytdlp = YTDLP, ytdlpArgs = YTDLP_ARGS } = {}) {
   if (!Number.isInteger(seconds) || seconds < 5 || seconds > 240) throw new Error('片段长度须在 5–240 秒之间');
@@ -266,7 +268,7 @@ export async function makeExistingSongClip(query, { seconds = 30, startSeconds =
   }
 }
 
-export async function makeExistingSongSegments(query, { chunkSeconds = 30, fetchImpl = fetch, runImpl = run,
+export async function makeExistingSongSegments(query, { chunkSeconds = 60, fetchImpl = fetch, runImpl = run,
   searchImpl = searchExistingSongs, ffmpeg = FFMPEG, ytdlp = YTDLP, ytdlpArgs = YTDLP_ARGS } = {}) {
   if (!Number.isInteger(chunkSeconds) || chunkSeconds < 15 || chunkSeconds > 60) throw new Error('整首分段长度须在 15–60 秒之间');
   if (!existsSync(ffmpeg)) throw new Error(`缺少 ffmpeg：${ffmpeg}`);
@@ -307,10 +309,16 @@ export async function makeExistingSongSegments(query, { chunkSeconds = 30, fetch
     }
     if (!selected) throw new Error(`所有 ${candidates.length} 个完全匹配音源都无法完整核验或下载`);
     const count = Math.ceil(duration / chunkSeconds);
+    const tailSeconds = duration - (count - 1) * chunkSeconds;
+    const secondLastSeconds = tailSeconds < 5 && count > 1
+      ? chunkSeconds - (5 - tailSeconds) : chunkSeconds;
     const segments = [];
+    let nextStartSeconds = 0;
     for (let segmentIndex = 0; segmentIndex < count; segmentIndex++) {
-      const startSeconds = segmentIndex * chunkSeconds;
-      const seconds = Math.min(chunkSeconds, duration - startSeconds);
+      const startSeconds = nextStartSeconds;
+      const seconds = segmentIndex === count - 2 ? secondLastSeconds
+        : Math.min(chunkSeconds, duration - startSeconds);
+      nextStartSeconds += seconds;
       if (seconds < 5 && segments.length) {
         const previous = segments.pop();
         const mergedSeconds = previous.seconds + seconds;

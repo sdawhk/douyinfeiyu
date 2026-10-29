@@ -24,8 +24,15 @@ test('active bridge song commands are deterministic and settle quota only on One
   assert.equal(commands.shouldRouteSongLibraryCommand('试听 0123456789ab', { replyEnabled: true, muted: true }), false);
   assert.equal(commands.shouldRouteSongLibraryCommand('闭嘴', { replyEnabled: false, muted: true }), false);
   assert.equal(commands.isSongLibraryCommand('闭嘴'), false, 'mute controls remain on their existing downstream route');
+  assert.equal(commands.shouldBlockLegacySongRequest(false, 'ai'), true, 'group members cannot bypass paid previews with legacy singing');
+  assert.equal(commands.shouldBlockLegacySongRequest(false, 'original'), true, 'group members cannot bypass paid previews with source audio');
+  assert.equal(commands.shouldBlockLegacySongRequest(false, 'search'), false, 'search without audio remains available');
+  assert.equal(commands.shouldBlockLegacySongRequest(true, 'ai'), false, 'the owner keeps the legacy singing command');
   assert.equal(commands.normalizeSongCommandText('@小鲸鱼 歌单', { selfNickname: '小鲸鱼' }), '歌单');
   assert.equal(commands.normalizeSongCommandText('@群友 歌单', { selfNickname: '小鲸鱼' }), '@群友 歌单');
+  assert.equal(commands.normalizeSongCommandText('唱完整首雨爱司凤版'), '唱完整首 雨爱司凤版');
+  assert.equal(commands.isSongLibraryCommand('唱完整首雨爱司凤版'), true, 'compact full-song command stays on the deterministic song route');
+  assert.equal(commands.isSongLibraryCommand('新歌试听雨爱司凤版'), true, 'compact preview command stays on the deterministic song route');
 
   const audio = Buffer.alloc(FRAME_SIZE * FRAMES);
   for (let index = 0; index < FRAMES; index++) audio.writeUInt32BE(0xfffb9000, index * FRAME_SIZE);
@@ -34,16 +41,31 @@ test('active bridge song commands are deterministic and settle quota only on One
   assert.equal(library.registerSongOutput({ file, title: '歌单测试', query: '歌单测试', mode: 'ai', seconds: 30 }, { decodeImpl: () => true }), true);
   const songId = library.listSongs().songs[0].song_id;
   const messages = [];
+  const deliveryFacts = [];
   let sentAudio = null;
+  let audioSends = 0;
   const base = { key: 'group:12345', senderId: '67890', isGroup: true,
-    sendText: async (message) => messages.push(message), sendRecord: async (data) => { sentAudio = data; },
+    sendText: async (message) => messages.push(message), sendRecord: async (data) => { sentAudio = data; audioSends++; },
+    onSongDelivery: (event) => deliveryFacts.push(event),
     refreshLibrary: () => ({ indexed: 0, rejected: 0 }) };
 
   assert.equal(await commands.handleSongLibraryCommand({ ...base, text: '歌单' }), true);
-  assert.match(messages.at(-1), new RegExp(songId));
-  assert.equal(await commands.handleSongLibraryCommand({ ...base, text: `试听 ${songId}` }), true);
+  assert.match(messages.at(-1), /歌单测试/);
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, text: `试听 ${songId}`, sourceMessageId: 'qq-preview-1' }), true);
   assert.ok(Buffer.isBuffer(sentAudio));
+  assert.deepEqual(deliveryFacts.at(-1), { title: '歌单测试', mode: 'playlist', status: 'sent', seconds: 30 });
   assert.equal(library.getFreeQuota().dailyUsed, 1);
+  const messageCount = messages.length;
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, key: 'g12345', text: `试听 ${songId}`, sourceMessageId: 'qq-preview-1' }), true);
+  assert.equal(audioSends, 1, 'two bridge entry points send the same QQ preview only once');
+  assert.equal(messages.length, messageCount, 'duplicate event sends no second confirmation');
+  assert.equal(library.getFreeQuota().dailyUsed, 1, 'duplicate event does not consume free quota twice');
+
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, senderId: 'owner-123', isOwner: true,
+    text: `试听 ${songId}`, sourceMessageId: 'qq-owner-preview-1' }), true);
+  assert.equal(audioSends, 2, 'the owner preview is delivered');
+  assert.equal(library.getFreeQuota().dailyUsed, 1, 'the owner preview does not consume global free quota');
+  assert.match(messages.at(-1), /主人试听不占用全局免费次数/);
 
   const failing = { ...base, key: 'private:12345', sendRecord: async () => { throw new Error('OneBot send_group_msg failed: rejected'); } };
   assert.equal(await commands.handleSongLibraryCommand({ ...failing, text: `试听 ${songId}` }), true);
@@ -53,14 +75,22 @@ test('active bridge song commands are deterministic and settle quota only on One
   const packet = library.recordRedPacketCandidate({ botId: '90000', messageId: 'paid-command-credit', senderId: '67890', chatKey: 'private:90000' });
   library.approveRedPacketCandidate({ candidateId: packet.candidate_id, amountCents: 100, receiptRef: 'paid-command-receipt' });
   let paidSends = 0;
-  const paid = await commands.handleSongLibraryCommand({ ...base, text: '新歌试听 精确歌名', coverEnabled: true,
+  const paid = await commands.handleSongLibraryCommand({ ...base, text: '新歌试听 精确歌名', sourceMessageId: 'qq-paid-1', coverEnabled: true,
     makePaidPreview: async (query) => ({ audio: Buffer.alloc(1024), title: query, sourceIdentity: 'https://example.test/exact-song' }),
     sendRecord: async () => { paidSends++; } });
   assert.equal(paid, true);
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, key: 'g12345', text: '新歌试听 精确歌名', sourceMessageId: 'qq-paid-1', coverEnabled: true,
+    makePaidPreview: async () => assert.fail('duplicate event must not generate a second paid preview'),
+    sendRecord: async () => assert.fail('duplicate event must not send a second paid preview') }), true);
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(paidSends, 1);
-  assert.equal(library.getVerifiedCreditBalance('67890'), 0, 'paid preview settles once after confirmed send');
-  assert.match(messages.at(-1), /已扣 1.00 元/);
+  assert.equal(library.getVerifiedCreditBalance('67890'), 100, 'paid preview does not rewrite verified cash ledger');
+  assert.equal(library.getPaidSongUnitSummary('67890').consumed, 1, 'paid preview settles one unit after confirmed send');
+  assert.deepEqual(deliveryFacts.at(-1), { title: '精确歌名', mode: 'paid-preview', status: 'sent', seconds: 30 });
+  assert.match(messages.at(-1), /已结算 1 个点歌单位/);
+  await commands.handleSongLibraryCommand({ ...base, text: '我的点歌额度' });
+  assert.match(messages.at(-1), /累计来源为核验金额折算 3、赠送发放 0/);
+  assert.match(messages.at(-1), /已用 1、预留 0，可用 2/);
   const retryPacket = library.recordRedPacketCandidate({ botId: '90000', messageId: 'paid-command-credit-2', senderId: '67890', chatKey: 'private:90000' });
   library.approveRedPacketCandidate({ candidateId: retryPacket.candidate_id, amountCents: 100, receiptRef: 'paid-command-receipt-2' });
   const uncertain = await commands.handleSongLibraryCommand({ ...base, text: '新歌试听 另一首精确歌名', coverEnabled: true,
@@ -68,7 +98,9 @@ test('active bridge song commands are deterministic and settle quota only on One
     sendRecord: async () => { const error = new Error('send timeout'); error.uncertain = true; throw error; } });
   assert.equal(uncertain, true);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(library.getVerifiedCreditBalance('67890'), 0, 'uncertain send keeps its credit reserved');
+  assert.equal(library.getVerifiedCreditBalance('67890'), 200, 'uncertain send does not rewrite verified cash ledger');
+  assert.equal(library.getPaidSongUnitSummary('67890').reserved, 1, 'uncertain send keeps its unit reserved');
+  assert.equal(deliveryFacts.at(-1).status, 'uncertain', 'uncertain QQ delivery is recorded as needing confirmation');
   let duplicateSend = false;
   await commands.handleSongLibraryCommand({ ...base, text: '新歌试听 另一首精确歌名', coverEnabled: true,
     makePaidPreview: async () => assert.fail('uncertain order must not be automatically retried'),
@@ -138,7 +170,7 @@ test('full-song paid order preserves confirmed segments and resumes without dupl
     sendRecord: async (data) => { const value = data[0]; sent.push(value); if (attempt === 1 && value === 2) throw new Error('OneBot rejected segment'); } };
   assert.equal(await commands.handleSongLibraryCommand(base), true);
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(library.getVerifiedCreditBalance('67890'), 0, 'partial delivery retains its reservation');
+  assert.equal(library.getPaidSongUnitSummary('67890').reserved, 3, 'partial delivery retains its unit reservation');
   const resumeOrder = library.reservePaidSongOrder({ senderId: '67890', chatKey: 'group:34567', query: '整首测试歌', kind: 'full' });
   assert.equal(resumeOrder.resume, true);
   assert.deepEqual(library.listPaidSongSegments(resumeOrder.orderId).map((item) => item.status), ['sent', 'ready', 'ready']);
@@ -151,7 +183,41 @@ test('full-song paid order preserves confirmed segments and resumes without dupl
   assert.deepEqual(sent, [1, 2, 2, 3], 'resume skips the confirmed first segment');
   assert.equal(producerOptions[1].resume.title, '整首测试歌');
   assert.deepEqual(producerOptions[1].resume.segments.map((segment) => segment.status), ['sent', 'ready', 'ready']);
-  assert.equal(library.getVerifiedCreditBalance('67890'), 0, 'full order charges exactly once after every segment is confirmed');
+  assert.equal(library.getPaidSongUnitSummary('67890').consumed, 3, 'full order consumes three units after every segment is confirmed');
+});
+
+test('gifted full-song command reserves, resumes, and consumes an entitlement without cash wording', async (t) => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'paid-gift-command-test-'));
+  process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
+  const library = await import('../src/song-library.mjs');
+  const commands = await import(`../src/song-library-commands.mjs?paid-gift-command=${Date.now()}`);
+  t.after(() => { library.closeSongLibraryForTests(); delete process.env.DSH_SONG_LIBRARY_DB; rmSync(temp, { recursive: true, force: true }); });
+  library.grantPaidFullSongEntitlement({ grantId: 'stable-gift-command-grant', senderId: '1060100883', count: 2,
+    sourceNote: '主人陈述此前 5 元红包，金额未核实', reportedAmountCents: 500 });
+  const lines = [];
+  const audio = [Buffer.alloc(1024, 1), Buffer.alloc(1024, 2)];
+  const full = { title: '赠送歌曲', sourceIdentity: 'source-hash', voiceVariant: 'rvc:0', duration: 50,
+    segments: audio.map((data, segmentIndex) => ({ segmentIndex, startSeconds: segmentIndex * 30,
+      seconds: segmentIndex === 0 ? 30 : 20, audio: data, cachePath: `gift-${segmentIndex}.mp3` })) };
+  let sends = 0;
+  let attempt = 1;
+  const base = { text: '唱完整首 赠送歌曲', key: 'group:gift', senderId: '1060100883', isGroup: true, coverEnabled: true,
+    sendText: async (message) => lines.push(message), makePaidFullSong: async () => full,
+    sendRecord: async (buffer) => { sends++; if (attempt === 1 && buffer === audio[1]) throw new Error('OneBot rejected second segment'); } };
+  assert.equal(await commands.handleSongLibraryCommand(base), true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(lines[0], /预留 1 次旧版赠送整首权益/);
+  assert.match(lines.at(-1), /1 次旧版赠送权益预留/);
+  assert.doesNotMatch(lines.at(-1), /3\.00 元/);
+  assert.deepEqual(library.getPaidFullSongEntitlementSummary('1060100883'), { granted: 2, consumed: 0, reserved: 1, available: 1 });
+  attempt = 2;
+  assert.equal(await commands.handleSongLibraryCommand(base), true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(library.getPaidFullSongEntitlementSummary('1060100883'), { granted: 2, consumed: 1, reserved: 0, available: 1 });
+  assert.match(lines.at(-1), /已核销 1 次旧版赠送整首权益/);
+  assert.doesNotMatch(lines.at(-1), /扣 3\.00 元/);
+  assert.equal(sends, 3, 'resume skips the already confirmed segment');
+  assert.equal(library.getVerifiedCreditBalance('1060100883'), 0, 'grant does not appear as verified cash');
 });
 
 test('OneBot delivery confirmation requires a successful HTTP and OneBot response', async () => {

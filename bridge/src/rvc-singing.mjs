@@ -18,9 +18,9 @@ const FFMPEG = path.join(RVC_ROOT, 'ffmpeg', 'bin', 'ffmpeg.exe');
 const DEMUCS_MODEL = 'htdemucs';
 const MAX_AUDIO_BYTES = 24 * 1024 * 1024;
 // Bump this whenever the post-RVC sound changes, so saved songs don't mask the improvement.
-export const LIUYING_SINGING_VOCAL_PROFILE = 'clear-v2';
+export const LIUYING_SINGING_VOCAL_PROFILE = 'clear-v4';
 export const LIUYING_SINGING_VOCAL_VARIANT = pitch => `rvc:${pitch}:${LIUYING_SINGING_VOCAL_PROFILE}`;
-const SINGING_MIX_FILTER = '[0:a]highpass=f=90,lowpass=f=14000,equalizer=f=300:t=q:w=1:g=-1.5,equalizer=f=3200:t=q:w=1:g=2.5,volume=1.2[v];[1:a]volume=0.38[i];[v][i]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.9[out]';
+const SINGING_MIX_FILTER = '[0:a]highpass=f=90,lowpass=f=14000,equalizer=f=300:t=q:w=1:g=-1.5,equalizer=f=3200:t=q:w=1:g=1,volume=1.0[v];[1:a]volume=0.38[i];[v][i]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.9[out]';
 const PYTHON_HOME_FILE = path.join(RVC_ROOT, 'python-home.txt');
 const WORK_ROOT = path.join(RVC_ROOT, 'work');
 
@@ -34,7 +34,7 @@ function pythonExecutable() {
   return runtime && existsSync(runtime) ? runtime : VENV_PYTHON;
 }
 
-async function run(file, args, timeout = 900_000) {
+async function run(file, args, timeout = 900_000, stage = 'command') {
   try {
     const pythonHome = pythonRuntimePath();
     const { stdout, stderr } = await exec(file, args, {
@@ -46,8 +46,11 @@ async function run(file, args, timeout = 900_000) {
     });
     return `${stdout || ''}${stderr || ''}`;
   } catch (error) {
-    const detail = String(error?.stderr || error?.stdout || '').trim().split(/\r?\n/).slice(-4).join(' | ');
-    throw new Error(`流萤音色处理失败：${detail || error?.message || error}`);
+    const rawDetail = String(error?.stderr || error?.stdout || error?.message || error).trim();
+    const detail = rawDetail.split(/\r?\n/).slice(-100).join('\n').slice(-24_000);
+    console.error(`[rvc] subprocess failed stage=${stage} executable=${path.basename(file)} exit=${error?.code ?? 'unknown'} signal=${error?.signal ?? 'none'} timeout=${Boolean(error?.killed)}\n${detail}`);
+    const summary = detail.split(/\r?\n/).filter(Boolean).slice(-3).join(' | ');
+    throw new Error(`流萤音色处理失败 [${stage}]：${summary || error?.message || error}`);
   }
 }
 
@@ -62,7 +65,7 @@ export async function rvcSingingStatus() {
   if (missing.length) return { ready: false, missing };
   try {
     const probe = `import os,sys; os.chdir(${JSON.stringify(SING_DIR)}); sys.path.insert(0,${JSON.stringify(RVC_CODE)}); from demucs.api import Separator; from rvc_cli.rvc.infer.infer import VoiceConverter`;
-    await run(pythonExecutable(), ['-c', probe], 60_000);
+    await run(pythonExecutable(), ['-c', probe], 60_000, 'runtime-probe');
     return { ready: true, root: RVC_ROOT };
   } catch (error) {
     return { ready: false, missing: [String(error.message).slice(0, 180)] };
@@ -75,7 +78,7 @@ export function hasAudibleVocals(vocalDb, accompanimentDb) {
 }
 
 async function meanVolumeDb(file) {
-  const output = await run(FFMPEG, ['-hide_banner', '-nostats', '-i', file, '-af', 'volumedetect', '-f', 'null', '-'], 120_000);
+  const output = await run(FFMPEG, ['-hide_banner', '-nostats', '-i', file, '-af', 'volumedetect', '-f', 'null', '-'], 120_000, 'measure-stem-volume');
   const value = /mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB/i.exec(output)?.[1];
   return value == null ? -Infinity : Number(value);
 }
@@ -88,6 +91,7 @@ export async function applyLiuyingVoice(audio, { pitch = 0 } = {}) {
   if (!status.ready) throw new Error(`流萤 RVC 环境尚未就绪：${status.missing.join('、')}`);
   await mkdir(WORK_ROOT, { recursive: true });
   const work = await mkdtemp(path.join(WORK_ROOT, 'singing-rvc-'));
+  let stage = 'prepare-input';
   try {
     const source = path.join(work, 'song.mp3');
     const normalized = path.join(work, 'song.wav');
@@ -98,20 +102,29 @@ export async function applyLiuyingVoice(audio, { pitch = 0 } = {}) {
     const output = path.join(work, 'song-liuying.mp3');
     await writeFile(source, input, { flag: 'wx' });
     const python = pythonExecutable();
-    await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', source, '-ar', '44100', '-ac', '2', normalized], 180_000);
-    await run(python, ['-m', 'demucs', '-n', DEMUCS_MODEL, '--two-stems=vocals', '-d', 'cpu', '-o', demucsOut, normalized], 1_800_000);
+    stage = 'normalize-input';
+    await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', source, '-ar', '44100', '-ac', '2', normalized], 180_000, stage);
+    stage = 'demucs-separation';
+    console.info(`[rvc] stage started stage=${stage} model=${DEMUCS_MODEL} device=cpu inputBytes=${input.length}`);
+    await run(python, ['-m', 'demucs', '-n', DEMUCS_MODEL, '--two-stems=vocals', '-d', 'cpu', '-o', demucsOut, normalized], 1_800_000, stage);
     const [vocalDb, accompanimentDb] = await Promise.all([meanVolumeDb(vocals), meanVolumeDb(accompaniment)]);
     console.log(`[song-cover] stem levels vocals=${vocalDb.toFixed(1)}dB accompaniment=${accompanimentDb.toFixed(1)}dB`);
     if (!hasAudibleVocals(vocalDb, accompanimentDb)) {
       throw new Error('这一段几乎没有清晰人声，已停止转换；请换有人声的歌曲版本或指定其他候选');
     }
-    await run(python, [COVER, vocals, converted, String(pitch), 'rmvpe'], 1_800_000);
+    stage = 'rvc-voice-conversion';
+    console.info(`[rvc] stage started stage=${stage} pitch=${pitch}`);
+    await run(python, [COVER, vocals, converted, String(pitch), 'rmvpe'], 1_800_000, stage);
+    stage = 'mix-vocals-and-accompaniment';
     await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', converted, '-i', accompaniment,
       '-filter_complex', SINGING_MIX_FILTER,
-      '-map', '[out]', '-ar', '44100', '-ac', '2', '-b:a', '192k', output], 180_000);
+      '-map', '[out]', '-ar', '48000', '-ac', '2', '-b:a', '192k', output], 180_000, stage);
     const result = await readFile(output);
     if (result.length < 1024) throw new Error('转换结果为空');
     return result;
+  } catch (error) {
+    console.error(`[rvc] singing conversion failed stage=${stage} inputBytes=${input.length} pitch=${pitch}:`, error?.stack ?? error?.message ?? error);
+    throw error;
   } finally {
     await rm(work, { recursive: true, force: true });
   }
@@ -125,16 +138,22 @@ export async function applyLiuyingSpeech(audio, { pitch = 0 } = {}) {
   if (!status.ready) throw new Error(`流萤 RVC 环境尚未就绪：${status.missing.join('、')}`);
   await mkdir(WORK_ROOT, { recursive: true });
   const work = await mkdtemp(path.join(WORK_ROOT, 'speech-rvc-'));
+  let stage = 'prepare-input';
   try {
     const source = path.join(work, 'speech-input.audio');
     const normalized = path.join(work, 'speech-input.wav');
     const converted = path.join(work, 'speech-liuying.wav');
     await writeFile(source, input, { flag: 'wx' });
-    await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', source, '-ar', '44100', '-ac', '1', normalized], 120_000);
-    await run(pythonExecutable(), [COVER, normalized, converted, String(pitch), 'rmvpe'], 600_000);
+    stage = 'normalize-input';
+    await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', source, '-ar', '44100', '-ac', '1', normalized], 120_000, stage);
+    stage = 'rvc-speech-conversion';
+    await run(pythonExecutable(), [COVER, normalized, converted, String(pitch), 'rmvpe'], 600_000, stage);
     const result = await readFile(converted);
     if (result.length < 1024) throw new Error('转换结果为空');
     return result;
+  } catch (error) {
+    console.error(`[rvc] speech conversion failed stage=${stage} inputBytes=${input.length} pitch=${pitch}:`, error?.stack ?? error?.message ?? error);
+    throw error;
   } finally {
     await rm(work, { recursive: true, force: true });
   }

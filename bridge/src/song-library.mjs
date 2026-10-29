@@ -33,7 +33,11 @@ function db() {
     );
     CREATE TABLE IF NOT EXISTS preview_requests (
       request_id TEXT PRIMARY KEY, chat_key TEXT NOT NULL, sender_id TEXT NOT NULL,
-      song_id TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL
+      song_id TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL,
+      quota_exempt INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS song_command_claims (
+      claim_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS preview_requests_created ON preview_requests(created_at, status);
     CREATE INDEX IF NOT EXISTS preview_requests_chat ON preview_requests(chat_key, status);
@@ -54,6 +58,16 @@ function db() {
       order_id TEXT NOT NULL, segment_index INTEGER NOT NULL, start_seconds REAL NOT NULL,
       seconds REAL NOT NULL, cache_path TEXT NOT NULL, status TEXT NOT NULL,
       updated_at INTEGER NOT NULL, PRIMARY KEY(order_id,segment_index)
+    );
+    CREATE TABLE IF NOT EXISTS paid_song_entitlement_grants (
+      grant_id TEXT PRIMARY KEY, sender_id TEXT NOT NULL, full_song_count INTEGER NOT NULL,
+      source_note TEXT NOT NULL, reported_amount_cents INTEGER NOT NULL,
+      revoked_at INTEGER,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS paid_song_unit_grants (
+      grant_id TEXT PRIMARY KEY, sender_id TEXT NOT NULL, unit_count INTEGER NOT NULL,
+      source_note TEXT NOT NULL, reported_amount_cents INTEGER NOT NULL, created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS red_packet_receipts (
       receipt_id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, sender_id TEXT NOT NULL,
@@ -76,6 +90,21 @@ function db() {
   }
   if (!database.prepare('PRAGMA table_info(paid_song_orders)').all().some((column) => column.name === 'process_pid')) {
     database.exec('ALTER TABLE paid_song_orders ADD COLUMN process_pid INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!database.prepare('PRAGMA table_info(preview_requests)').all().some((column) => column.name === 'quota_exempt')) {
+    database.exec('ALTER TABLE preview_requests ADD COLUMN quota_exempt INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!database.prepare('PRAGMA table_info(paid_song_orders)').all().some((column) => column.name === 'credit_source')) {
+    database.exec("ALTER TABLE paid_song_orders ADD COLUMN credit_source TEXT NOT NULL DEFAULT 'cash'");
+  }
+  if (!database.prepare('PRAGMA table_info(paid_song_orders)').all().some((column) => column.name === 'grant_id')) {
+    database.exec("ALTER TABLE paid_song_orders ADD COLUMN grant_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!database.prepare('PRAGMA table_info(paid_song_orders)').all().some((column) => column.name === 'unit_cost')) {
+    database.exec('ALTER TABLE paid_song_orders ADD COLUMN unit_cost INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!database.prepare('PRAGMA table_info(paid_song_entitlement_grants)').all().some((column) => column.name === 'revoked_at')) {
+    database.exec('ALTER TABLE paid_song_entitlement_grants ADD COLUMN revoked_at INTEGER');
   }
   return database;
 }
@@ -189,10 +218,19 @@ export function refreshSongLibrary({ cacheRoot = CACHE_ROOT, archiveRoot = proce
 export function listSongs({ offset = 0, limit = 20 } = {}) {
   const safeOffset = Math.max(0, Math.trunc(offset));
   const safeLimit = Math.max(1, Math.min(50, Math.trunc(limit)));
-  const rows = db().prepare(`SELECT song_id,title,mode,voice_variant,duration,created_at
-    FROM songs WHERE status='ready' ORDER BY created_at DESC,song_id LIMIT ? OFFSET ?`).all(safeLimit, safeOffset);
-  const count = db().prepare("SELECT COUNT(*) AS count FROM songs WHERE status='ready'").get().count;
-  return { songs: rows, total: count, offset: safeOffset, limit: safeLimit };
+  const rows = db().prepare(`SELECT song_id,title,query,mode,voice_variant,duration,created_at
+    FROM songs WHERE status='ready' ORDER BY created_at DESC,song_id`).all();
+  const normalizeQuery = value => String(value ?? '').normalize('NFKC').toLowerCase().replace(/[\s\p{P}]/gu, '');
+  const groups = new Map();
+  for (const row of rows) {
+    const displayQuery = String(row.query ?? '').trim() || row.title;
+    const key = normalizeQuery(displayQuery) || row.song_id;
+    const group = groups.get(key) ?? [];
+    group.push({ ...row, query: displayQuery });
+    groups.set(key, group);
+  }
+  const songs = [...groups.values()].map(group => ({ ...group[0], variantCount: group.length }));
+  return { songs: songs.slice(safeOffset, safeOffset + safeLimit), total: songs.length, offset: safeOffset, limit: safeLimit };
 }
 
 export function getSong(songId) {
@@ -210,7 +248,19 @@ export function getVerifiedSongPreview(songId) {
   return { ...song, audio };
 }
 
-export function reserveFreePreview({ chatKey, senderId, songId, now = Date.now() }) {
+export function claimSongCommandEvent({ chatKey, senderId, messageId, now = Date.now() }) {
+  const message = String(messageId ?? '').trim();
+  if (!message) return true;
+  const chat = String(chatKey ?? '').trim()
+    .replace(/^g(\d+)$/, 'group:$1').replace(/^p(\d+)$/, 'private:$1');
+  const sender = String(senderId ?? '').trim();
+  if (!chat || !sender) return false;
+  const claimId = createHash('sha256').update(`${chat}\0${sender}\0${message}`).digest('hex');
+  return db().prepare('INSERT OR IGNORE INTO song_command_claims(claim_id,created_at) VALUES(?,?)')
+    .run(claimId, now).changes === 1;
+}
+
+export function reserveFreePreview({ chatKey, senderId, songId, exemptFromQuota = false, now = Date.now() }) {
   const database = db();
   const song = database.prepare("SELECT song_id FROM songs WHERE song_id=? AND status='ready'").get(String(songId).toLowerCase());
   if (!song) return { ok: false, reason: 'missing-song' };
@@ -221,13 +271,15 @@ export function reserveFreePreview({ chatKey, senderId, songId, now = Date.now()
     const local = new Date(now + 8 * 60 * 60 * 1000);
     local.setUTCHours(0, 0, 0, 0);
     const dayStart = local.getTime() - 8 * 60 * 60 * 1000;
-    const daily = database.prepare("SELECT COUNT(*) AS n FROM preview_requests WHERE created_at>=? AND created_at<=? AND status IN ('reserved','sent','uncertain')").get(dayStart, now).n;
-    if (daily >= 30) { database.exec('COMMIT'); return { ok: false, reason: 'daily-limit' }; }
-    const rolling = database.prepare("SELECT COUNT(*) AS n FROM preview_requests WHERE created_at>? AND created_at<=? AND status IN ('reserved','sent','uncertain')").get(now - 10 * 60_000, now).n;
-    if (rolling >= 3) { database.exec('COMMIT'); return { ok: false, reason: 'rolling-limit' }; }
+    if (!exemptFromQuota) {
+      const daily = database.prepare("SELECT COUNT(*) AS n FROM preview_requests WHERE quota_exempt=0 AND created_at>=? AND created_at<=? AND status IN ('reserved','sent','uncertain')").get(dayStart, now).n;
+      if (daily >= 30) { database.exec('COMMIT'); return { ok: false, reason: 'daily-limit' }; }
+      const rolling = database.prepare("SELECT COUNT(*) AS n FROM preview_requests WHERE quota_exempt=0 AND created_at>? AND created_at<=? AND status IN ('reserved','sent','uncertain')").get(now - 10 * 60_000, now).n;
+      if (rolling >= 3) { database.exec('COMMIT'); return { ok: false, reason: 'rolling-limit' }; }
+    }
     const requestId = createHash('sha256').update(`${chatKey}\0${senderId}\0${song.song_id}\0${now}\0${Math.random()}`).digest('hex');
-    database.prepare('INSERT INTO preview_requests(request_id,chat_key,sender_id,song_id,created_at,status) VALUES(?,?,?,?,?,?)')
-      .run(requestId, String(chatKey), String(senderId), song.song_id, now, 'reserved');
+    database.prepare('INSERT INTO preview_requests(request_id,chat_key,sender_id,song_id,created_at,status,quota_exempt) VALUES(?,?,?,?,?,?,?)')
+      .run(requestId, String(chatKey), String(senderId), song.song_id, now, 'reserved', exemptFromQuota ? 1 : 0);
     database.exec('COMMIT');
     return { ok: true, requestId };
   } catch (error) {
@@ -239,6 +291,13 @@ export function reserveFreePreview({ chatKey, senderId, songId, now = Date.now()
 export function settleFreePreview(requestId, status) {
   if (!['sent', 'failed', 'uncertain'].includes(status)) throw new Error('invalid preview state');
   return db().prepare("UPDATE preview_requests SET status=? WHERE request_id=? AND status='reserved'").run(status, requestId).changes === 1;
+}
+
+export function markFreeQuotaExemptSenders(senderIds = []) {
+  const ids = [...new Set(senderIds.map((id) => String(id ?? '').trim()).filter(Boolean))];
+  if (!ids.length) return 0;
+  const placeholders = ids.map(() => '?').join(',');
+  return db().prepare(`UPDATE preview_requests SET quota_exempt=1 WHERE sender_id IN (${placeholders}) AND quota_exempt=0`).run(...ids).changes;
 }
 
 export function reconcilePreviewReservations({ now = Date.now(), staleAfterMs = 120_000 } = {}) {
@@ -263,9 +322,109 @@ export function getFreeQuota({ now = Date.now() } = {}) {
   local.setUTCHours(0, 0, 0, 0);
   const dayStart = local.getTime() - 8 * 60 * 60 * 1000;
   const statuses = "('reserved','sent','uncertain')";
-  const daily = database.prepare(`SELECT COUNT(*) AS n FROM preview_requests WHERE created_at>=? AND created_at<=? AND status IN ${statuses}`).get(dayStart, now).n;
-  const rolling = database.prepare(`SELECT COUNT(*) AS n FROM preview_requests WHERE created_at>? AND created_at<=? AND status IN ${statuses}`).get(now - 10 * 60_000, now).n;
+  const daily = database.prepare(`SELECT COUNT(*) AS n FROM preview_requests WHERE quota_exempt=0 AND created_at>=? AND created_at<=? AND status IN ${statuses}`).get(dayStart, now).n;
+  const rolling = database.prepare(`SELECT COUNT(*) AS n FROM preview_requests WHERE quota_exempt=0 AND created_at>? AND created_at<=? AND status IN ${statuses}`).get(now - 10 * 60_000, now).n;
   return { dailyUsed: daily, dailyLimit: 30, rollingUsed: rolling, rollingLimit: 3 };
+}
+
+export function grantPaidFullSongEntitlement({ grantId, senderId, count, sourceNote, reportedAmountCents, now = Date.now() }) {
+  const id = String(grantId ?? '').trim();
+  const sender = String(senderId ?? '').trim();
+  const note = String(sourceNote ?? '').trim();
+  const amount = Number(reportedAmountCents);
+  if (!id || id.length > 160 || !sender || !Number.isInteger(count) || count < 1 || count > 100
+    || !note || note.length > 500 || !Number.isInteger(amount) || amount < 0) return { ok: false, reason: 'invalid-input' };
+  const database = db();
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const existing = database.prepare('SELECT * FROM paid_song_entitlement_grants WHERE grant_id=?').get(id);
+    if (existing) {
+      const same = existing.sender_id === sender && Number(existing.full_song_count) === count
+        && existing.source_note === note && Number(existing.reported_amount_cents) === amount;
+      database.exec('COMMIT');
+      return same ? { ok: true, duplicate: true, grantId: id } : { ok: false, reason: 'grant-id-conflict' };
+    }
+    database.prepare(`INSERT INTO paid_song_entitlement_grants
+      (grant_id,sender_id,full_song_count,source_note,reported_amount_cents,created_at) VALUES(?,?,?,?,?,?)`)
+      .run(id, sender, count, note, amount, now);
+    database.exec('COMMIT');
+    return { ok: true, duplicate: false, grantId: id };
+  } catch (error) { database.exec('ROLLBACK'); throw error; }
+}
+
+export function getPaidFullSongEntitlementSummary(senderId) {
+  const database = db();
+  const granted = Number(database.prepare('SELECT COALESCE(SUM(full_song_count),0) AS n FROM paid_song_entitlement_grants WHERE sender_id=? AND revoked_at IS NULL')
+    .get(String(senderId)).n);
+  const consumed = Number(database.prepare("SELECT COUNT(*) AS n FROM paid_song_orders WHERE sender_id=? AND kind='full' AND credit_source='grant' AND status='completed'")
+    .get(String(senderId)).n);
+  const reserved = Number(database.prepare("SELECT COUNT(*) AS n FROM paid_song_orders WHERE sender_id=? AND kind='full' AND credit_source='grant' AND status IN ('reserved','processing','partial','uncertain')")
+    .get(String(senderId)).n);
+  return { granted, consumed, reserved, available: Math.max(0, granted - consumed - reserved) };
+}
+
+export function grantPaidSongUnits({ grantId, senderId, unitCount, sourceNote, reportedAmountCents = 0, now = Date.now() }) {
+  const id = String(grantId ?? '').trim(), sender = String(senderId ?? '').trim(), count = Number(unitCount);
+  const note = String(sourceNote ?? '').trim(), amount = Number(reportedAmountCents);
+  if (!id || !sender || !Number.isSafeInteger(count) || count <= 0 || !note || !Number.isSafeInteger(amount) || amount < 0)
+    return { ok: false, reason: 'invalid-grant' };
+  const database = db(); database.exec('BEGIN IMMEDIATE');
+  try {
+    const existing = database.prepare('SELECT * FROM paid_song_unit_grants WHERE grant_id=?').get(id);
+    if (existing) {
+      const same = existing.sender_id === sender && Number(existing.unit_count) === count && existing.source_note === note && Number(existing.reported_amount_cents) === amount;
+      database.exec('COMMIT'); return same ? { ok: true, duplicate: true, grantId: id } : { ok: false, reason: 'grant-id-conflict' };
+    }
+    database.prepare('INSERT INTO paid_song_unit_grants(grant_id,sender_id,unit_count,source_note,reported_amount_cents,created_at) VALUES(?,?,?,?,?,?)')
+      .run(id, sender, count, note, amount, now);
+    database.exec('COMMIT'); return { ok: true, duplicate: false, grantId: id };
+  } catch (error) { database.exec('ROLLBACK'); throw error; }
+}
+
+export function replacePaidFullSongGrantWithUnits({ oldGrantId, grantId, senderId, unitCount, sourceNote, reportedAmountCents = 0, now = Date.now() }) {
+  const oldId = String(oldGrantId ?? '').trim(), id = String(grantId ?? '').trim(), sender = String(senderId ?? '').trim();
+  const count = Number(unitCount), note = String(sourceNote ?? '').trim(), amount = Number(reportedAmountCents);
+  if (!oldId || !id || !sender || !Number.isSafeInteger(count) || count <= 0 || !note || !Number.isSafeInteger(amount) || amount < 0)
+    return { ok: false, reason: 'invalid-grant' };
+  const database = db(); database.exec('BEGIN IMMEDIATE');
+  try {
+    const old = database.prepare('SELECT * FROM paid_song_entitlement_grants WHERE grant_id=?').get(oldId);
+    const existing = database.prepare('SELECT * FROM paid_song_unit_grants WHERE grant_id=?').get(id);
+    if (existing) {
+      const same = existing.sender_id === sender && Number(existing.unit_count) === count && existing.source_note === note && Number(existing.reported_amount_cents) === amount;
+      const revoked = old?.sender_id === sender && old.revoked_at != null;
+      database.exec('COMMIT'); return same && revoked ? { ok: true, duplicate: true, grantId: id } : { ok: false, reason: 'grant-id-conflict' };
+    }
+    if (!old || old.sender_id !== sender || old.revoked_at != null) { database.exec('COMMIT'); return { ok: false, reason: 'old-grant-not-active' }; }
+    const usage = Number(database.prepare(`SELECT COUNT(*) AS n FROM paid_song_orders WHERE grant_id=? AND credit_source='grant'
+      AND status IN ('reserved','processing','partial','uncertain','completed')`).get(oldId).n);
+    if (usage) { database.exec('COMMIT'); return { ok: false, reason: 'old-grant-used-or-reserved' }; }
+    database.prepare('UPDATE paid_song_entitlement_grants SET revoked_at=? WHERE grant_id=? AND revoked_at IS NULL').run(now, oldId);
+    database.prepare('INSERT INTO paid_song_unit_grants(grant_id,sender_id,unit_count,source_note,reported_amount_cents,created_at) VALUES(?,?,?,?,?,?)')
+      .run(id, sender, count, note, amount, now);
+    database.exec('COMMIT'); return { ok: true, duplicate: false, grantId: id };
+  } catch (error) { database.exec('ROLLBACK'); throw error; }
+}
+
+function paidUnitSummary(database, senderId) {
+  const legacyCashReserved = Number(database.prepare(`SELECT COALESCE(SUM(price_cents),0) AS n FROM paid_song_orders
+    WHERE sender_id=? AND credit_source='cash' AND unit_cost=0 AND status IN ('reserved','processing','partial','uncertain')`)
+    .get(String(senderId)).n);
+  const verifiedCents = Number(database.prepare("SELECT COALESCE(SUM(amount_cents),0) AS n FROM credit_ledger WHERE sender_id=? AND status='verified'")
+    .get(String(senderId)).n);
+  const cashUnits = Math.floor(Math.max(0, verifiedCents - legacyCashReserved) * 3 / 100);
+  const grantedUnits = Number(database.prepare('SELECT COALESCE(SUM(unit_count),0) AS n FROM paid_song_unit_grants WHERE sender_id=?')
+    .get(String(senderId)).n);
+  const consumed = Number(database.prepare("SELECT COALESCE(SUM(unit_cost),0) AS n FROM paid_song_orders WHERE sender_id=? AND credit_source='units' AND status='completed'")
+    .get(String(senderId)).n);
+  const reserved = Number(database.prepare("SELECT COALESCE(SUM(unit_cost),0) AS n FROM paid_song_orders WHERE sender_id=? AND credit_source='units' AND status IN ('reserved','processing','partial','uncertain')")
+    .get(String(senderId)).n);
+  const total = cashUnits + grantedUnits;
+  return { cashUnits, grantedUnits, total, consumed, reserved, available: Math.max(0, total - consumed - reserved) };
+}
+
+export function getPaidSongUnitSummary(senderId) {
+  return paidUnitSummary(db(), senderId);
 }
 
 export function getVerifiedCreditBalance(senderId) {
@@ -277,34 +436,50 @@ export function getVerifiedCreditBalance(senderId) {
   return Number(row?.amount_cents ?? 0) - Number(reserved?.amount_cents ?? 0);
 }
 
-export function reservePaidSongOrder({ senderId, chatKey, query, kind, now = Date.now(), processPid = PROCESS_PID }) {
-  const price = kind === 'preview' ? 100 : kind === 'full' ? 300 : 0;
-  if (!price || !String(query ?? '').trim()) return { ok: false, reason: 'invalid-input' };
+export function reservePaidSongOrder({ senderId, chatKey, query, kind, free = false, now = Date.now(), processPid = PROCESS_PID }) {
+  const unitCost = free && kind === 'full' ? 0 : kind === 'preview' ? 1 : kind === 'full' ? 3 : 0;
+  if ((!unitCost && !free) || (free && kind !== 'full') || !String(query ?? '').trim()) return { ok: false, reason: 'invalid-input' };
   const database = db();
   recoverAbandonedPaidSongOrders({ now, isProcessAlive: defaultProcessAlive });
   database.exec('BEGIN IMMEDIATE');
   try {
-    const resumable = database.prepare(`SELECT order_id,status,price_cents FROM paid_song_orders
-      WHERE sender_id=? AND chat_key=? AND query=? AND kind=? AND status='partial' ORDER BY created_at DESC LIMIT 1`)
+    const resumableCreditFilter = free ? "credit_source='promo'" : "credit_source<>'promo'";
+    const resumable = database.prepare(`SELECT order_id,status,price_cents,credit_source,grant_id,unit_cost FROM paid_song_orders
+      WHERE sender_id=? AND chat_key=? AND query=? AND kind=? AND status='partial' AND ${resumableCreditFilter} ORDER BY created_at DESC LIMIT 1`)
       .get(String(senderId), String(chatKey), String(query).trim(), kind);
     if (resumable) {
       const claimed = database.prepare("UPDATE paid_song_orders SET status='processing',updated_at=?,process_pid=? WHERE order_id=? AND status='partial'")
         .run(now, Number(processPid), resumable.order_id);
       if (claimed.changes === 1) {
         database.exec('COMMIT');
-        return { ok: true, orderId: resumable.order_id, priceCents: resumable.price_cents, resume: true };
+        return { ok: true, orderId: resumable.order_id, priceCents: resumable.price_cents,
+          creditSource: resumable.credit_source, grantId: resumable.grant_id, unitCost: resumable.unit_cost, resume: true };
       }
     }
     const busy = database.prepare("SELECT order_id FROM paid_song_orders WHERE chat_key=? AND status IN ('reserved','processing','partial','uncertain')").get(String(chatKey));
     if (busy) { database.exec('COMMIT'); return { ok: false, reason: 'conversation-busy' }; }
-    const outstanding = Number(database.prepare("SELECT COALESCE(SUM(price_cents),0) AS amount FROM paid_song_orders WHERE sender_id=? AND status IN ('reserved','processing','partial','uncertain')").get(String(senderId)).amount);
-    const credited = Number(database.prepare("SELECT COALESCE(SUM(amount_cents),0) AS amount FROM credit_ledger WHERE sender_id=? AND status='verified'").get(String(senderId)).amount);
-    if (credited - outstanding < price) { database.exec('COMMIT'); return { ok: false, reason: 'insufficient-credit' }; }
+    if (kind === 'full' && !free) {
+      const grant = database.prepare(`SELECT g.grant_id FROM paid_song_entitlement_grants g WHERE g.sender_id=? AND g.revoked_at IS NULL
+        AND g.full_song_count > (SELECT COUNT(*) FROM paid_song_orders o WHERE o.grant_id=g.grant_id AND o.credit_source='grant'
+          AND o.status IN ('reserved','processing','partial','uncertain','completed')) ORDER BY g.created_at LIMIT 1`).get(String(senderId));
+      if (grant) {
+        const orderId = createHash('sha256').update(`${senderId}\0${chatKey}\0${query}\0${now}\0${Math.random()}`).digest('hex');
+        database.prepare(`INSERT INTO paid_song_orders(order_id,sender_id,chat_key,query,kind,price_cents,status,created_at,updated_at,process_pid,credit_source,grant_id,unit_cost)
+          VALUES(?,?,?,?,?,0,'reserved',?,?,?,?,?,0)`).run(orderId, String(senderId), String(chatKey), String(query).trim(), kind, now, now, Number(processPid), 'grant', grant.grant_id);
+        database.exec('COMMIT');
+        return { ok: true, orderId, priceCents: 0, creditSource: 'grant', grantId: grant.grant_id, unitCost: 0 };
+      }
+    }
+    const availableUnits = free ? Number.POSITIVE_INFINITY : paidUnitSummary(database, String(senderId)).available;
+    if (availableUnits < unitCost) { database.exec('COMMIT'); return { ok: false, reason: 'insufficient-credit' }; }
+    const creditSource = free ? 'promo' : 'units';
+    const grantId = '';
+    const reservedPrice = 0;
     const orderId = createHash('sha256').update(`${senderId}\0${chatKey}\0${query}\0${now}\0${Math.random()}`).digest('hex');
-    database.prepare(`INSERT INTO paid_song_orders(order_id,sender_id,chat_key,query,kind,price_cents,status,created_at,updated_at,process_pid)
-      VALUES(?,?,?,?,?,?,'reserved',?,?,?)`).run(orderId, String(senderId), String(chatKey), String(query).trim(), kind, price, now, now, Number(processPid));
+    database.prepare(`INSERT INTO paid_song_orders(order_id,sender_id,chat_key,query,kind,price_cents,status,created_at,updated_at,process_pid,credit_source,grant_id,unit_cost)
+      VALUES(?,?,?,?,?,?,'reserved',?,?,?,?,?,?)`).run(orderId, String(senderId), String(chatKey), String(query).trim(), kind, reservedPrice, now, now, Number(processPid), creditSource, grantId, unitCost);
     database.exec('COMMIT');
-    return { ok: true, orderId, priceCents: price };
+    return { ok: true, orderId, priceCents: reservedPrice, creditSource, grantId, unitCost };
   } catch (error) { database.exec('ROLLBACK'); throw error; }
 }
 
@@ -315,7 +490,7 @@ export function listPaidSongSegments(orderId) {
 
 export function getPaidSongOrder(orderId) {
   return db().prepare(`SELECT order_id,sender_id,chat_key,query,kind,price_cents,status,source_identity,title,voice_variant,
-    segment_count,confirmed_segments,output_path FROM paid_song_orders WHERE order_id=?`).get(String(orderId)) ?? null;
+    segment_count,confirmed_segments,output_path,credit_source,grant_id,unit_cost,process_pid FROM paid_song_orders WHERE order_id=?`).get(String(orderId)) ?? null;
 }
 
 export function savePaidSongSegments(orderId, { sourceIdentity, title, voiceVariant = '', segments, now = Date.now() }) {
@@ -372,9 +547,20 @@ export function updatePaidSongOrder(orderId, { status, confirmedSegments, segmen
           || !order.source_identity || !order.title || !order.output_path || !segment
           || segment.status !== 'sent' || !segment.cache_path) { database.exec('COMMIT'); return false; }
       }
-      database.prepare(`INSERT INTO credit_ledger(entry_id,sender_id,amount_cents,kind,receipt_id,created_at,status)
-        VALUES(?,?,?,'paid_song',?,?,'verified')`).run(createHash('sha256').update(`paid_song\0${orderId}`).digest('hex'),
-          order.sender_id, -Number(order.price_cents), String(orderId), now);
+      if (order.credit_source === 'units') {
+        const expected = order.kind === 'preview' ? 1 : order.kind === 'full' ? 3 : 0;
+        if (Number(order.unit_cost) !== expected || Number(order.price_cents) !== 0) { database.exec('COMMIT'); return false; }
+      } else if (order.credit_source === 'promo') {
+        if (order.kind !== 'full' || Number(order.unit_cost) !== 0 || Number(order.price_cents) !== 0) { database.exec('COMMIT'); return false; }
+      } else if (order.credit_source === 'grant') {
+        if (Number(order.unit_cost) !== 0) { database.exec('COMMIT'); return false; }
+        const grant = database.prepare('SELECT sender_id,full_song_count FROM paid_song_entitlement_grants WHERE grant_id=?').get(order.grant_id);
+        if (order.kind !== 'full' || Number(order.price_cents) !== 0 || !grant || grant.sender_id !== order.sender_id) { database.exec('COMMIT'); return false; }
+      } else if (order.credit_source === 'cash' && Number(order.unit_cost) === 0 && Number(order.price_cents) > 0) {
+        database.prepare(`INSERT INTO credit_ledger(entry_id,sender_id,amount_cents,kind,receipt_id,created_at,status)
+          VALUES(?,?,?,'paid_song',?,?,'verified')`).run(createHash('sha256').update(`paid_song\0${orderId}`).digest('hex'),
+            order.sender_id, -Number(order.price_cents), String(orderId), now);
+      } else { database.exec('COMMIT'); return false; }
       database.prepare("UPDATE paid_song_orders SET status='completed',confirmed_segments=?,segment_count=?,source_identity=?,title=?,output_path=?,updated_at=? WHERE order_id=?")
         .run(Number(confirmedSegments ?? order.confirmed_segments), Number(segmentCount ?? order.segment_count),
           String(sourceIdentity ?? order.source_identity), String(title ?? order.title), String(outputPath ?? order.output_path), now, String(orderId));
@@ -412,9 +598,14 @@ function recoverAbandonedPaidSongOrders({ now, isProcessAlive }) {
       const recorded = Number(database.prepare('SELECT COUNT(*) AS n FROM paid_song_segments WHERE order_id=?').get(order.order_id).n);
       if (order.kind === 'preview' && sent === 1 && uncertain === 0 && recorded === 1
         && order.source_identity && order.title && order.output_path && Number(order.segment_count) === 1) {
-        database.prepare(`INSERT OR IGNORE INTO credit_ledger(entry_id,sender_id,amount_cents,kind,receipt_id,created_at,status)
-          VALUES(?,?,?,'paid_song',?,?,'verified')`).run(createHash('sha256').update(`paid_song\0${order.order_id}`).digest('hex'),
-            order.sender_id, -Number(order.price_cents), order.order_id, now);
+        if (order.credit_source === 'cash' && Number(order.unit_cost) === 0 && Number(order.price_cents) > 0) {
+          database.prepare(`INSERT OR IGNORE INTO credit_ledger(entry_id,sender_id,amount_cents,kind,receipt_id,created_at,status)
+            VALUES(?,?,?,'paid_song',?,?,'verified')`).run(createHash('sha256').update(`paid_song\0${order.order_id}`).digest('hex'),
+              order.sender_id, -Number(order.price_cents), order.order_id, now);
+        } else if (order.credit_source !== 'units' || Number(order.unit_cost) !== 1 || Number(order.price_cents) !== 0) {
+          database.prepare('UPDATE paid_song_orders SET status=\'uncertain\',updated_at=? WHERE order_id=?').run(now, order.order_id);
+          database.exec('COMMIT'); recovered++; continue;
+        }
         database.prepare("UPDATE paid_song_orders SET status='completed',confirmed_segments=1,segment_count=1,updated_at=? WHERE order_id=?")
           .run(now, order.order_id);
       } else {
@@ -464,9 +655,20 @@ export function resolvePaidSongOrder(orderId, outcome, { segmentIndex = null, no
       const sent = Number(database.prepare("SELECT COUNT(*) AS n FROM paid_song_segments WHERE order_id=? AND status='sent'").get(String(orderId)).n);
       const uncertain = Number(database.prepare("SELECT COUNT(*) AS n FROM paid_song_segments WHERE order_id=? AND status='uncertain'").get(String(orderId)).n);
       if (sent === Number(order.segment_count)) {
-        database.prepare(`INSERT INTO credit_ledger(entry_id,sender_id,amount_cents,kind,receipt_id,created_at,status)
-          VALUES(?,?,?,'paid_song',?,?,'verified')`).run(createHash('sha256').update(`paid_song\0${orderId}`).digest('hex'),
-            order.sender_id, -Number(order.price_cents), String(orderId), now);
+        if (order.credit_source === 'units') {
+          const expected = order.kind === 'preview' ? 1 : order.kind === 'full' ? 3 : 0;
+          if (Number(order.unit_cost) !== expected || Number(order.price_cents) !== 0) { database.exec('COMMIT'); return false; }
+        } else if (order.credit_source === 'promo') {
+          if (order.kind !== 'full' || Number(order.unit_cost) !== 0 || Number(order.price_cents) !== 0) { database.exec('COMMIT'); return false; }
+        } else if (order.credit_source === 'grant') {
+          if (Number(order.unit_cost) !== 0) { database.exec('COMMIT'); return false; }
+          const grant = database.prepare('SELECT sender_id FROM paid_song_entitlement_grants WHERE grant_id=?').get(order.grant_id);
+          if (Number(order.price_cents) !== 0 || !grant || grant.sender_id !== order.sender_id) { database.exec('COMMIT'); return false; }
+        } else if (order.credit_source === 'cash' && Number(order.unit_cost) === 0 && Number(order.price_cents) > 0) {
+          database.prepare(`INSERT INTO credit_ledger(entry_id,sender_id,amount_cents,kind,receipt_id,created_at,status)
+            VALUES(?,?,?,'paid_song',?,?,'verified')`).run(createHash('sha256').update(`paid_song\0${orderId}`).digest('hex'),
+              order.sender_id, -Number(order.price_cents), String(orderId), now);
+        } else { database.exec('COMMIT'); return false; }
         database.prepare("UPDATE paid_song_orders SET status='completed',confirmed_segments=?,updated_at=? WHERE order_id=? AND status='uncertain'")
           .run(sent, now, String(orderId));
       } else {
@@ -492,9 +694,13 @@ export function resolvePaidSongOrder(orderId, outcome, { segmentIndex = null, no
       || Number(order.segment_count) !== 1 || !previewSegment || previewSegment.status !== 'uncertain' || !previewSegment.cache_path) {
       database.exec('COMMIT'); return false;
     }
-    database.prepare(`INSERT INTO credit_ledger(entry_id,sender_id,amount_cents,kind,receipt_id,created_at,status)
-      VALUES(?,?,?,'paid_song',?,?,'verified')`).run(createHash('sha256').update(`paid_song\0${orderId}`).digest('hex'),
-        order.sender_id, -Number(order.price_cents), String(orderId), now);
+    if (order.credit_source === 'cash' && Number(order.unit_cost) === 0 && Number(order.price_cents) > 0) {
+      database.prepare(`INSERT INTO credit_ledger(entry_id,sender_id,amount_cents,kind,receipt_id,created_at,status)
+        VALUES(?,?,?,'paid_song',?,?,'verified')`).run(createHash('sha256').update(`paid_song\0${orderId}`).digest('hex'),
+          order.sender_id, -Number(order.price_cents), String(orderId), now);
+    } else if (order.credit_source !== 'units' || Number(order.unit_cost) !== 1 || Number(order.price_cents) !== 0) {
+      database.exec('COMMIT'); return false;
+    }
     database.prepare("UPDATE paid_song_segments SET status='sent',updated_at=? WHERE order_id=? AND status='uncertain'")
       .run(now, String(orderId));
     database.prepare("UPDATE paid_song_orders SET status='completed',confirmed_segments=1,segment_count=1,updated_at=? WHERE order_id=? AND status='uncertain'")
