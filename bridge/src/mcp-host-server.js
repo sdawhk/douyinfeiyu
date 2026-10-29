@@ -68,8 +68,18 @@ function readConsoleToken() {
   }
 }
 
-// 进程控制只接受主人私聊会话令牌，群聊令牌不能启停 SnowLuma。
-async function bridgeModeAllowsProcessControl(token) {
+function isOwnerPrivateSession(key) {
+  const match = /^private:(\d+)$/.exec(String(key ?? '').trim());
+  if (!match) return false;
+  const c = getConfig();
+  const owners = (Array.isArray(c.ownerQQs) && c.ownerQQs.length ? c.ownerQQs : [c.ownerQQ])
+    .filter((id) => id != null && String(id).trim())
+    .map(String);
+  return owners.includes(match[1]);
+}
+
+// 桥接只为主人私聊会话签发此类令牌，群聊令牌不能查询状态或控制进程。
+async function bridgeAllowsOwnerPrivateToken(token) {
   try {
     const consoleToken = readConsoleToken();
     const res = await fetch(`http://127.0.0.1:${getConsolePort()}/api/authorize/process-control`, {
@@ -145,9 +155,12 @@ const server = new McpServer({ name: 'snowluma-host', version: '0.1.0' });
 
 server.tool(
   'snowluma_status',
-  '检查 SnowLuma OneBot 网关是否在线（HTTP 探活 get_login_info）。返回网关可达性、QQ 在线状态与账号信息。',
-  {},
-  async () => {
+  '仅主人私聊可查询 SnowLuma OneBot 网关状态与账号信息；群聊和其他人无权查看。',
+  { key: z.string().describe('当前主人私聊会话 key，格式 private:主人QQ号'), token: z.string().describe('当前会话令牌') },
+  async ({ key, token }) => {
+    if (!isOwnerPrivateSession(key) || !(await bridgeAllowsOwnerPrivateToken(token))) {
+      return { content: [{ type: 'text', text: '拒绝：仅主人私聊可查询 SnowLuma 状态。' }], isError: true };
+    }
     const info = await gatewayInfo();
     return {
       content: [{ type: 'text', text: JSON.stringify(info, null, 2) }]
@@ -168,7 +181,7 @@ if (getHostConfig().allowProcessControl && PROCESS_CONTROL_SUPPORTED) {
       if (!hc.allowProcessControl) {
         return { content: [{ type: 'text', text: '拒绝：进程控制未开启（config.json 需设置 snowluma.allowProcessControl=true）。' }], isError: true };
       }
-      if (!(await bridgeModeAllowsProcessControl(token))) {
+      if (!(await bridgeAllowsOwnerPrivateToken(token))) {
         return { content: [{ type: 'text', text: '拒绝：仅主人私聊会话可控制进程。' }], isError: true };
       }
       const before = await gatewayInfo();
@@ -203,7 +216,7 @@ if (getHostConfig().allowProcessControl && PROCESS_CONTROL_SUPPORTED) {
       if (!hc.allowProcessControl) {
         return { content: [{ type: 'text', text: '拒绝：进程控制未开启（config.json 需设置 snowluma.allowProcessControl=true）。' }], isError: true };
       }
-      if (!(await bridgeModeAllowsProcessControl(token))) {
+      if (!(await bridgeAllowsOwnerPrivateToken(token))) {
         return { content: [{ type: 'text', text: '拒绝：仅主人私聊会话可控制进程。' }], isError: true };
       }
       const pids = findSnowLumaPids();

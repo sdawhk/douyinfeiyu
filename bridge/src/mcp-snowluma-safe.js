@@ -13,6 +13,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { SENSITIVE_RE } from './sensitive.js';
+import { isProfileApproval } from './profile-approval.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -31,6 +32,16 @@ const cfg = loadConfig();
 
 function getConfig() {
   return loadConfig();
+}
+
+function isOwnerPrivateSession(key) {
+  const match = /^private:(\d+)$/.exec(String(key ?? '').trim());
+  if (!match) return false;
+  const c = getConfig();
+  const owners = (Array.isArray(c.ownerQQs) && c.ownerQQs.length ? c.ownerQQs : [c.ownerQQ])
+    .filter((id) => id != null && String(id).trim())
+    .map(String);
+  return owners.includes(match[1]);
 }
 
 function getAccess() {
@@ -193,16 +204,52 @@ server.tool('qq_comment_qzone',
 
 server.tool(
   'qq_status',
-  '查询 QQ 机器人登录状态与账号信息（只读）。',
-  {},
-  async () => {
+  '仅主人私聊会话可查询 QQ 机器人登录状态与账号信息。群聊或非主人请求一律拒绝。',
+  { key: z.string().describe('当前主人私聊会话 key，格式 private:主人QQ号'), token: z.string().describe('当前会话令牌') },
+  async ({ key, token }) => {
     try {
+      if (!isOwnerPrivateSession(key)) throw new Error('QQ 状态仅允许主人私聊查询');
+      await authorizeRead(key, token);
       const login = await onebot('get_login_info');
+      let profile = {};
+      try { profile = await onebot('get_stranger_info', { user_id: login.user_id, no_cache: true }); } catch {}
       let status = {};
       try { status = await onebot('get_status'); } catch {}
-      return { content: [{ type: 'text', text: JSON.stringify({ ...login, online: status.online, good: status.good }, null, 2) }] };
+      return { content: [{ type: 'text', text: JSON.stringify({ ...login, nickname: profile.nickname || login.nickname, online: status.online, good: status.good }, null, 2) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `查询失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_set_my_profile',
+  '修改机器人当前登录 QQ 账号自己的昵称或个性签名。仅主人私聊可用；必须先在当前对话明确候选，再等主人明确同意后调用。主人只需回复一句“我给你授权”或“确认改昵称和签名”，不要求重复候选。approvalText 填主人刚刚的授权原话；“再试试”“我看看”等不算授权。禁止修改其他人的资料。',
+  {
+    key: z.string().describe('当前主人私聊会话 key，格式 private:主人QQ号'),
+    token: z.string().describe('当前会话令牌'),
+    approvalText: z.string().min(1).max(100).describe('主人刚刚明确授权修改的原话，逐字填写'),
+    nickname: z.string().trim().min(1).max(20).optional().describe('要设置的新昵称（1 至 20 字）'),
+    personalNote: z.string().trim().min(1).max(30).optional().describe('要设置的新个性签名（1 至 30 字）')
+  },
+  async ({ key, token, approvalText, nickname, personalNote }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('修改 QQ 资料仅允许主人私聊操作');
+      if (!isProfileApproval(approvalText)) throw new Error('没有检测到主人对本次资料修改的明确授权');
+      if (!nickname && !personalNote) throw new Error('请至少提供昵称或个性签名其中一项');
+      for (const [label, value, maxLength] of [['昵称', nickname, 20], ['签名', personalNote, 30]]) {
+        if (value && ([...value].length > maxLength || /[\r\n\u0000-\u001f]/.test(value))) {
+          throw new Error(`${label}长度需为 1 到 ${maxLength} 个字符，且不能包含换行或控制字符`);
+        }
+      }
+      await authorizeRead(key, token);
+      await onebot('set_qq_profile', {
+        ...(nickname ? { nickname } : {}),
+        ...(personalNote ? { personal_note: personalNote } : {})
+      });
+      return { content: [{ type: 'text', text: `资料修改已由 OneBot 确认成功：${nickname ? `昵称「${nickname}」` : ''}${nickname && personalNote ? '，' : ''}${personalNote ? `签名「${personalNote}」` : ''}` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `修改 QQ 资料失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );
