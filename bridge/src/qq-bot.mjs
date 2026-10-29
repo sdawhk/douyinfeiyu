@@ -1942,6 +1942,11 @@ async function handleCommand(text, sender, isGroup, target, senderName = '') {
   if (addressChange) return groupAddressGuardReply(addressChange, senderName);
   const naturalQzone = parseQzoneRequest(t) ?? await resolveQzoneFollowup(t, sender, isGroup);
   const missedPrivateReply = parseOwnerPrivateReplyRequest(t);
+  const selfAccessListCommand = /^(?:查看私聊授权|私聊授权列表)$/i.test(t);
+  const selfAccessGrant = t.match(/^授权查看私聊\s+(\d{5,20})$/);
+  const selfAccessRevoke = t.match(/^(?:取消授权查看私聊|撤销私聊授权)\s+(\d{5,20})$/);
+  const selfNickname = t.match(/^设置机器人昵称\s+([\s\S]+)$/);
+  const selfSignature = t.match(/^设置机器人签名\s+([\s\S]+)$/);
   const affinityCommand = parseAffinityCommand(t);
   const tokenUsageDate = parseTokenUsageRequest(t);
   // 认定为命令的三种情形：
@@ -1949,7 +1954,8 @@ async function handleCommand(text, sender, isGroup, target, senderName = '') {
   //   2) 无斜杠的中文短命令（发动态、表情、状态 ...）
   //   3) 中文命令 + 参数（发动态 xxx、/表情 xxx）
   const bareCmd = /^(?:发动态|发说说|说说|我的动态|列我的动态|发表情|表情|状态|群列表|帮助|存表情|表情包列表|删表情|图库|今天加了什么功能|今天更新了什么|今天改了什么|今日更新|好感度)(?:\s+(\S+))?$/;
-  if (!t.startsWith('/') && !bareCmd.test(t) && !qzoneDetailCommand && !qzoneReplyCommand && !affinityCommand && !tokenUsageDate && naturalQzone === null && !missedPrivateReply) {
+  if (!t.startsWith('/') && !bareCmd.test(t) && !qzoneDetailCommand && !qzoneReplyCommand && !affinityCommand && !tokenUsageDate && naturalQzone === null && !missedPrivateReply
+      && !selfAccessListCommand && !selfAccessGrant && !selfAccessRevoke && !selfNickname && !selfSignature) {
     return null; // 不是命令
   }
   if (tokenUsageDate) {
@@ -2011,6 +2017,38 @@ async function handleCommand(text, sender, isGroup, target, senderName = '') {
   // 命令只认主人（Komorebi 大号 + 机器人号），其他人发 /qzone 之类不会执行
   if (!isOwner(sender)) {
     return '这个命令只有主人能用。';
+  }
+
+  if (selfAccessListCommand) {
+    const ids = selfAccessSettings().friendHistoryAllowlist;
+    return ids.length ? `已授权读取私聊记录的好友 QQ：${ids.join('、')}` : '目前没有授权任何好友私聊记录；默认空名单。';
+  }
+  if (selfAccessGrant || selfAccessRevoke) {
+    if (isGroup) return '请在机器人私聊中管理私聊记录授权。';
+    const id = (selfAccessGrant || selfAccessRevoke)[1];
+    const current = selfAccessSettings().friendHistoryAllowlist;
+    const next = selfAccessGrant
+      ? [...new Set([...current, id])]
+      : current.filter((item) => item !== id);
+    updateSelfAccessSettings({ friendHistoryAllowlist: next });
+    return selfAccessGrant
+      ? `已授权读取 QQ ${id} 的私聊记录。查询时最多读取最近 20 条；可发送“取消授权查看私聊 ${id}”撤销。`
+      : `已撤销 QQ ${id} 的私聊记录授权。`;
+  }
+  if (selfNickname || selfSignature) {
+    if (isGroup) return '请在机器人私聊中确认昵称或签名修改。';
+    const value = (selfNickname || selfSignature)[1].trim();
+    const maxLength = selfNickname ? 20 : 30;
+    if (!value || [...value].length > maxLength || /[\r\n\u0000-\u001f]/.test(value)) {
+      return `${selfNickname ? '昵称' : '签名'}长度需为 1 到 ${maxLength} 个字符，且不能包含换行或控制字符。`;
+    }
+    try {
+      await onebot('set_qq_profile', selfNickname ? { nickname: value } : { personal_note: value });
+      return `已提交机器人${selfNickname ? '昵称' : '签名'}修改：${value}`;
+    } catch (error) {
+      log('[owner-profile] update failed:', error?.message ?? error);
+      return `修改没有完成：${String(error?.message ?? error).slice(0, 180)}。请确认当前 SnowLuma 版本支持 set_qq_profile。`;
+    }
   }
 
   if (qzoneReadCommand || qzoneDetailCommand || qzoneReplyCommand) {
@@ -3678,6 +3716,8 @@ function connect() {
     try { ev = JSON.parse(String(event.data)); } catch { return; }
     if (ev.post_type === 'message' && ev.message_type !== 'sent') {
       onMessage(ev).catch((e) => log('[error] handler', e.message));
+    } else if (ev.post_type === 'notice' && ev.notice_type === 'friend_add') {
+      syncFriendAllowlist().catch((e) => log('[allowlist] friend-add sync failed:', e.message));
     } else if (ev.post_type === 'notice' && ev.sub_type === 'poke') {
       handlePokeNotice(ev).catch((e) => log('[poke] handler failed:', e.message));
     } else if (ev.post_type === 'notice' && ev.notice_type === 'qzone_like') {
@@ -3695,8 +3735,10 @@ async function waitForOnebot(timeoutMs = 60_000) {
   while (Date.now() < deadline) {
     try {
       const info = await onebot('get_login_info');
-      botNickname = String(info.nickname ?? '').trim();
-      log('[onebot] login ok:', `${info.nickname}(${info.user_id})`);
+      let freshProfile = {};
+      try { freshProfile = await onebot('get_stranger_info', { user_id: info.user_id, no_cache: true }); } catch {}
+      botNickname = String(freshProfile.nickname || info.nickname || '').trim();
+      log('[onebot] login ok:', `${botNickname}(${info.user_id})`);
       return true;
     } catch {
       await sleep(2000);
@@ -3711,7 +3753,9 @@ connect();
 log('[bridge] running. owners =', [...OWNERS].join(', '), '| self =', BOT_SELF ?? '(unknown)');
 onebotReady.then((ready) => {
   if (!ready) log('[warn] OneBot HTTP did not respond during startup; WebSocket remains active');
+  else void syncFriendAllowlist();
 });
+setInterval(() => { void syncFriendAllowlist(); }, 5 * 60_000).unref?.();
 
 let imageLibraryCleanupRunning = false;
 function runImageLibraryCleanup() {
