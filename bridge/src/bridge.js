@@ -748,6 +748,25 @@ function canonicalV2Key(key) {
   return `${m[1]}:${id}`;
 }
 
+function archiveImageRows(days = 90) {
+  const analyses = readImageAnalyses();
+  return listArchived(days).map((item) => {
+    const analysis = analyses[item.file] ?? null;
+    return {
+      id: `${item.day}/${item.file}`,
+      day: item.day,
+      file: item.file,
+      bytes: item.bytes,
+      description: String(analysis?.caption ?? '').slice(0, 300),
+      tags: Array.isArray(analysis?.tags) ? analysis.tags.map(String).slice(0, 8) : [],
+      kind: String(analysis?.kind ?? ''),
+      appropriate: analysis?.appropriate ?? null,
+      sexualSuggestive: analysis?.sexualSuggestive === true,
+      grossOrGraphic: analysis?.grossOrGraphic === true
+    };
+  }).filter((item) => item.appropriate !== false && !item.sexualSuggestive && !item.grossOrGraphic);
+}
+
 const APPROVE_WORDS = new Set(['通过', '同意', '允许', '批准', 'yes', 'y', 'approve', 'ok']);
 const REJECT_WORDS = new Set(['拒绝', '不同意', '不允许', '驳回', 'no', 'n', 'reject', 'deny']);
 
@@ -919,6 +938,53 @@ async function main() {
     localPackEntries = updated.entries;
     saveLocalPacks(STICKER_PACK_FILE, localPackEntries);
     return { entry: updated.entry, messageId: data?.message_id ?? null };
+  }
+
+  async function sendArchiveImageV2(key, imageId) {
+    assertToolSendAllowed(key);
+    const match = /^(\d{4}-\d{2}-\d{2})\/([a-f0-9]{16}\.(?:jpg|jpeg|png|gif|webp))$/i.exec(String(imageId ?? '').trim());
+    if (!match) throw new Error('imageId 格式无效，请先用 qq_list_archive_images 获取图片编号');
+    const record = listArchived(3650).find((item) => item.day === match[1] && item.file.toLowerCase() === match[2].toLowerCase());
+    if (!record || !record.path || !fs.existsSync(record.path)) throw new Error(`图库中找不到图片 ${imageId}`);
+    const analysis = readImageAnalyses()[record.file] ?? {};
+    if (analysis.appropriate === false || analysis.sexualSuggestive === true || analysis.grossOrGraphic === true) {
+      throw new Error('这张图片未通过发送内容检查，已拒绝发送');
+    }
+    const stat = fs.statSync(record.path);
+    const maxBytes = Math.min(16 * 1024 * 1024, Math.max(1, Number(cfg.socialV2?.archiveImages?.maxBytes) || 10 * 1024 * 1024));
+    if (!stat.isFile() || stat.size > maxBytes) throw new Error(`图片过大（${Math.round(stat.size / 1024)}KB），超过图库发送上限`);
+    const buffer = fs.readFileSync(record.path);
+    if (!looksLikeImageBuffer(buffer)) throw new Error('图库文件不是有效图片，已拒绝发送');
+    const dims = getImageDimensions(buffer);
+    if (dims && dims.width * dims.height > MAX_MEDIA_PIXELS) throw new Error('图片像素超限，已拒绝发送');
+    const [kind, id] = key.split(':');
+    if (kind !== 'private') throw new Error('图库图片发送仅允许主人私聊');
+    const action = 'send_private_msg';
+    const params = { user_id: Number(id), message: [{ type: 'image', data: { file: `base64://${buffer.toString('base64')}` } }] };
+    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    let sendResolve;
+    let sendReject;
+    const sendResult = new Promise((resolve, reject) => { sendResolve = resolve; sendReject = reject; });
+    sendChain = sendChain.then(async () => {
+      try {
+        await sleep(randInt(800, 1600));
+        assertToolSendAllowed(key);
+        const res = await fetch(`${httpUrl}/${action}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json',
+            ...(cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.httpAccessToken || cfg.snowluma.accessToken}` } : {}) },
+          body: JSON.stringify(params),
+          signal: AbortSignal.timeout(30000)
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}`);
+        }
+        sendResolve(body.data);
+      } catch (error) { sendReject(error); }
+    });
+    const data = await sendResult;
+    return { messageId: data?.message_id ?? null, record, analysis };
   }
 
   // 从 SnowLuma OneBot 拉取 QQ 账号收藏表情（fetch_custom_face_detail），并合并进本地库。
@@ -3856,6 +3922,94 @@ async function main() {
             });
           } catch (error) {
             sendJson({ ok: false, error: `获取本地表情图片失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/archive-image-list') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const query = String(url.searchParams.get('query') ?? '').trim().toLocaleLowerCase('zh-CN');
+          const days = Math.min(3650, Math.max(1, Number(url.searchParams.get('days')) || 90));
+          const count = Math.min(40, Math.max(1, Number(url.searchParams.get('count')) || 20));
+          const ownerId = /^private:(\d{5,20})$/.exec(key)?.[1];
+          const owners = (Array.isArray(cfg.ownerQQs) && cfg.ownerQQs.length ? cfg.ownerQQs : [cfg.ownerQQ]).filter(Boolean).map(String);
+          if (!ownerId || !owners.includes(ownerId) || ownerId === String(cfg.selfQQ ?? '')) { sendJson({ ok: false, error: '图库工具仅允许主人私聊使用' }, 403); return; }
+          if (!req.headers['x-agent-token'] || !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: '会话令牌无效或已失效' }, 403); return; }
+          if (!v2SessionAllowed(key) || currentMode !== 'reserved2') { sendJson({ ok: false, error: '图库工具仅在当前允许的 reserved2 私聊会话中可用' }, 403); return; }
+          if (!v2ToolEnabled('listArchiveImages')) { sendJson({ ok: false, error: '工具未启用：qq_list_archive_images' }, 403); return; }
+          try {
+            const items = archiveImageRows(days).filter((item) => !query
+              || `${item.id} ${item.day} ${item.description} ${item.tags.join(' ')} ${item.kind}`.toLocaleLowerCase('zh-CN').includes(query));
+            sendJson({ ok: true, key, days, total: items.length, items: items.slice(0, count) });
+          } catch (error) { sendJson({ ok: false, error: `读取图库失败：${error?.message ?? error}` }, 500); }
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/archive-image') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const imageId = String(url.searchParams.get('imageId') ?? '').trim();
+          const ownerId = /^private:(\d{5,20})$/.exec(key)?.[1];
+          const owners = (Array.isArray(cfg.ownerQQs) && cfg.ownerQQs.length ? cfg.ownerQQs : [cfg.ownerQQ]).filter(Boolean).map(String);
+          if (!ownerId || !owners.includes(ownerId) || ownerId === String(cfg.selfQQ ?? '')) { sendJson({ ok: false, error: '图库工具仅允许主人私聊使用' }, 403); return; }
+          if (!req.headers['x-agent-token'] || !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: '会话令牌无效或已失效' }, 403); return; }
+          if (!v2SessionAllowed(key) || currentMode !== 'reserved2') { sendJson({ ok: false, error: '图库工具仅在当前允许的 reserved2 私聊会话中可用' }, 403); return; }
+          if (!v2ToolEnabled('getArchiveImage')) { sendJson({ ok: false, error: '工具未启用：qq_get_archive_image' }, 403); return; }
+          const record = listArchived(3650).find((item) => `${item.day}/${item.file}` === imageId);
+          if (!record || !record.path || !fs.existsSync(record.path)) { sendJson({ ok: false, error: `图库中找不到图片 ${imageId}` }, 404); return; }
+          const analysis = readImageAnalyses()[record.file] ?? {};
+          if (analysis.appropriate === false || analysis.sexualSuggestive === true || analysis.grossOrGraphic === true) { sendJson({ ok: false, error: '这张图片未通过内容检查，不能提供预览' }, 403); return; }
+          try {
+            const stat = fs.statSync(record.path);
+            const maxBytes = Math.min(16 * 1024 * 1024, Math.max(1, Number(cfg.socialV2?.archiveImages?.maxBytes) || 10 * 1024 * 1024));
+            if (!stat.isFile() || stat.size > maxBytes) { sendJson({ ok: false, error: '图片过大，超过图库预览上限' }, 400); return; }
+            const buffer = fs.readFileSync(record.path);
+            if (!looksLikeImageBuffer(buffer)) { sendJson({ ok: false, error: '图库文件不是有效图片' }, 400); return; }
+            const dims = getImageDimensions(buffer);
+            if (dims && dims.width * dims.height > MAX_MEDIA_PIXELS) { sendJson({ ok: false, error: '图片像素超限' }, 400); return; }
+            sendJson({ ok: true, key, image: { id: imageId, mimeType: mimeFromBuffer(buffer), data: buffer.toString('base64') } });
+          } catch (error) { sendJson({ ok: false, error: `读取图库图片失败：${error?.message ?? error}` }, 500); }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/send-archive-image') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const imageId = String(body.imageId ?? '').trim();
+          const ownerId = /^private:(\d{5,20})$/.exec(key)?.[1];
+          const owners = (Array.isArray(cfg.ownerQQs) && cfg.ownerQQs.length ? cfg.ownerQQs : [cfg.ownerQQ]).filter(Boolean).map(String);
+          if (!ownerId || !owners.includes(ownerId) || ownerId === String(cfg.selfQQ ?? '')) { sendJson({ ok: false, error: '图库发送仅允许主人私聊使用' }, 403); return; }
+          if (!req.headers['x-agent-token'] || !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: '会话令牌无效或已失效' }, 403); return; }
+          if (!v2SessionAllowed(key) || currentMode !== 'reserved2') { sendJson({ ok: false, error: '图库发送仅在当前允许的 reserved2 私聊会话中可用' }, 403); return; }
+          if (!v2ToolEnabled('sendArchiveImage')) { sendJson({ ok: false, error: '工具未启用：qq_send_archive_image' }, 403); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const st = getSocialV2State(key);
+          const now = Date.now();
+          const sendCfg = cfg.socialV2?.send ?? {};
+          const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
+          const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
+          const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
+          const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
+          if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) { sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429); return; }
+          st.sendTimes.push(now);
+          if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+          saveSocialV2State();
+          try {
+            const sent = await sendArchiveImageV2(key, imageId);
+            const description = String(sent.analysis?.caption ?? '').slice(0, 160) || sent.record.file;
+            const note = `[图库图片:${description}]`;
+            st.recentMessages.push({ messageId: sent.messageId ? String(sent.messageId) : null, sender: '我', text: note, plain: note,
+              quoteTargetIsSelf: false, isOwner: true, ownerLabel: '我', isSelf: true,
+              media: [{ kind: 'image', file: sent.record.file }], hasMedia: true, forwardIds: [], hasForward: false, time: now });
+            const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
+            if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
+            st.lastAiReplyAt = now;
+            st.lastActionAt = now;
+            saveSocialV2State();
+            scheduleReplyCheckV2(key);
+            appendActivity(`${key} [archive-image] sent ${sent.record.day}/${sent.record.file}`);
+            sendJson({ ok: true, key, imageId, sent: 1, messageId: sent.messageId, description });
+          } catch (error) {
+            const index = st.sendTimes.lastIndexOf(now);
+            if (index >= 0) st.sendTimes.splice(index, 1);
+            saveSocialV2State();
+            sendJson({ ok: false, error: `发送图库图片失败：${error?.message ?? error}` }, 500);
           }
           return;
         }

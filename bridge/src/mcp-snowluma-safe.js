@@ -1120,6 +1120,77 @@ if (cfg.socialV2?.stickerPack?.enabled !== false && cfg.socialV2?.tools?.listLoc
     }
   );
 }
+if (cfg.socialV2?.tools?.listArchiveImages !== false) {
+  server.tool(
+    'qq_list_archive_images',
+    '搜索主人本地归档图片库并返回图片编号、描述和标签。仅主人私聊可用。主人要求发壁纸/图库图片时，先用本工具查找；如描述不足，再用 qq_get_archive_image 预览。imageId 格式为“日期/文件名”，后续发送时必须原样使用。',
+    {
+      key: z.string().describe('当前主人私聊会话 key，格式 private:QQ号'),
+      token: z.string().describe('当前会话令牌'),
+      query: z.string().optional().describe('按描述、标签或图片编号搜索，例如“壁纸”“风景”“蓝色”'),
+      days: z.number().int().min(1).max(3650).optional().describe('搜索最近多少天，默认 90 天'),
+      count: z.number().int().min(1).max(40).optional().describe('最多返回几张，默认 20 张')
+    },
+    async ({ key, token, query, days, count }) => {
+      try {
+        const q = new URLSearchParams({ key });
+        if (query) q.set('query', String(query));
+        if (days != null) q.set('days', String(days));
+        if (count != null) q.set('count', String(count));
+        const data = await agentApi(`/api/socialV2/archive-image-list?${q.toString()}`, { headers: { 'x-agent-token': token } });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `读取归档图库失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+if (cfg.socialV2?.tools?.getArchiveImage !== false) {
+  server.tool(
+    'qq_get_archive_image',
+    '读取主人本地归档图库中的一张图片并以图像内容返回，供视觉模型预览。仅主人私聊可用。imageId 必须来自 qq_list_archive_images；本工具只预览，不会发送到 QQ。',
+    {
+      key: z.string().describe('当前主人私聊会话 key，格式 private:QQ号'),
+      token: z.string().describe('当前会话令牌'),
+      imageId: z.string().describe('qq_list_archive_images 返回的编号，格式 日期/文件名')
+    },
+    async ({ key, token, imageId }) => {
+      try {
+        const q = new URLSearchParams({ key, imageId: String(imageId) });
+        const data = await agentApi(`/api/socialV2/archive-image?${q.toString()}`, { headers: { 'x-agent-token': token }, timeoutMs: 60000 });
+        if (!data?.image?.data || !data?.image?.mimeType) return { content: [{ type: 'text', text: `图库图片无法预览：${data?.error || '未知错误'}` }], isError: true };
+        return { content: [
+          { type: 'text', text: `图库图片预览 ${data.image.id}：` },
+          { type: 'image', mimeType: data.image.mimeType, data: data.image.data }
+        ] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `读取图库图片失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+if (cfg.socialV2?.tools?.sendArchiveImage !== false) {
+  server.tool(
+    'qq_send_archive_image',
+    '把主人本地归档图库中的一张图片作为真实 QQ 图片发送到当前主人私聊。仅主人私聊可用；imageId 必须来自 qq_list_archive_images。发送前应确认图片符合当前请求，不能把图库内容批量发送。',
+    {
+      key: z.string().describe('当前主人私聊会话 key，格式 private:QQ号'),
+      token: z.string().describe('当前会话令牌'),
+      imageId: z.string().describe('要发送的图片编号，格式 日期/文件名，来自 qq_list_archive_images')
+    },
+    async ({ key, token, imageId }) => {
+      try {
+        const data = await agentApi('/api/socialV2/send-archive-image', {
+          method: 'POST', body: JSON.stringify({ key, imageId: String(imageId) }),
+          headers: { 'x-agent-token': token }, timeoutMs: 60000
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `发送图库图片失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
 if (cfg.socialV2?.stickerPack?.enabled !== false && cfg.socialV2?.tools?.getLocalStickerImage !== false) {
   server.tool(
     'qq_get_local_sticker_image',
