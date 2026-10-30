@@ -52,13 +52,13 @@ const MAP = new Map(Object.entries({
 }));
 
 // Free routes first; a working non-free route is the final chat fallback.
+// 2026-10-30 清理：移除上游返回 404 "model not found" 的死模型
+// （space-bunny-free、thinkingmachines/inkling-small:free）。
 const CHAT_MODEL_FALLBACKS = [
-  'space-bunny-free',
   'reflection/beam-free',
   'nvidia/nemotron-3-ultra-550b-a55b:free',
   'nvidia/nemotron-3.5-super-vl:free',
   'nvidia/nemotron-3.5-lightning:free',
-  'thinkingmachines/inkling-small:free',
   'deepseek-v4.1-flash-free',
   'trae/glm-5.3-flash',
 ];
