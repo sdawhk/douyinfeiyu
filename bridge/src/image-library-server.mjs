@@ -8,6 +8,7 @@ import { groupInterjectionSettingsSnapshot, setGroupInterjectionSettings } from 
 import { synthesizeAzureSpeech } from './azure-tts.mjs';
 import { synthesizeXfyunSpeech } from './xfyun-tts.mjs';
 import { synthesizeEdgeSpeech } from './edge-tts.mjs';
+import { synthesizeEdgeSpeechLocal, edgeTtsLocalReady } from './edge-tts-local.mjs';
 import { synthesizeVoiceClone } from './voice-clone-tts.mjs';
 import { generateSong, downloadSong } from './singing.mjs';
 import { applyLiuyingSpeech, applyLiuyingVoice } from './rvc-singing.mjs';
@@ -340,8 +341,26 @@ async function handle(req, res) {
     try {
       const body = await readBody(req);
       const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
-      if (!config.edgeTts?.enabled || !config.edgeTts?.workerUrl) throw Object.assign(new Error('Edge TTS 尚未启用或缺少 Worker 地址'), { status: 400 });
-      const file = await synthesizeEdgeSpeech(body.input, { url: config.edgeTts.workerUrl, voice: config.edgeTts.voice });
+      if (!config.edgeTts?.enabled) throw Object.assign(new Error('Edge TTS 尚未启用'), { status: 400 });
+      // 优先本机 Python edge-tts 直连微软端点；workers.dev 已被 DNS 污染，
+      // 只作为本机环境缺失/失败时的兜底。
+      let file = null; let localError = null;
+      if (edgeTtsLocalReady()) {
+        try { file = await synthesizeEdgeSpeechLocal(body.input, { voice: config.edgeTts.voice }); }
+        catch (error) { localError = error; }
+      }
+      if (!file) {
+        if (!config.edgeTts?.workerUrl) {
+          if (localError) throw Object.assign(localError, { status: 502 });
+          throw Object.assign(new Error('Edge TTS 本机环境未就绪且缺少 Worker 地址'), { status: 400 });
+        }
+        try { file = await synthesizeEdgeSpeech(body.input, { url: config.edgeTts.workerUrl, voice: config.edgeTts.voice }); }
+        catch (workerError) {
+          throw Object.assign(new Error(localError
+            ? `本机 Edge TTS 失败（${String(localError.message).slice(0, 120)}）；Worker 兜底也失败（${String(workerError.message).slice(0, 120)}）`
+            : workerError.message), { status: 502 });
+        }
+      }
       const audio = Buffer.from(file.slice('base64://'.length), 'base64');
       res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': audio.length,
         'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -365,7 +384,11 @@ async function handle(req, res) {
     if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机设置页面测试语音' });
     try {
       const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
-      const file = await synthesizeEdgeSpeech('你好，我是小鲸鱼。Edge TTS 语音已经接通。', { ...config.edgeTts, url: config.edgeTts.workerUrl || config.edgeTts.url });
+      let file = null;
+      if (edgeTtsLocalReady()) {
+        try { file = await synthesizeEdgeSpeechLocal('你好，我是小鲸鱼。本机直连微软的语音已经接通。', { voice: config.edgeTts.voice }); } catch {}
+      }
+      if (!file) file = await synthesizeEdgeSpeech('你好，我是小鲸鱼。Edge TTS 语音已经接通。', { ...config.edgeTts, url: config.edgeTts.workerUrl || config.edgeTts.url });
       const audio = Buffer.from(file.slice('base64://'.length), 'base64');
       res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': audio.length,
         'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -391,7 +414,12 @@ async function handle(req, res) {
       const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
       let file;
       if (config.voiceClone?.enabled) file = await synthesizeVoiceClone('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。', config.voiceClone);
-      else if (config.edgeTts?.enabled) file = await synthesizeEdgeSpeech('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。', { ...config.edgeTts, url: config.edgeTts.workerUrl || config.edgeTts.url });
+      else if (config.edgeTts?.enabled) {
+        if (edgeTtsLocalReady()) {
+          try { file = await synthesizeEdgeSpeechLocal('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。', { voice: config.edgeTts.voice }); } catch {}
+        }
+        if (!file) file = await synthesizeEdgeSpeech('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。', { ...config.edgeTts, url: config.edgeTts.workerUrl || config.edgeTts.url });
+      }
       else if (config.xfyunTts?.enabled) file = await synthesizeXfyunSpeech('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。', config.xfyunTts);
       else if (config.azureTts?.enabled) file = await synthesizeAzureSpeech('你好，我是小鲸鱼。现在正在试听流萤音色的普通语音。',
         { ...config.azureTts, outputFormat: 'riff-24khz-16bit-mono-pcm' });

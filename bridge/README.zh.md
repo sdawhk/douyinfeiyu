@@ -86,6 +86,10 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 
 语音回复可接本机 [GPT-SoVITS api_v2](https://github.com/RVC-Boss/GPT-SoVITS/blob/main/api_v2.py)。先按上游说明安装并启动服务，监听 `127.0.0.1:9882`，再在 `http://127.0.0.1:18902/settings` 的「克隆音色」中填写服务地址、参考音频的 Windows 绝对路径及对应的逐字原文，保存后点「测试克隆音色」。试听成功后再启用；默认仅在用户明确要求语音时使用。参考音频需事先放在本机，并确保 GPT-SoVITS 进程可以读取。合成失败时机器人发送文字。请仅使用有权使用的声音。
 
+### Edge TTS（本机直连微软）
+
+Edge 音色语音由本机 18902 服务合成：优先运行本机 Python edge-tts 直连 `speech.platform.bing.com`（`src/edge-tts-local.mjs`，环境在 `D:\deepseek\state\edge-tts\venv`，不入库），失败时才回退到设置页里配置的 Worker 地址。此前依赖的 `*.workers.dev` 域名被 DNS 污染连不通，是"要求语音却只发文字"的直接原因；Worker 仅作兜底，建议重新部署到自己域名后再填。首次准备环境运行 `powershell -ExecutionPolicy Bypass -File scripts/setup-edge-tts.ps1`（脚本用 Node 拉取 wheel 后解包，绕开本机死代理 `127.0.0.1:12450` 导致的 pip 卡死）。合成默认 20 秒超时，短于桥接侧 35 秒上限。
+
 ### 原创歌曲与流萤 RVC
 
 现成歌曲点唱只允许主人使用：“唱歌 歌名”或“翻唱 歌名”会搜索歌曲、默认从约 30 秒处截取 60 秒、转换成流萤音色并发送 QQ 语音；整首歌按不超过 60 秒的片段发送；“唱一首雨夜 DJ 版的歌”等自然说法也会进入这条链路，指定“唱10秒钟雨夜”则截取 10 秒。“原唱 歌名”只发原唱片段，“搜歌 歌名”查看候选。搜索会排除标明伴奏、KTV、短剧等结果；歌名不完全匹配时会先列候选，不自动发错歌。确认候选可用“翻唱 雨夜 #2”等序号命令。流萤转换前会检查分离后的人声音量，过低就停止发送。先运行 `scripts/setup-singing-rvc.ps1` 准备模型，再运行 `scripts/setup-song-cover.ps1` 安装 yt-dlp 等依赖。运行设置中的“现成歌曲点唱”可独立开关，不需要 Mureka Key。B 站搜索受限时会试 YouTube；转换失败不会把原唱冒充翻唱发出。
