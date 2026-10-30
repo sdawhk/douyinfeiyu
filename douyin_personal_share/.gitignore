@@ -1,0 +1,7 @@
+config.json
+browser-profile/
+state.json
+recipient-verification.json
+playwright-temp/
+.venv/
+__pycache__/
