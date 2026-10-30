@@ -12,6 +12,12 @@ netstat -ano | findstr /R /C:":3100 .*LISTENING" >nul 2>&1
 if errorlevel 1 start "QQTools" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\tool-service-watchdog.bat"
 
 :loop
+rem Port 3101 is held by the active bot. A second watchdog must not start another QQ listener.
+netstat -ano | findstr /R /C:"127.0.0.1:3101 .*LISTENING" >nul 2>&1
+if not errorlevel 1 (
+  timeout /t 5 /nobreak >nul
+  goto loop
+)
 set /a RESTARTS+=1
 echo [%date% %time%] bridge starting attempt %RESTARTS% >> "%LOGDIR%\bridge.log"
 "%NODE%" "%ROOT%\repo\bridge\src\qq-bot.mjs" >> "%LOGDIR%\bridge.log" 2>&1
