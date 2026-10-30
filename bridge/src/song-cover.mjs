@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inspectMp3Duration } from './song-library.mjs';
+import { childEnv } from './proxy-env.mjs';
 
 const exec = promisify(execFile);
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -37,6 +38,8 @@ export function parseExistingSongCommand(text, { botNickname = '', botSelf = '',
   const natural = input.match(/^(?<modal>(?:可以|能|可不可以|能不能|麻烦)\s*)?(?<addressee>(?:给我|帮我|给大家|帮大家|我想让你|我想听你|想听你)\s*)?(?<voice>用语音\s*)?(?<verb>唱|来)(?<singword>歌唱|歌)?(?<measure>一首|首|个|一下|一段|段)?\s*(?:(?<seconds>\d{1,3})\s*秒(?:钟)?\s*)?(?<song>.+)$/);
   if (natural) {
     const { modal, addressee, voice, verb, singword, measure, seconds: duration, song: requestedSong } = natural.groups;
+    // “来个男娘”一类普通请求不表示点歌；“来首/来一首”才有明确的歌曲量词。
+    if (verb === '来' && !singword && measure !== '首' && measure !== '一首') return null;
     if (verb === '来' && !modal && !addressee && !voice && !singword && !measure && !duration) return null;
     if (singword === '歌' && !modal && !addressee && !voice && !measure && !duration) return null;
     if (!modal && !addressee && !voice && !measure && !duration &&
@@ -153,7 +156,9 @@ function allowedVideoUrl(value) {
 }
 
 async function run(file, args, timeout = 120_000) {
-  const env = { ...process.env, PYTHONPATH: [SITE_PACKAGES, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter) };
+  // 代理不可用时剔除代理变量，避免 yt-dlp 连死掉的 127.0.0.1:12450 而下载失败
+  const baseEnv = await childEnv();
+  const env = { ...baseEnv, PYTHONPATH: [SITE_PACKAGES, baseEnv.PYTHONPATH].filter(Boolean).join(path.delimiter) };
   try {
     const { stdout } = await exec(file, args, { timeout, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env });
     return stdout;

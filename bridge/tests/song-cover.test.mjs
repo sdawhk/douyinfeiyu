@@ -69,6 +69,11 @@ test('existing-song requests stay separate from original generation', () => {
 });
 
 test('natural song requests route to an existing song clip', () => {
+  assert.equal(parseExistingSongCommand('来个男娘'), null);
+  assert.equal(parseExistingSongCommand('@黑糖 来个男娘', { hasBotMention: true }), null);
+  assert.equal(parseExistingSongCommand('给我来个男娘'), null);
+  assert.equal(parseExistingSongCommand('来一段相声'), null);
+  assert.deepEqual(parseExistingSongCommand('来一首夜曲'), { mode: 'ai', song: '夜曲', candidate: 1 });
   assert.deepEqual(parseExistingSongCommand('唱一首雨夜dj版'), { mode: 'ai', song: '雨夜dj版', candidate: 1 });
   assert.deepEqual(parseExistingSongCommand('@最爱吃白饭 唱一首雨夜dj版', { botNickname: '最爱吃白饭' }),
     { mode: 'ai', song: '雨夜dj版', candidate: 1 });

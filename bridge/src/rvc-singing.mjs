@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { childEnv } from './proxy-env.mjs';
 
 const exec = promisify(execFile);
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -37,12 +38,14 @@ function pythonExecutable() {
 async function run(file, args, timeout = 900_000, stage = 'command') {
   try {
     const pythonHome = pythonRuntimePath();
+    // 代理端口不通时剔除代理变量：cover.py 会用 urllib 下载权重，
+    // 跟着死代理走会 SSL/连接失败，导致整段翻唱做不出来。
+    const baseEnv = await childEnv({ PYTHONUTF8: '1', HF_HOME: path.join(RVC_ROOT, 'cache', 'huggingface') });
     const { stdout, stderr } = await exec(file, args, {
       timeout, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, PYTHONUTF8: '1',
-        HF_HOME: path.join(RVC_ROOT, 'cache', 'huggingface'),
-        PATH: [pythonHome, pythonHome && path.join(pythonHome, 'DLLs'), path.dirname(FFMPEG), process.env.PATH].filter(Boolean).join(path.delimiter),
-        PYTHONPATH: [SITE_PACKAGES, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter) },
+      env: { ...baseEnv,
+        PATH: [pythonHome, pythonHome && path.join(pythonHome, 'DLLs'), path.dirname(FFMPEG), baseEnv.PATH].filter(Boolean).join(path.delimiter),
+        PYTHONPATH: [SITE_PACKAGES, baseEnv.PYTHONPATH].filter(Boolean).join(path.delimiter) },
     });
     return `${stdout || ''}${stderr || ''}`;
   } catch (error) {
