@@ -9,6 +9,12 @@ import {
   savePaidSongSegments, listPaidSongSegments, getPaidSongOrder, updatePaidSongSegment
 } from './song-library.mjs';
 
+// 试听 / 红包逻辑总开关（2026-10-30 按主人要求停用）。
+// 两个开关置 false 即停用；相关代码、数据库表和已缓存音频全部保留，
+// 改回 true 就能原样恢复，不需要重新实现。
+export const PREVIEW_ENABLED = false;      // 歌单试听、试听N、新歌试听、试听待核对
+export const RED_PACKET_ENABLED = false;   // 红包候选通知、红包通过/拒绝/待核验、红包账本
+
 let libraryLoaded = false;
 let reservationsReconciled = false;
 const playlistSnapshots = new Map();
@@ -111,6 +117,8 @@ export function shouldBlockLegacySongRequest(isOwner, mode = 'ai') {
 }
 
 export async function handleRedPacketCandidateNotice({ event, botId, chatKey, ownerIds, sendPrivate }) {
+  // 红包逻辑已停用：不再识别红包提示、不建候选、不打扰主人。
+  if (!RED_PACKET_ENABLED) return false;
   if (!hasRedPacketMarker(event?.message, event?.raw_message)) return false;
   const candidate = recordRedPacketCandidate({
     botId, messageId: event?.message_id ?? event?.msg_id ?? event?.message_seq,
@@ -146,6 +154,8 @@ export async function handleSongLibraryCommand({
 }) {
   const command = normalizeSongCommandText(text);
   const listMatch = command.match(/^歌单(?:\s+(\d{1,4}))?$/);
+  // 分支检测保持原样，确保命令一定被识别（不能漏给模型瞎答）；
+  // 停用由下面的总开关在入口处提前回绝。
   const previewMatch = command.match(/^试听\s*(\d{1,4}|[a-f0-9]{12})$/i);
   const paidMatch = /^(?:新歌试听(?:\s+.+)?|唱完整首(?:\s+.+)?)$/.test(command);
   const paidPreviewMatch = command.match(/^新歌试听\s+(.+)$/);
@@ -166,6 +176,19 @@ export async function handleSongLibraryCommand({
   if (!claimSongCommandEvent({ chatKey: key, senderId, messageId: sourceMessageId })) return true;
 
   const say = (message) => sendText(message);
+  // 试听 / 红包逻辑已停用：命令仍被识别，但只做明确回绝，不再走试听与记账分支。
+  // “唱完整首”是唯一保留的付费类命令（改为主人免费），不在这里拦截。
+  if (!PREVIEW_ENABLED && (listMatch || previewMatch || pendingCommand || resolveMatch
+      || quotaCommand || (paidMatch && !paidFullMatch))) {
+    await say(listMatch || previewMatch || (paidMatch && !paidFullMatch)
+      ? '歌单试听已经关掉了；想听歌直接说“唱歌 歌名”，主人可以用“唱完整首 歌名”。'
+      : '试听和点歌额度相关的命令都停用啦，直接点歌就行。');
+    return true;
+  }
+  if (!RED_PACKET_ENABLED && (ownerQuery || packetPendingCommand || packetApprove || packetReject)) {
+    await say('红包核验和现金账本已经停用，不再记账。');
+    return true;
+  }
   const ensureLibrary = () => {
     if (!libraryLoaded) {
       const scan = refreshLibrary();
@@ -261,19 +284,25 @@ export async function handleSongLibraryCommand({
   if (paidMatch) {
     const fullMatch = paidFullMatch;
     const requestedQuery = String(paidPreviewMatch?.[1] ?? fullMatch?.[1] ?? '').trim().slice(0, 80);
+    // 整首只对主人开放；试听已随 PREVIEW_ENABLED 停用（paidPreviewMatch 此时恒为 null）。
     if (!isOwner) {
-      await say('群友可以免费、不限次数试听歌单里的歌曲；新歌点歌和整首制作目前仅主人可用。');
+      await say(fullMatch
+        ? '“唱完整首”只有主人能用；群友想听直接说“唱歌 歌名”。'
+        : '新歌试听已经关掉了；想听歌直接说“唱歌 歌名”。');
       return true;
     }
-    if (!requestedQuery) { await say('请提供准确歌名，例如：新歌试听 <歌名>。'); return true; }
+    if (!requestedQuery) { await say('请提供准确歌名，例如：唱完整首 <歌名>。'); return true; }
     const freeFullSong = Boolean(isGroup && fullMatch && isFreeGroupFullSong(requestedQuery));
+    // 红包入账停用后点歌单位永远是 0，整首改走免费通道（credit_source='promo'，
+    // reservePaidSongOrder 对 free 只允许 kind='full' 且不扣任何单位）。
+    const ownerFreeFull = Boolean(fullMatch && !PREVIEW_ENABLED && !RED_PACKET_ENABLED);
     const query = freeFullSong ? '雨爱（司凤版）' : requestedQuery;
     if (!coverEnabled || (fullMatch ? typeof makePaidFullSong !== 'function' : typeof makePaidPreview !== 'function')) {
-      await say('付费点歌当前未启用；需要开启现成歌曲翻唱。');
+      await say('现成歌曲点唱当前未启用；需要主人先在运行设置中开启。');
       return true;
     }
     const kind = fullMatch ? 'full' : 'preview';
-    const order = reservePaidSongOrder({ senderId, chatKey: key, query, kind, free: freeFullSong });
+    const order = reservePaidSongOrder({ senderId, chatKey: key, query, kind, free: freeFullSong || ownerFreeFull });
     if (!order.ok) {
       await say(order.reason === 'conversation-busy' ? '这个会话已有点歌订单正在处理或待核对。'
         : order.reason === 'insufficient-credit' ? `可用点歌单位不足。当前可用 ${getPaidSongUnitSummary(senderId).available} 单位；${fullMatch ? '整首需 3 单位（1 元等值）' : '试听需 1 单位（约 1/3 元等值）'}。100 分核验额度折算 3 单位，余分累计。`
