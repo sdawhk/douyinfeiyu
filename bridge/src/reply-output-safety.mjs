@@ -1,3 +1,5 @@
+import { hasStickerDirective, stripStickerDirectives } from './reply-sticker-token.mjs';
+
 const FINAL_MARKER = /<\|final\|>|<final>|(?:最终(?:回复|回答)|给用户的回复)\s*[:：]/i;
 const REASONING_MARKER = /<\|(?:analysis|think|reasoning)\|>|<(?:analysis|think|thinking|reasoning)\b|(?:^|\n)\s*(?:analysis|reasoning|思考过程|推理过程)\s*[:：]/i;
 const INTERNAL_NARRATION = /(?:当前(?:这)?轮(?:消息|内容|对话)?\s*[，,:：]|本轮(?:消息|内容|对话|说)\s*[，,:：]?|等等[，,]\s*我(?:需要|要|得)|让我(?:先)?(?:分析|想|仔细想)|我(?:需要|要|得)(?:先)?(?:仔细)?(?:分析|判断|思考|推理|想想)|用户(?:说|提到|想要|可能|的意思是|是在)|我(?:应该|需要|要|得)(?:如何|怎么|直接)?(?:回复|回答)|先(?:分析|推理)一下|(?:the user (?:said|means|wants|is asking)|user message|current turn|we need to|I should (?:answer|reply|respond)|let me think|let's think|let's analyze|need to understand)\b)/i;
@@ -70,12 +72,42 @@ export function sanitizeModelReply(value) {
   }
   return { text, leaked, blocked: !text };
 }
+/** Return compact, content-free diagnostics for correlating unsafe model output. */
+export function replySafetyDiagnostics(rawValue, safeResult) {
+  const raw = String(rawValue ?? '');
+  const markersIn = (text) => {
+    const markers = [];
+    if (/\[\s*tob\s*:\s*\d+\s*\]/i.test(text)) markers.push('tob');
+    if (/\[\s*at\s*:\s*\d+\s*\]/i.test(text)) markers.push('at');
+    if (/<\|(?:analysis|think|reasoning)\|>|<(?:analysis|think|thinking|reasoning)\b/i.test(text)) {
+      markers.push('reasoning-tag');
+    }
+    if (/(?:^|\n)\s*(?:analysis|reasoning|思考过程|推理过程)\s*[:：]/i.test(text)) {
+      markers.push('reasoning-label');
+    }
+    if (/\[(?:图片|动画表情|表情|语音|视频|文件|非文本消息)\]/.test(text)) markers.push('media-placeholder');
+    if (/\[\s*(?:SILENT|SKIP)\s*\]/i.test(text)) markers.push('control-marker');
+    if (/\[sticker\]\s*sent/i.test(text)) markers.push('sticker-status');
+    if (hasStickerDirective(text)) markers.push('sticker-directive');
+    return markers;
+  };
+  const markers = markersIn(raw);
+  const remainingMarkers = markersIn(String(safeResult?.text ?? ''));
+  return {
+    rawChars: raw.length,
+    safeChars: String(safeResult?.text ?? '').length,
+    leaked: Boolean(safeResult?.leaked),
+    blocked: Boolean(safeResult?.blocked),
+    markers,
+    remainingMarkers
+  };
+}
 
 /** Catch obvious non-answers to a question without judging the answer's facts or tone. */
 export function replyQualityIssue(input, reply) {
   const question = String(input ?? '').trim();
   if (!/[?？]|什么|怎么|为什么|如何|哪(?:个|里|些|种)|谁|几(?:点|个|岁)|多少|多久|吗[。!！]?$/u.test(question)) return '';
-  const answer = String(reply ?? '').replace(/\[sticker:[^\]]+\]/g, '').trim();
+  const answer = stripStickerDirectives(reply);
   if (!answer) return 'missing-answer';
   const compact = (value) => value.replace(/[\s，。！？!?.,、~～]+/gu, '').toLocaleLowerCase();
   const compactQuestion = compact(question);
@@ -88,8 +120,7 @@ export function replyQualityIssue(input, reply) {
 
 /** Compare actual reply text, not just shared topic words. */
 export function repeatsRecentReply(reply, recentReplies = []) {
-  const normalize = (value) => String(value ?? '')
-    .replace(/\[sticker:[^\]]+\]/g, '')
+  const normalize = (value) => stripStickerDirectives(value)
     .replace(/[\s，。！？!?.,、~～“”"'‘’（）()]+/gu, '')
     .toLocaleLowerCase();
   const current = normalize(reply);

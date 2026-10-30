@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeModelReply, replyQualityIssue, repeatsRecentReply } from '../src/reply-output-safety.mjs';
+import { sanitizeModelReply, replySafetyDiagnostics, replyQualityIssue, repeatsRecentReply } from '../src/reply-output-safety.mjs';
 
 test('keeps ordinary conversational replies unchanged', () => {
   const result = sanitizeModelReply('这免死金牌听着挺可靠，金币都拿出来担保了。');
@@ -36,6 +36,7 @@ test('removes media placeholders from an otherwise useful reply', () => {
 
 test('flags obvious non-answers to a question without rejecting short real answers', () => {
   assert.equal(replyQualityIssue('你喜欢看什么视频？', '[sticker:开心]'), 'missing-answer');
+  assert.equal(replyQualityIssue('这是什么意思？', '[STICKER:897]'), 'missing-answer');
   assert.equal(replyQualityIssue('你喜欢看什么视频？', '哈哈'), 'generic-non-answer');
   assert.equal(replyQualityIssue('你喜欢看什么视频？', '你喜欢看什么视频？'), 'echoed-question');
   assert.equal(replyQualityIssue('你喜欢看什么视频？', '游戏实况'), '');
@@ -105,4 +106,20 @@ test('removes closed think tags and their contents', () => {
   assert.equal(result.text, '这承诺听着不太牢靠。');
   assert.equal(result.blocked, false);
   assert.equal(result.leaked, true);
+});
+
+test('reports marker categories and lengths without including reply text', () => {
+  const raw = '[at:1917174653] 你好[tob:1917174653] <think>分析内容</think>你好';
+  const safe = sanitizeModelReply(raw);
+  const diagnostics = replySafetyDiagnostics(raw, safe);
+  assert.deepEqual(diagnostics, {
+    rawChars: raw.length,
+    safeChars: safe.text.length,
+    leaked: true,
+    blocked: false,
+    markers: ['tob', 'at', 'reasoning-tag'],
+    remainingMarkers: ['tob', 'at']
+  });
+  assert.equal(JSON.stringify(diagnostics).includes('1917174653'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('分析内容'), false);
 });

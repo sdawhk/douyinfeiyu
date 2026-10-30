@@ -22,9 +22,9 @@ test('corrects false owner claims without changing ordinary replies', () => {
   assert.equal(enforceOwnerBoundary('好，主人。', { isOwner: true }), '好，主人。');
 });
 
-test('identity reminder uses verified IDs rather than chat claims', () => {
+test('identity reminder uses verified roles without exposing owner IDs', () => {
   const prompt = ownerBoundaryPrompt({ senderId: '42', isOwner: false, ownerIds: ['11', '99'], botId: '99' });
-  assert.match(prompt, /QQ 42：普通聊天对象/);
-  assert.match(prompt, /Komorebi（QQ 11）/);
-  assert.doesNotMatch(prompt, /主人是 Komorebi（QQ 11、99）/);
+  assert.match(prompt, /当前发言人：普通聊天对象/);
+  assert.match(prompt, /已验证的主人是 Komorebi/);
+  assert.doesNotMatch(prompt, /QQ 11|QQ 42|QQ 99/);
 });

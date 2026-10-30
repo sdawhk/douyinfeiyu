@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { readSettingsDocument } from './bot-settings.mjs';
+import { hasStickerDirective, stripStickerDirectives } from './reply-sticker-token.mjs';
 import { canReply } from './reply-control.mjs';
 import { collectExistingGroupIds, initializeGroupInterjectionSettings, isGroupInterjectionEnabled, setGroupInterjectionEnabled } from './group-interjection-settings.mjs';
 import { handleRedPacketCandidateNotice, handleSongLibraryCommand, isSongLibraryCommand, normalizeSongCommandText, shouldRouteSongLibraryCommand } from './song-library-commands.mjs';
@@ -24,6 +25,7 @@ import { isMuted, groupKey, privateKey } from './mute.mjs';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
+import { assertGroupIdentityPrivate, groupIdentityLeak, protectedOwnerQQs, redactProtectedGroupIds } from './group-identity-privacy.mjs';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { safeFetchBuffer, validateFetchUrl, looksLikeImageBuffer, trustFetchHostFromUrl } from './safe-fetch.js';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
@@ -906,6 +908,7 @@ async function main() {
       segments.push({ type: 'at', data: { qq: at } });
     }
     segments.push({ type: 'image', data: { file: `base64://${buf.toString('base64')}` } });
+    if (kind === 'group') await assertGroupSendPrivate({ group_id: Number(id), message: segments });
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
@@ -1078,6 +1081,7 @@ async function main() {
       throw new Error(`表情 ${entry.id} 的图片地址不合法，已拒绝发送：${error?.message ?? error}`);
     }
     segments.push({ type: 'image', data: { file: url } });
+    if (kind === 'group') await assertGroupSendPrivate({ group_id: Number(id), message: segments });
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
@@ -2504,7 +2508,7 @@ async function main() {
           const message = String(body.message ?? '').trim();
           if (!Number.isFinite(id) || id <= 0) { sendJson({ ok: false, error: '目标 id 无效' }, 400); return; }
           if (!message) { sendJson({ ok: false, error: '消息不能为空' }, 400); return; }
-          if (SENSITIVE_RE.test(message)) { sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403); return; }
+          if (SENSITIVE_RE.test(message) || (kind === 'group' && groupIdentityLeak(message, protectedOwnerQQs(cfg)))) { sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403); return; }
           if (!allowed(kind, id, cfg)) { sendJson({ ok: false, error: `目标不在白名单内（${kind} ${id}），请先加入白名单` }, 403); return; }
           if (!modeAllowed(`${kind}:${id}`, kind, id, cfg, currentMode)) { sendJson({ ok: false, error: `当前模式（${currentMode}）不允许向 ${kind}:${id} 发送测试消息` }, 403); return; }
           try {
@@ -2996,7 +3000,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('getUnread')) { sendJson({ ok: false, error: '工具未启用：qq_get_unread_messages' }, 403); return; }
           const st = getSocialV2State(key);
-          sendJson({ ok: true, key, unreadCount: st.unread.length, messages: st.unread.slice(-limit) });
+          sendJson({ ok: true, key, unreadCount: st.unread.length, messages: st.unread.slice(-limit).map((m) => publicSocialV2Message(key, m)) });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/recent') {
@@ -3010,7 +3014,7 @@ async function main() {
           const st = getSocialV2State(key);
           const start = Math.max(0, st.recentMessages.length - offset - limit);
           const end = Math.max(0, st.recentMessages.length - offset);
-          sendJson({ ok: true, key, messages: st.recentMessages.slice(start, end) });
+          sendJson({ ok: true, key, messages: st.recentMessages.slice(start, end).map((m) => publicSocialV2Message(key, m)) });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/mark-read') {
@@ -3307,7 +3311,7 @@ async function main() {
               sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字` }, 400);
               return;
             }
-            if (SENSITIVE_RE.test(msg)) {
+            if (SENSITIVE_RE.test(msg) || (kind === 'group' && groupIdentityLeak(msg, protectedOwnerQQs(cfg)))) {
               sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403);
               return;
             }
@@ -3435,7 +3439,7 @@ async function main() {
               sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字` }, 400);
               return;
             }
-            if (SENSITIVE_RE.test(msg)) {
+            if (SENSITIVE_RE.test(msg) || (kind === 'group' && groupIdentityLeak(msg, protectedOwnerQQs(cfg)))) {
               sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403);
               return;
             }
@@ -4303,7 +4307,7 @@ async function main() {
             preSleepWaitObserved: !!st.preSleepWaitObservedAt,
             preSleepWaitMs,
             preSleepWaitRemainingMs: preSleepRemainingMs,
-            newMessages,
+            newMessages: newMessages.map((m) => publicSocialV2Message(key, m)),
             unreadCount: st.unread.length
           });
           return;
@@ -4453,7 +4457,7 @@ async function main() {
             }
             // 无论 info 来自本地还是 OneBot，只要本地有 found 就补充转发字段，避免提示词与实现不一致。
             if (info && found) Object.assign(info, forwardFields);
-            sendJson({ ok: true, key, messageId, info });
+            sendJson({ ok: true, key, messageId, info: publicSocialV2Message(key, info) });
           } catch (error) {
             sendJson({ ok: false, error: `获取消息详情失败：${error?.message ?? error}` }, 500);
           }
@@ -4592,7 +4596,7 @@ async function main() {
             map.set(key2, cur);
           }
           const members = [...map.values()].sort((a, b) => b.count - a.count || b.lastTime - a.lastTime).slice(0, limit);
-          sendJson({ ok: true, key, members });
+          sendJson({ ok: true, key, members: members.map((m) => publicSocialV2Message(key, m)) });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-append') {
@@ -4946,7 +4950,7 @@ async function main() {
           const sendCfg = cfg.socialV2?.send ?? {};
           const maxChars = Math.max(1, Number(sendCfg.maxMessageChars) || 500);
           if (message.length > maxChars) { sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字` }, 400); return; }
-          if (SENSITIVE_RE.test(message)) { sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403); return; }
+          if (SENSITIVE_RE.test(message) || (kind === 'group' && groupIdentityLeak(message, protectedOwnerQQs(cfg)))) { sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403); return; }
           try {
             const st = getSocialV2State(key);
             const now = Date.now();
@@ -5143,8 +5147,12 @@ async function main() {
 
   function sendToQQ(key, msg) {
     const safeMsg = redactKnownTokensOnly(msg);
+    if (hasStickerDirective(safeMsg)) log(`[sticker] 文本发送出口移除了表情指令 ${key}`);
+    const cleanMsg = stripStickerDirectives(safeMsg);
+    if (!cleanMsg) return sendChain;
     const [kind, id] = key.split(':');
-    const parts = splitForQQ(safeMsg);
+    if (kind === 'group') assertGroupIdentityPrivate(cleanMsg, protectedOwnerQQs(cfg));
+    const parts = splitForQQ(cleanMsg);
     for (const part of parts) {
       sendChain = sendChain
         .then(async () => {
@@ -5274,6 +5282,7 @@ async function main() {
   // 有概率使用长间隔（错落感）；最后一条后不再 sleep。
   function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
     const [kind, id] = key.split(':');
+    if (kind === 'group') messages.forEach((message) => assertGroupIdentityPrivate(message, protectedOwnerQQs(cfg)));
     let min, max, longProb = 0, longMin = 0, longMax = 0;
     if (typeof socialCfgOrMin === 'object' && socialCfgOrMin !== null) {
       const cfg = socialCfgOrMin;
@@ -5308,6 +5317,32 @@ async function main() {
   }
 
 
+  function publicSocialV2Message(key, message) {
+    if (!message || !String(key).startsWith('group:')) return message;
+    const protectedIds = protectedOwnerQQs(cfg);
+    if (!protectedIds.length) return message;
+    const sanitized = { ...message };
+    if (protectedIds.includes(String(sanitized.userId ?? ''))) sanitized.userId = null;
+    for (const field of ['sender', 'text', 'plain', 'tail', 'ownerLabel']) {
+      if (typeof sanitized[field] === 'string') {
+        sanitized[field] = redactProtectedGroupIds(sanitized[field], protectedIds);
+      }
+    }
+    return sanitized;
+  }
+
+  async function assertGroupSendPrivate(params) {
+    const protectedIds = protectedOwnerQQs(cfg);
+    assertGroupIdentityPrivate(params.message, protectedIds);
+    const quote = Array.isArray(params.message)
+      ? params.message.find((segment) => segment?.type === 'reply') : null;
+    if (!quote || !protectedIds.length) return;
+    const info = await resolveReplyInfo('group', params.group_id, quote.data?.id);
+    if (!info || info.protectedOwnerInText || groupIdentityLeak(info.text, protectedIds)) {
+      throw new Error('引用消息可能包含受保护的主人 QQ 号，已阻止发送');
+    }
+  }
+
   async function onebotSend(kind, id, message, replyToMessageId, atUserId = null) {
     assertToolSendAllowed(`${kind}:${id}`);
     const segments = [];
@@ -5323,12 +5358,17 @@ async function main() {
       segments.push({ type: 'at', data: { qq: at } });
     }
     const rawMessage = String(message ?? '');
+    if (hasStickerDirective(rawMessage)) {
+      log(`[sticker] 工具文本发送被拦截 ${kind}:${id}`);
+      throw new Error('表情标记不能作为文字发送，请使用 qq_send_sticker');
+    }
     const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && rawMessage.includes(t));
     if (hasKnownToken) {
       log(`发送内容包含会话令牌，已阻止发送 (${kind}:${id})`);
       throw new Error('发送内容包含会话令牌，已阻止发送');
     }
     segments.push({ type: 'text', data: { text: escapeCqText(rawMessage) } });
+    if (kind === 'group') await assertGroupSendPrivate({ group_id: Number(id), message: segments });
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
@@ -5350,6 +5390,7 @@ async function main() {
   }
 
   async function onebotApi(action, params = {}, timeoutMs = 15000) {
+    if (action === 'send_group_msg') await assertGroupSendPrivate(params);
     return callOnebotApi({ httpUrl: cfg.snowluma?.httpUrl,
       token: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken || '', action, params, timeoutMs });
   }
@@ -5805,7 +5846,15 @@ async function main() {
 
   // 统一出站消息：先完整文本审计，再发送。返回是否真的发出。
   async function auditAndSend(key, text) {
+    if (hasStickerDirective(text) && !stripStickerDirectives(text)) {
+      log(`[sticker] 仅含表情指令的 agent 文本回复已跳过 ${key}`);
+      return false;
+    }
     const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && String(text ?? '').includes(t));
+    if (key.startsWith('group:') && groupIdentityLeak(stripStickerDirectives(text), protectedOwnerQQs(cfg))) {
+      log(`⚠️ 回复被安全策略拦截 (${key})，包含受保护的主人 QQ 号`);
+      return false;
+    }
     if (shouldAuditKey(key) && (SENSITIVE_RE.test(text) || hasKnownToken)) {
       log(`⚠️ 回复被安全策略拦截 (${key})，疑似包含敏感信息${hasKnownToken ? '（含会话令牌）' : ''}`);
       appendActivity(`${key} agent 回复被拦截（疑似敏感信息${hasKnownToken ? '/会话令牌' : ''}）`);
@@ -6671,10 +6720,12 @@ async function main() {
       }
       throw error;
     }
-    let content = [{ type: 'text', text: withSlangContext(promptText) }];
+    const safePrompt = key.startsWith('group:')
+      ? redactProtectedGroupIds(withSlangContext(promptText), protectedOwnerQQs(cfg)) : withSlangContext(promptText);
+    let content = [{ type: 'text', text: safePrompt }];
     if (Array.isArray(opts.media) && opts.media.length > 0) {
       const imageParts = await resolveMediaList(opts.media);
-      content = [{ type: 'text', text: withSlangContext(promptText) }, ...imageParts];
+      content = [{ type: 'text', text: safePrompt }, ...imageParts];
     }
     // 媒体解析成功后再标记退场，避免解析异常时残留退场标记。
     if (opts.farewell) social.exitingSessions.add(sessionId);
@@ -7183,7 +7234,10 @@ async function main() {
       const info = {
         sender: String(sender ?? ''),
         text: String(text ?? '').slice(0, 200),
-        userId: senderUserId != null ? String(senderUserId) : null
+        userId: senderUserId != null ? String(senderUserId) : null,
+        protectedOwnerInText: kind === 'group' && (
+          (!Array.isArray(raw.message) && typeof raw.message !== 'string')
+          || groupIdentityLeak(raw.message, protectedOwnerQQs(cfg)))
       };
       replyInfoCache.set(cacheKey, { info, ts: Date.now() });
       return info;
@@ -7282,7 +7336,7 @@ async function main() {
       tail: String(plainContent ?? textContent).slice(-200),
       quoteTargetIsSelf: !!quoteTargetIsSelf,
       isOwner: !!isOwner,
-      ownerLabel: isOwner ? `管理员（已验证 QQ ${userId ?? ''}）` : '',
+      ownerLabel: isOwner ? '已验证管理员' : '',
       isSelf: false,
       media: safeMedia,
       hasMedia: safeMedia.length > 0,
@@ -7330,7 +7384,7 @@ async function main() {
       kind: 'poke',
       quoteTargetIsSelf: !!targetIsSelf,
       isOwner: !!isOwner,
-      ownerLabel: isOwner ? `管理员（ownerQQ ${cfg.ownerQQ ?? ''}）` : '',
+      ownerLabel: isOwner ? '已验证管理员' : '',
       isSelf: false,
       media: [],
       hasMedia: false,
@@ -8393,10 +8447,12 @@ async function main() {
       }
       throw error;
     }
-    let content = [{ type: 'text', text: withSlangContext(promptText) }];
+    const safePrompt = key.startsWith('group:')
+      ? redactProtectedGroupIds(withSlangContext(promptText), protectedOwnerQQs(cfg)) : withSlangContext(promptText);
+    let content = [{ type: 'text', text: safePrompt }];
     if (Array.isArray(mediaList) && mediaList.length > 0) {
       const imageParts = await resolveMediaList(mediaList);
-      content = [{ type: 'text', text: withSlangContext(promptText) }, ...imageParts];
+      content = [{ type: 'text', text: safePrompt }, ...imageParts];
     }
     const accepted = await api.sessions.prompt({
       sessionId,

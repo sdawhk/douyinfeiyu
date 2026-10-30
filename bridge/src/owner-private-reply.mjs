@@ -40,3 +40,11 @@ export function findUnansweredPrivateMessages(messages, selfId, { now = Date.now
   if (timestamp > 0 && now - timestamp > maxAgeMs) return { messages: [], reason: 'stale' };
   return { messages: pending.slice(-8), reason: 'unanswered' };
 }
+
+/** Let the model decline a stale conversational gap instead of forcing a message. */
+export function decideMissedPrivateReply(raw, safeReply) {
+  if (/^\s*\[SILENT\]\s*$/i.test(String(raw ?? ''))) return { action: 'skip' };
+  const text = String(safeReply?.text ?? '').trim();
+  if (safeReply?.blocked || !text || /^\[SILENT\]$/i.test(text)) return { action: 'invalid' };
+  return { action: 'reply', text };
+}

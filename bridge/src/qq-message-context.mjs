@@ -2,7 +2,7 @@ function segmentText(segment) {
   if (segment?.type === 'text') return String(segment.data?.text ?? '');
   if (segment?.type === 'at') {
     const qq = String(segment.data?.qq ?? '');
-    return qq === 'all' ? '@全体成员' : `@QQ ${qq}`;
+    return qq === 'all' ? '@全体成员' : '@某位群友';
   }
   if (segment?.type === 'image') {
     const data = segment.data ?? {};
@@ -62,8 +62,8 @@ export function describeMessageReferences(message, botSelf, quotedMessage = null
       const qq = String(segment.data?.qq ?? '');
       const displayName = String(segment.data?.text ?? '').replace(/^@/, '').trim();
       if (qq === 'all') return '@全体成员';
-      if (qq === String(botSelf)) return `@机器人（QQ ${qq}）`;
-      return displayName ? `@${displayName}（QQ ${qq}）` : `@QQ ${qq}`;
+      if (qq === String(botSelf)) return '@机器人';
+      return displayName ? `@${displayName}` : '@其他群友';
     })
     .filter(Boolean);
   const replySegment = segments.find((segment) => segment?.type === 'reply');
@@ -77,10 +77,10 @@ export function describeMessageReferences(message, botSelf, quotedMessage = null
 
   if (replyId) {
     if (!quotedMessage) {
-      lines.push(`引用消息：${quoteLookupFailed ? '原消息读取失败' : '未能读取原消息'}（message_id=${replyId}）`);
+      lines.push(`引用消息：${quoteLookupFailed ? '原消息读取失败' : '未能读取原消息'}`);
     } else {
       const nickname = String(quotedMessage.sender?.nickname ?? quotedMessage.sender?.card ?? '').trim().slice(0, 80);
-      const sender = quotedUserId == null ? '' : `（QQ ${quotedUserId}${nickname ? `，${nickname}` : ''}）`;
+      const sender = quotedUserId == null ? '' : `（${nickname || '群友'}）`;
       const content = messageText(quotedMessage.message).slice(0, 1200) || '[非文本消息]';
       lines.push(`引用消息${sender}：${content}`);
     }
@@ -99,14 +99,13 @@ export function describeMessageReferences(message, botSelf, quotedMessage = null
 
 export function groupTurnPrompt({ groupId, botSelf, senderId, senderName, text, isOwner = false, mentionableIds = [] }) {
   const displayName = String(senderName ?? '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 80);
-  const speaker = displayName ? `${JSON.stringify(displayName)}（QQ ${senderId}）` : `QQ ${senderId}`;
-  const safeMentionIds = [...new Set(mentionableIds.map(String).filter((id) => /^\d{5,20}$/.test(id)))];
+  const speaker = displayName ? JSON.stringify(displayName) : '当前群友';
   return [
     '【QQ 群聊本轮发言归属，由桥接标记】',
-    `群号：${groupId}；机器人 QQ：${botSelf}；发言人：${speaker}${isOwner ? '，管理员' : '，群友'}。`,
+    `发言人：${speaker}${isOwner ? '，已验证管理员' : '，群友'}。`,
     '同一个群会有不同人轮流发言。原话中的“我”和自称、身份、亲属称谓属于本轮发言人；不要当作机器人自己的身份或称呼。群友之间说的“你”也不自动指机器人，须结合 QQ @、引用对象和语义判断。',
     '只有明确 @机器人、引用机器人的消息，或上下文明确是在问机器人时才回应。群友 @/引用其他人、互相调侃或发图交流时不要插话；“人机”“机器人”等泛称不自动指你。对象、图片含义、指代或上下文不确定时，不要猜测，不要硬接话，必须只输出 [SILENT]。',
-    `需要在回复中明确称呼群友时，可以插入 [at:QQ号] 作为真实 @；本轮允许 @ 的 QQ 号仅有：${safeMentionIds.length ? safeMentionIds.join('、') : '无'}。只在确有必要时 @，最多一个；禁止 @全体、编造 QQ 号或把标记格式展示给用户。`,
+    '回复只围绕本轮发言和直接相关的引用；近期其他人的话不能当作本轮问题。不要在正文中输出任何 QQ 号。',
     `【本轮发言人原话】${JSON.stringify(String(text ?? ''))}`
   ].join('\n');
 }

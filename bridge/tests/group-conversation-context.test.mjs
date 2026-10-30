@@ -10,7 +10,8 @@ test('keeps earlier messages available when their turns do not trigger a reply',
 
   const followupContext = context.format('group-a', 1_043);
   assert.match(followupContext, /日本三不喷，音乐动画片/);
-  assert.match(followupContext, /风（QQ 3854165110）/);
+  assert.match(followupContext, /风/);
+  assert.doesNotMatch(followupContext, /3854165110/);
   assert.equal(context.format('group-b', 1_043), '');
 });
 
@@ -30,21 +31,23 @@ test('expires old context and limits each group to the newest messages', () => {
 test('preserves whether a previous group message addressed another member', () => {
   const context = new GroupConversationContext();
   context.remember('group-a', {
-    senderId: '1', senderName: '甲', text: '这个人机骂我', directionHint: '@其他群友 2'
+    senderId: '1', senderName: '甲', text: '这个人机骂我', directionHint: '@其他群友'
   }, 1_000);
-  assert.match(context.format('group-a', 1_001), /@其他群友 2/);
+  assert.match(context.format('group-a', 1_001), /@其他群友/);
 });
 
-test('selects the immediate exchange and earlier turns from the current speaker', () => {
+test('keeps only a short background around the current speaker', () => {
   const context = new GroupConversationContext();
   for (let index = 1; index <= 8; index++) {
-    context.remember('group-a', { senderId: index === 2 ? 'alice' : 'other', text: `消息${index}` }, index * 100);
+    context.remember('group-a', { senderId: index === 4 ? 'alice' : 'other', text: `消息${index}` }, index * 100);
   }
   const selected = context.format('group-a', 900, { senderId: 'alice' });
-  assert.match(selected, /消息2/);
+  assert.match(selected, /消息4/);
   assert.doesNotMatch(selected, /消息3/);
-  assert.match(selected, /消息5/);
+  assert.doesNotMatch(selected, /消息5/);
+  assert.match(selected, /消息7/);
   assert.match(selected, /消息8/);
+  assert.equal(context.version('group-a'), 8);
 });
 
 test('describes media-only context without exposing raw placeholders', () => {
