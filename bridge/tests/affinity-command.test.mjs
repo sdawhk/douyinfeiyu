@@ -22,3 +22,9 @@ test('owner lookup and mutation arguments stay attached to the command', () => {
   assert.deepEqual(parseAffinityCommand('好感度 调整 1668389572 +2 主人表扬'), { args: '调整 1668389572 +2 主人表扬' });
   assert.equal(parseAffinityCommand('最近群里发生了什么'), null);
 });
+
+test('affinity guidance questions are handled with system facts', () => {
+  for (const phrase of ['好感度怎么加', '好感度如何提升', '怎么增加好感度', '帮我说说好感度怎么加', '/好感度 怎么加']) {
+    assert.deepEqual(parseAffinityCommand(phrase), { args: '', help: true }, phrase);
+  }
+});

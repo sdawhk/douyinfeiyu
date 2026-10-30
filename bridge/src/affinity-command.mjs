@@ -3,7 +3,20 @@ export function parseAffinityCommand(value) {
   let text = String(value ?? '').trim();
   if (!text) return null;
   const slash = text.match(/^\/(?:好感度|affinity)(?:\s+([\s\S]*?))?[？?。！!]*$/i);
-  if (slash) return { args: String(slash[1] ?? '').replace(/[？?。！!]+$/g, '').trim() };
+  if (slash) {
+    const args = String(slash[1] ?? '').replace(/[？?。！!]+$/g, '').trim();
+    return /^(?:(?:怎么|如何)(?:提升|增加|加|提高)|(?:提升|增加|加|提高)(?:一下)?(?:好感度|亲密度))$/i.test(args)
+      ? { args: '', help: true }
+      : { args };
+  }
+
+  const helpText = text
+    .replace(/^(?:(?:请|麻烦)?\s*)?(?:你\s*)?(?:(?:帮我|给我)\s*)?(?:(?:我想|想)\s*)?(?:说说|讲讲|告诉我)?\s*/i, '')
+    .replace(/[？?。！!]+$/g, '')
+    .trim();
+  if (/^(?:(?:好感度|亲密度)\s*(?:怎么|如何)(?:提升|增加|加|提高)|(?:(?:怎么|如何)(?:提升|增加|加|提高)(?:一下)?\s*)(?:好感度|亲密度))$/i.test(helpText)) {
+    return { args: '', help: true };
+  }
 
   // Accept conversational ways of asking for the caller's score, including
   // "给我看一下，我和你的好感度". Authorization for explicit QQ targets is
