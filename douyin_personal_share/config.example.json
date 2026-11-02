@@ -1,5 +1,19 @@
 {
   "recipient_profile_url": "",
   "recipient_handle": "",
-  "daily_max": 5
+  "daily_max": 5,
+  "scheduled_enabled": true,
+  "reply_backend": {
+    "enabled": false,
+    "url": "http://127.0.0.1:3101/douyin/reply",
+    "token_file": "../bridge/state/console-token"
+  },
+  "inbound": {
+    "enabled": false,
+    "selectors_verified": false,
+    "message_selector": "",
+    "message_id_attribute": "",
+    "incoming_selector": "",
+    "text_selector": ""
+  }
 }

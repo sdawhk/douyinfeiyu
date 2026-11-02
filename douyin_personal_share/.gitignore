@@ -1,7 +1,9 @@
 config.json
 browser-profile/
 state.json
+inbound-state.json
 recipient-verification.json
 playwright-temp/
+.browser-profile.lock
 .venv/
 __pycache__/

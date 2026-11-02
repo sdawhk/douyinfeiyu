@@ -148,6 +148,8 @@
   "questionTimeoutMs": 270000,
   "consolePort": 3100,
   "consoleToken": "",
+  "douyinOwnerQQ": "",
+  "douyinOwnerHandle": "",
   "security": {
     "interceptNotify": true
   },

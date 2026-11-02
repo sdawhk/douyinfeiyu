@@ -3,6 +3,7 @@ import os
 import random
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -24,6 +25,13 @@ from douyin_share import (
     claim_due_slot,
     ensure_daily_plan,
     run_scheduled,
+    request_inbound_reply,
+    extract_inbound_messages,
+    inbound_selectors,
+    read_inbound_rows,
+    browser_profile_lock,
+    clean_observation,
+    save_watch_history,
     PlaywrightTimeout,
 )
 
@@ -60,6 +68,109 @@ class FakePage:
 
 
 class ShareLogicTests(unittest.TestCase):
+    def test_inbound_extractor_deduplicates_and_rejects_malformed_rows(self):
+        consumed = {"old-1"}
+        rows = [
+            {"id": "old-1", "text": "already read"},
+            {"id": "bad id", "text": "invalid ID"},
+            {"id": "new-1", "text": "new message"},
+            {"id": "new-1", "text": "duplicate"},
+            {"id": "empty", "text": "  "},
+        ]
+        self.assertEqual(extract_inbound_messages(rows, consumed), [("new-1", "new message")])
+        self.assertEqual(extract_inbound_messages(rows, consumed), [])
+
+    def test_inbound_poll_requires_explicit_verified_selectors(self):
+        with self.assertRaisesRegex(RuntimeError, "disabled"):
+            inbound_selectors({"inbound": {"enabled": False}})
+        config = {"inbound": {
+            "enabled": True, "selectors_verified": True,
+            "message_selector": ".message", "message_id_attribute": "data-message-id",
+            "incoming_selector": ".incoming", "text_selector": ".content",
+        }}
+        self.assertEqual(inbound_selectors(config)["message_id_attribute"], "data-message-id")
+
+    def test_inbound_rows_make_stable_local_ids_when_douyin_exposes_no_message_id(self):
+        class Page:
+            def evaluate(self, _script, _selectors):
+                return [{"id": "", "index": 2, "text": "收到"}]
+
+        selectors = {
+            "message_selector": ".messageMessageBoxselectableRow",
+            "message_id_attribute": "data-message-id",
+            "incoming_selector": ".messageMessageBoxselectableRow:not(:has(.messageMessageBoxisFromMe))",
+            "text_selector": ".TextMessageTextpureText",
+        }
+        first = read_inbound_rows(Page(), selectors)[0]["id"]
+        second = read_inbound_rows(Page(), selectors)[0]["id"]
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("dom:2:"))
+
+    def test_browser_profile_lock_rejects_overlap_and_releases(self):
+        with tempfile.TemporaryDirectory() as temp, patch("douyin_share.PROFILE_LOCK_PATH", Path(temp) / "profile.lock"):
+            with browser_profile_lock():
+                with self.assertRaisesRegex(RuntimeError, "already in use"):
+                    with browser_profile_lock():
+                        pass
+            with browser_profile_lock():
+                self.assertTrue((Path(temp) / "profile.lock").exists())
+
+    def test_inbound_reply_backend_is_owner_only_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            token_file = root / "token"
+            token_file.write_text("local-test-token", encoding="utf-8")
+            state_file = root / "state.json"
+            calls = []
+
+            class Response:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def read(self):
+                    return b'{"ok":true,"duplicate":false,"reply":"A reply"}'
+
+            def opener(request, timeout):
+                calls.append((request, timeout))
+                return Response()
+
+            cfg = {"recipient_handle": "dyecfcykdwea", "reply_backend": {
+                "enabled": True, "url": "http://127.0.0.1:3101/douyin/reply", "token_file": str(token_file)
+            }}
+            state = {}
+            self.assertIsNone(request_inbound_reply(cfg, state, "other", "msg-1", "hello", state_file, opener))
+            self.assertEqual(calls, [])
+            self.assertEqual(request_inbound_reply(cfg, state, "dyecfcykdwea", "msg-1", "hello", state_file, opener), "A reply")
+            self.assertIsNone(request_inbound_reply(cfg, state, "dyecfcykdwea", "msg-1", "hello", state_file, opener))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0].get_header("X-console-token"), "local-test-token")
+            self.assertEqual(json.loads(calls[0][0].data)["handle"], "dyecfcykdwea")
+
+    def test_inbound_reply_network_failure_consumes_id_before_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            token_file = root / "token"
+            token_file.write_text("local-test-token", encoding="utf-8")
+            state_file = root / "inbound-state.json"
+            calls = []
+
+            def opener(_request, timeout):
+                calls.append(timeout)
+                raise urllib.error.URLError("offline")
+
+            cfg = {"recipient_handle": "dyecfcykdwea", "reply_backend": {
+                "enabled": True, "url": "http://127.0.0.1:3101/douyin/reply", "token_file": str(token_file)
+            }}
+            state = {}
+            with self.assertRaisesRegex(RuntimeError, "consumed"):
+                request_inbound_reply(cfg, state, "dyecfcykdwea", "msg-2", "hello", state_file, opener)
+            self.assertIsNone(request_inbound_reply(cfg, state, "dyecfcykdwea", "msg-2", "hello", state_file, opener))
+            self.assertEqual(calls, [130])
+            self.assertEqual(json.loads(state_file.read_text(encoding="utf-8"))["inbound_reply_attempts"], ["msg-2"])
+
     def test_canonical_video_url_rejects_non_video_and_external_links(self):
         self.assertEqual(canonical_video_url("https://www.douyin.com/video/123?from=feed"), "https://www.douyin.com/video/123")
         self.assertIsNone(canonical_video_url("https://evil.example/video/123"))
@@ -143,9 +254,54 @@ class ShareLogicTests(unittest.TestCase):
     def test_message_includes_context_and_canonical_link(self):
         message = make_message(Video("https://www.douyin.com/video/9", "  花园  修剪  ", "A"))
         self.assertIn("花园 修剪", message)
+        self.assertIn("作者：A", message)
         self.assertIn("分享给你", message)
         self.assertNotIn("你可能会感兴趣", message)
         self.assertTrue(message.endswith("https://www.douyin.com/video/9"))
+
+    def test_watch_history_accepts_only_canonical_videos_with_meaningful_playback(self):
+        self.assertIsNone(clean_observation({
+            "url": "https://evil.example/video/9", "title": "unsafe", "watched_seconds": 20,
+        }))
+        self.assertIsNone(clean_observation({
+            "url": "https://www.douyin.com/video/9", "title": "short view", "watched_seconds": 7,
+        }))
+        self.assertEqual(clean_observation({
+            "url": "https://www.douyin.com/video/9?from=feed", "title": "garden\nclip",
+            "author": "@gardener", "watched_seconds": 12,
+        }), {
+            "url": "https://www.douyin.com/video/9", "title": "garden clip", "author": "@gardener",
+            "watchedSeconds": 12, "observedAt": "", "contentSummary": "", "transcript": "", "tags": [],
+        })
+
+    def test_watch_memory_sanitizes_and_bounds_video_analysis(self):
+        cleaned = clean_observation({
+            "url": "https://www.douyin.com/video/9", "title": "a video", "watched_seconds": 10,
+            "content_summary": "画面是\n一只猫", "transcript": "字幕\t你好" * 300,
+            "tags": ["猫", "  室内  ", "x" * 50, "a", "b", "ignored"],
+        })
+        self.assertEqual(cleaned["contentSummary"], "画面是 一只猫")
+        self.assertLessEqual(len(cleaned["transcript"]), 800)
+        self.assertEqual(cleaned["tags"], ["猫", "室内", "x" * 24, "a", "b"])
+
+    def test_watch_history_is_atomic_bounded_and_deduplicated_by_video(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "shared" / "douyin-interest-memory.json"
+            first = {
+                "url": "https://www.douyin.com/video/9", "title": "garden", "author": "A",
+                "watched_seconds": 12, "observed_at": "2026-11-02T10:00+08:00",
+            }
+            self.assertEqual(save_watch_history(path, [first]), 1)
+            self.assertEqual(save_watch_history(path, [{**first, "watched_seconds": 8}]), 1)
+            self.assertEqual(save_watch_history(path, [
+                {**first, "url": f"https://www.douyin.com/video/{number}", "title": f"video {number}"}
+                for number in range(10, 45)
+            ]), 35)
+            state = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(state["schemaVersion"], 1)
+            self.assertEqual(len(state["watchedVideos"]), 30)
+            self.assertNotIn("https://www.douyin.com/video/9", {row["url"] for row in state["watchedVideos"]})
+            self.assertFalse(path.with_suffix(path.suffix + ".tmp").exists())
 
     def test_dry_run_and_reached_quota_never_call_sender(self):
         cfg = {"daily_max": 2}
@@ -237,6 +393,33 @@ class ShareLogicTests(unittest.TestCase):
                     with patch("douyin_share.sync_playwright") as playwright:
                         self.assertEqual(run_scheduled(), 0)
                         playwright.assert_not_called()
+
+    def test_scheduler_polls_verified_inbox_without_a_due_video_slot(self):
+        fixed_now = datetime(2026, 10, 30, 8, 0, tzinfo=SINGAPORE)
+        today = fixed_now.date().isoformat()
+        state = {"daily_plans": {today: [
+            {"at": f"{today}T{hour:02d}:00+08:00", "status": "pending"}
+            for hour in (9, 12, 15, 18, 21)
+        ]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            state_path = Path(tmp) / "state.json"
+            config_path.write_text(json.dumps({
+                "daily_max": 5,
+                "scheduled_enabled": True,
+                "reply_backend": {"enabled": True},
+                "inbound": {"enabled": True, "selectors_verified": True},
+            }), encoding="utf-8")
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            with patch("douyin_share.CONFIG_PATH", config_path), patch("douyin_share.STATE_PATH", state_path):
+                with patch("douyin_share.datetime") as mocked_datetime:
+                    mocked_datetime.now.return_value = fixed_now
+                    mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+                    with patch("douyin_share.run_inbox", return_value=0) as inbox:
+                        with patch("douyin_share.sync_playwright") as playwright:
+                            self.assertEqual(run_scheduled(), 0)
+                            inbox.assert_called_once_with(inspect_only=False)
+                            playwright.assert_not_called()
 
 
 if __name__ == "__main__":
