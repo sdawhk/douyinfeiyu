@@ -31,4 +31,8 @@ test('speech is opt-in by phrase unless automatic mode is selected', () => {
   assert.equal(wantsVoiceReply('朗读静夜思给我听'), true);
   assert.equal(wantsVoiceReply('语音功能怎么样'), false);
   assert.equal(wantsVoiceReply('今天天气不错', 'always'), true);
+  assert.equal(wantsVoiceReply('今天天气不错', 'probability', 20, () => 0.19), true);
+  assert.equal(wantsVoiceReply('今天天气不错', 'probability', 20, () => 0.2), false);
+  assert.equal(wantsVoiceReply('今天天气不错', 'probability', 0, () => 0), false);
+  assert.equal(wantsVoiceReply('请用语音说出来', 'probability', 0, () => 0.9), true);
 });

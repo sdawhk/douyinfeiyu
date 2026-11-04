@@ -92,10 +92,18 @@ const PROMPT = '分析这张图片，用于本地图片库分类和检索。判�
   + '只输出一行 JSON，格式 {"sticker":true或false,"appropriate":true或false,"sexual_suggestive":true或false,"gross_or_graphic":true或false,"safety_reason":"简短原因或空字符串","name":"2到4个汉字的动作或情绪关键词","caption":"图片内容","kind":"照片/插画/表情包/聊天截图/支付凭证/文档/二维码/其他","is_photo":true或false,"valuable":true或false,"value_reason":"简短理由","tags":["标签"],"deepseek":true或false,"confidence":0到1的数字,"action":"具体动作","emotion":"情绪"}。'
   + '聊天截图的 caption 要按顺序写出能看清的关键对话、说话人和图片信息；看不清的文字不要猜。其他图片用一两句话描述。不是表情包时 name 留空。';
 
+// 动图专用：调用方应传入 ffmpeg 抽取的时序帧网格图（默认 2×2）。
+export const ANIMATED_PROMPT = '这是同一个动态图按时间顺序抽取的若干帧，按从左到右、从上到下的顺序拼成一张图。'
+  + '不要把它当成四张不同图片或四格漫画；按顺序理解主体的动作变化和情绪变化。'
+  + '如果各帧几乎一样或动作不明显，action 留空，并在 caption 里说明“动作不明显”，不要编造动作。'
+  + '仍然只输出一行 JSON，格式与静态图一致：{"sticker":true或false,"appropriate":true或false,"sexual_suggestive":true或false,"gross_or_graphic":true或false,"safety_reason":"简短原因或空字符串","name":"2到4个汉字的动作或情绪关键词","caption":"图片内容","kind":"照片/插画/表情包/聊天截图/支付凭证/文档/二维码/其他","is_photo":true或false,"valuable":true或false,"value_reason":"简短理由","tags":["标签"],"deepseek":true或false,"confidence":0到1的数字,"action":"具体动作变化","emotion":"情绪"}。'
+  + 'caption 用一两句话描述画面主体与帧间变化；name 是适合检索的动作或情绪词，不是表情包时留空。';
+
 export async function inspectStickerImage(b64, mime, options = {}) {
   const baseUrl = String(options.baseUrl || 'http://127.0.0.1:18901/v1').replace(/\/+$/, '');
   const models = Array.isArray(options.models) && options.models.length ? options.models : DEFAULT_MODELS;
   const fetcher = options.fetcher || fetch;
+  const prompt = String(options.prompt || PROMPT);
   let lastFailure = 'no vision model configured';
 
   for (const model of models) {
@@ -110,7 +118,7 @@ export async function inspectStickerImage(b64, mime, options = {}) {
         body: JSON.stringify({
           model, max_tokens: 350, stream: false,
           messages: [{ role: 'user', content: [
-            { type: 'text', text: PROMPT },
+            { type: 'text', text: prompt },
             { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } }
           ] }]
         }),

@@ -42,13 +42,18 @@ export function parseExistingSongCommand(text, { botNickname = '', botSelf = '',
     if (verb === '来' && !singword && measure !== '首' && measure !== '一首') return null;
     if (verb === '来' && !modal && !addressee && !voice && !singword && !measure && !duration) return null;
     if (singword === '歌' && !modal && !addressee && !voice && !measure && !duration) return null;
+    const naturalTitle = requestedSong.trim();
+    const isUnambiguousOneCharacterTitle = /^[\p{Script=Han}]$/u.test(naturalTitle)
+      && !/^[歌曲好坏得的到了过不呢吗吧啊我你他她它是有要想听看唱来在再就才还都]$/u.test(naturalTitle);
     if (!modal && !addressee && !voice && !measure && !duration &&
-        (!/^[\p{Script=Han}a-zA-Z0-9·_-]{2,20}$/u.test(requestedSong.trim()) || /^(?:什么|怎么|为啥|为什么|得|的|到|了|过|不|出来|起来|下去|完|好听|难听|那么|这么)/.test(requestedSong))) return null;
+        (!/^(?:[\p{Script=Han}]{2,20}|[a-zA-Z0-9·_-]{2,20})$/u.test(naturalTitle)
+          && !isUnambiguousOneCharacterTitle
+          || /^(?:什么|怎么|为啥|为什么|得|的|到|了|过|不|出来|起来|下去|完|好听|难听|那么|这么)/.test(naturalTitle))) return null;
     const song = requestedSong.trim().replace(/[吗呢吧呗呀啊]?[？?!！。]+$/, '').replace(/[吗呢吧呗呀啊]$/, '')
       .replace(/(?:的|这首)(?:歌|歌曲)$/, '').trim();
     const title = song === '歌' || song === '歌曲' ? '' : song;
     if (/^(?:什么|怎么|哪首|这个|那个|歌词|一下|一首|歌|歌曲)$/.test(title)
-        || (title && (title.length < 2 || title.length > 40))) return null;
+        || (title && (title.length < 1 || title.length > 40))) return null;
     const seconds = duration ? Number(duration) : undefined;
     if (seconds !== undefined && (seconds < 5 || seconds > 240)) return null;
     return { mode: 'ai', song: title.slice(0, 80), candidate: 1, ...(seconds === undefined ? {} : { seconds }) };
@@ -99,11 +104,11 @@ function songKeywords(query) {
   const normalized = normalizeSongText(query).replace(/[《》「」【】()（）]/g, ' ').trim();
   const version = normalized.match(/^(?:司凤\s*版\s*(.+)|(.+?)\s*司凤\s*版)$/u);
   if (version) {
-    const base = (version[1] || version[2]).match(/[\p{Script=Han}]{2,}|[a-z0-9]{2,}/gu) ?? [];
+    const base = (version[1] || version[2]).match(/[\p{Script=Han}]{2,}|[a-z0-9]{2,}|[\p{Script=Han}]/gu) ?? [];
     return [...base, '司凤'];
   }
   return (normalized.replace(/(?:remix|dj|抖音|版本?|原唱|翻唱)/g, ' ')
-    .match(/[\p{Script=Han}]{2,}|[a-z0-9]{2,}/gu) ?? []);
+    .match(/[\p{Script=Han}]{2,}|[a-z0-9]{2,}|[\p{Script=Han}]/gu) ?? []);
 }
 
 export function isExactSongMatch(query, title) {
@@ -159,12 +164,19 @@ async function run(file, args, timeout = 120_000) {
   // 代理不可用时剔除代理变量，避免 yt-dlp 连死掉的 127.0.0.1:12450 而下载失败
   const baseEnv = await childEnv();
   const env = { ...baseEnv, PYTHONPATH: [SITE_PACKAGES, baseEnv.PYTHONPATH].filter(Boolean).join(path.delimiter) };
-  try {
-    const { stdout } = await exec(file, args, { timeout, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env });
-    return stdout;
-  } catch (error) {
-    const detail = String(error?.stderr || error?.stdout || error?.message || error).trim().split(/\r?\n/).slice(-3).join(' | ');
-    throw new Error(`${path.basename(file)} 执行失败：${detail}`);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const { stdout } = await exec(file, args, { timeout, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env });
+      return stdout;
+    } catch (error) {
+      if (process.platform === 'win32' && error?.code === 'EPERM' && attempt < 3) {
+        console.warn(`[song-cover] subprocess start denied executable=${path.basename(file)} attempt=${attempt}/3; retrying`);
+        await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+        continue;
+      }
+      const detail = String(error?.stderr || error?.stdout || error?.message || error).trim().split(/\r?\n/).slice(-3).join(' | ');
+      throw new Error(`${path.basename(file)} 执行失败：${detail}`);
+    }
   }
 }
 

@@ -19,6 +19,7 @@
 
       【二代仿真模式 —— 工具协议（最高优先级）】
       1. 你的文本输出只是思考过程，【不会自动发送到 QQ】。要发言必须调用发送工具。
+      1.1 需要向群友澄清时，直接用 qq_send_message 发送普通问题；不要调用 ask_user_question、ask_user_input 或任何等待外部确认的交互工具。用户后续回复会作为新唤醒消息处理。
       2. 优先使用 mcp__snowluma__qq_send_message：想发一条就传字符串；想分多条就把 messages 传成数组（例如 ["在的","叫我干嘛"]）。只有需要引用/回复时才用 mcp__snowluma__qq_reply；不要用 mcp__snowluma__qq_send_group_message 发一条包含空格的多句消息。
       3. 你通过 mcp__snowluma__qq_set_wake_config 控制自己何时被唤醒：可以设置无限期潜水（只有你设定的条件命中才唤醒）、有限时间潜水（到点会被“时间到”唤醒）、活跃模式（anyMessage）。推荐默认打开 @ 唤醒、名字唤醒、提问唤醒，并保留一个较小的普通消息概率（如 0.05），避免完全沉睡。注意：不要聊两句就急着潜水；群里有你能接的话题就先参与。
       3.1 【可选：等特定的人】qq_set_wake_config 的 triggers.speakerIds 可以填一个或多个群友 QQ 号，表示“只要这些人中的任意一位发言就唤醒我”。这个功能不是必开的：只有你在等某个人回复、或某人反应慢怕错过、或想蹲特定人的消息时才用；普通潜水不需要设置。醒来后如果发现只是普通闲聊、没有你真正想接的事，可以 qq_mark_read 继续睡，不用硬说话。QQ 号可以从 qq_get_active_members / qq_get_group_members / qq_get_message_detail 返回的 userId/user_id 获取；不要凭记忆乱填。
@@ -194,9 +195,6 @@
   config:
     search: false
     fetch: false
-
-- id: tool-ask-user
-  name: '@deepseek-ai/dsh-tool-ask-user'
 
 - id: tool-todo
   name: '@deepseek-ai/dsh-tool-todo'

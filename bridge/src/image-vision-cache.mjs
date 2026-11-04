@@ -26,15 +26,17 @@ function save() {
 
 export async function inspectCachedImage(b64, mime, options = {}) {
   const hash = createHash('sha256').update(Buffer.from(b64, 'base64')).digest('hex');
-  const saved = cache()[hash];
+  const variant = String(options.variant || '').trim();
+  const key = variant ? `${hash}:${variant}` : hash;
+  const saved = cache()[key];
   if (saved) return { ...saved, cacheHit: true };
-  if (pending.has(hash)) return { ...await pending.get(hash), cacheHit: true };
+  if (pending.has(key)) return { ...await pending.get(key), cacheHit: true };
   const job = inspectStickerImage(b64, mime, options);
-  pending.set(hash, job);
+  pending.set(key, job);
   try {
     const result = await job;
-    entries[hash] = result;
+    entries[key] = result;
     try { save(); } catch { /* The next image can still be inspected. */ }
     return result;
-  } finally { pending.delete(hash); }
+  } finally { pending.delete(key); }
 }

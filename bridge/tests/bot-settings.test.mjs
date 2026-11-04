@@ -35,13 +35,17 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.equal(JSON.stringify(before).includes('tts-private-password'), false);
     assert.equal(JSON.stringify(before).includes('music-private-key'), false);
     assert.equal(before.settings.azureTts.hasKey, true);
+    assert.equal(before.settings.voiceReplyProbability, 20);
     assert.equal(before.settings.xfyunTts.hasApiPassword, true);
     assert.equal(before.settings.singing.hasApiKey, true);
     assert.equal(before.settings.singing.coverEnabled, true);
+    assert.deepEqual(before.settings.singing.allowedQQs, []);
     assert.deepEqual(before.settings.voiceClone, { enabled: false, mode: 'requested',
       endpoint: 'http://127.0.0.1:9882', refAudio: '', refText: '' });
     const next = structuredClone(before.settings);
     next.groupReplyCooldownMs = 12_000;
+    next.voiceReplyProbability = 35;
+    next.edgeTts.mode = 'probability';
     next.replyControl = { privateEnabled: false, groupEnabled: true, disabledPrivate: ['123456789'], disabledGroups: ['839367702'] };
     next.messageBatch = { enabled: true, idleMs: 4000, maxMs: 12000 };
     next.groupInterjectionDisabled = ['839367702'];
@@ -54,10 +58,13 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     next.voiceClone = { enabled: false, mode: 'requested', endpoint: 'http://127.0.0.1:9882',
       refAudio: 'D:\\voices\\reference.wav', refText: '你好，我是小鲸鱼。' };
     next.pokeInteraction.replies = '戳到啦\n在呢';
+    next.singing.allowedQQs = ['1234567890', '1234567890', ' 2345678901 '];
     const after = saveSettingsDocument(before.version, next, file);
     assert.notEqual(after.version, before.version);
     const saved = JSON.parse(readFileSync(file, 'utf8'));
     assert.equal(saved.snowluma.accessToken, 'private-token');
+    assert.equal(saved.voiceReplyProbability, 35);
+    assert.equal(saved.edgeTts.mode, 'probability');
     assert.equal(saved.dailyQzone.ownerQQ, '1668389572');
     assert.equal(saved.dailyQzone.minIntervalMs, 7_200_000);
     assert.deepEqual(saved.ownerCardLike, { enabled: true, time: '21:30' });
@@ -73,6 +80,7 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.equal(saved.azureTts.key, 'azure-private-key');
     assert.equal(saved.xfyunTts.apiPassword, 'tts-private-password');
     assert.equal(saved.singing.apiKey, 'music-private-key');
+    assert.deepEqual(saved.singing.allowedQQs, ['1234567890', '2345678901']);
     assert.equal(saved.edgeTts.url, 'http://127.0.0.1:18902');
     assert.equal(saved.edgeTts.workerUrl, 'https://tts.wangwangit.com');
     assert.equal(after.settings.edgeTts.url, 'https://tts.wangwangit.com');
@@ -85,11 +93,13 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.equal('key' in JSON.parse(readFileSync(file, 'utf8')).azureTts, false);
     assert.throws(() => saveSettingsDocument(before.version, next, file), { status: 409 });
     assert.throws(() => validateSettings({ ...next, groupReplyCooldownMs: -1 }), { status: 400 });
+    assert.throws(() => validateSettings({ ...next, voiceReplyProbability: 101 }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, replyControl: { ...next.replyControl, disabledGroups: ['invalid'] } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, messageBatch: { enabled: true, idleMs: 5000, maxMs: 4000 } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, stickerCooldown: { ...next.stickerCooldown, privateMs: -1 } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, pokeInteraction: { ...next.pokeInteraction, replies: '' } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, qzoneSocial: { ...next.qzoneSocial, allowedFriends: ['not-a-qq'] } }), { status: 400 });
+    assert.throws(() => validateSettings({ ...next, singing: { ...next.singing, allowedQQs: ['not-a-qq'] } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, qzoneSocial: { ...next.qzoneSocial, commentThreshold: next.qzoneSocial.likeThreshold - 1 } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, ownerCardLike: { ...next.ownerCardLike, time: '25:00' } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, voiceClone: { ...next.voiceClone, endpoint: 'https://example.com' } }), { status: 400 });

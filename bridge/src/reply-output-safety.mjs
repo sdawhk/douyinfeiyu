@@ -5,6 +5,7 @@ const REASONING_MARKER = /<\|(?:analysis|think|reasoning)\|>|<(?:analysis|think|
 const INTERNAL_NARRATION = /(?:当前(?:这)?轮(?:消息|内容|对话)?\s*[，,:：]|本轮(?:消息|内容|对话|说)\s*[，,:：]?|等等[，,]\s*我(?:需要|要|得)|让我(?:先)?(?:分析|想|仔细想)|我(?:需要|要|得)(?:先)?(?:仔细)?(?:分析|判断|思考|推理|想想)|用户(?:说|提到|想要|可能|的意思是|是在)|我(?:应该|需要|要|得)(?:如何|怎么|直接)?(?:回复|回答)|先(?:分析|推理)一下|(?:the user (?:said|means|wants|is asking)|user message|current turn|we need to|I should (?:answer|reply|respond)|let me think|let's think|let's analyze|need to understand)\b)/i;
 const ENGLISH_RECAP_ANALYSIS = /(?:^[^.!?\n]{1,100}\bsaid\s+["“][\s\S]{0,260}?\b(?:and then|then)\b[\s\S]{0,220}\b(?:hmm|the previous message|previous message)\b|\b(?:hmm|let me think)\b[\s\S]{0,160}\b(?:the )?(?:previous|preceding|earlier) message\b[\s\S]{0,120}\b(?:my|our)\s+(?:雷点|trigger|weak spot|sore spot)\b)/i;
 const MEDIA_PLACEHOLDER = /\[(?:图片|动画表情|表情|语音|视频|文件|非文本消息)\]/g;
+const GIF_PLACEHOLDER = /\[\s*gif\s*\]/gi;
 const GROUP_CONTEXT_LEAK = /\[(?:Image|图片)\s*:\s*\d{1,2}:\d{2}\b[^\]\n]{0,200}\]|(?:QQ\s*)?\d{5,20}[）)]\s*刚刚发了一条消息\s*[:：]|看不到原文图片里的内容[\s\S]{0,100}从语境来看/i;
 const CONTROL_MARKER = /\[\s*(?:SILENT|SKIP)\s*\]/i;
 const INTERNAL_STATUS_MARKER = /\[\s*sl\s*:\s*\d{1,3}\s*%\s*\]/gi;
@@ -24,6 +25,11 @@ export function sanitizeModelReply(value) {
   text = text.replace(/\[sticker\]\s*sent\b/gi, '').trim();
   if (!text) return { text: '', leaked: true, blocked: true };
 
+  const beforeRoleLabelCleanup = text;
+  text = text.replace(/^\s*(?:\[admin\]|【管理员】)\s*/i, '').trim();
+  const roleLabelLeaked = text !== beforeRoleLabelCleanup;
+  if (!text) return { text: '', leaked: true, blocked: true };
+
   const beforeStatusCleanup = text;
   text = text.replace(INTERNAL_STATUS_MARKER, '').replace(/[ \t]{2,}/g, ' ').trim();
   const statusMarkerLeaked = text !== beforeStatusCleanup;
@@ -36,6 +42,11 @@ export function sanitizeModelReply(value) {
   if (mediaPlaceholderLeaked) text = text.replace(/[ \t]{2,}/g, ' ').trim();
   if (!text) return { text: '', leaked: true, blocked: true };
 
+  const beforeGifCleanup = text;
+  text = text.replace(GIF_PLACEHOLDER, '').replace(/[ \t]{2,}/g, ' ').trim();
+  const gifPlaceholderLeaked = text !== beforeGifCleanup;
+  if (!text) return { text: '', leaked: true, blocked: true };
+
   // Control markers are never part of a QQ reply, even with spaces or other
   // text around them. Reject the whole output so the retry can start cleanly.
   if (CONTROL_MARKER.test(text)) {
@@ -44,7 +55,7 @@ export function sanitizeModelReply(value) {
 
   const reasoning = text.search(REASONING_MARKER);
   const final = text.match(FINAL_MARKER);
-  let leaked = stickerStatusLeaked || mediaPlaceholderLeaked || statusMarkerLeaked;
+  let leaked = stickerStatusLeaked || roleLabelLeaked || mediaPlaceholderLeaked || gifPlaceholderLeaked || statusMarkerLeaked;
   if (reasoning >= 0 && final && final.index > reasoning) {
     text = text.slice(final.index + final[0].length).trim();
     leaked = true;
@@ -86,6 +97,7 @@ export function replySafetyDiagnostics(rawValue, safeResult) {
       markers.push('reasoning-label');
     }
     if (/\[(?:图片|动画表情|表情|语音|视频|文件|非文本消息)\]/.test(text)) markers.push('media-placeholder');
+    if (/\[\s*gif\s*\]/i.test(text)) markers.push('gif-placeholder');
     if (/\[\s*(?:SILENT|SKIP)\s*\]/i.test(text)) markers.push('control-marker');
     if (/\[sticker\]\s*sent/i.test(text)) markers.push('sticker-status');
     if (hasStickerDirective(text)) markers.push('sticker-directive');
@@ -116,6 +128,20 @@ export function replyQualityIssue(input, reply) {
       || (compactQuestion.length >= 6 && compactAnswer.startsWith(compactQuestion))) return 'echoed-question';
   if (/^(?:[哈呵嘿嗯哦啊]+|收到|你猜|[?？!！。,.，~～])+$/u.test(answer)) return 'generic-non-answer';
   return '';
+}
+
+/** Catch an English paragraph in response to a Chinese message, while allowing terms and requested translation. */
+export function replyLanguageIssue(input, reply) {
+  const question = String(input ?? '');
+  if (!/\p{Script=Han}/u.test(question)
+      || /(?:用|说|回复|回答|改成|翻译成|写成)\s*(?:英文|英语|English)|(?:英文|英语)\s*(?:回复|回答|说|写)/iu.test(question)) return '';
+  const answer = stripStickerDirectives(reply).replace(/https?:\/\/\S+/gi, '');
+  const latinWords = answer.match(/[A-Za-z]+(?:['’][A-Za-z]+)*/g) ?? [];
+  const latinLetters = (answer.match(/[A-Za-z]/g) ?? []).length;
+  const hanChars = (answer.match(/\p{Script=Han}/gu) ?? []).length;
+  return (hanChars === 0 && latinWords.length >= 3 && latinLetters >= 12)
+    || (latinWords.length >= 5 && latinLetters >= 25 && latinLetters > hanChars * 3)
+    ? 'wrong-language' : '';
 }
 
 /** Compare actual reply text, not just shared topic words. */

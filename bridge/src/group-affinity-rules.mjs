@@ -13,3 +13,11 @@ export function isExplicitInsult(text) {
   return normalized.length > 0 && (INSULTS.some((pattern) => pattern.test(normalized))
     || /\b(?:sb|nmsl|cnm)\b/i.test(String(text ?? '')));
 }
+
+export function namesBotForGroupAffinity(text, nickname = '') {
+  const normalized = normalizeForInsultCheck(text);
+  const names = ['大肥鱼', '小鲸鱼', 'deepseek', '深度求索', nickname]
+    .map(normalizeForInsultCheck).filter(Boolean);
+  return names.some((name) => normalized.startsWith(name)
+    || (/^(?:谢谢|感谢|辛苦了)/.test(normalized) && normalized.endsWith(name)));
+}

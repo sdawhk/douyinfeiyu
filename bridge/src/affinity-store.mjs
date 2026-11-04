@@ -2,8 +2,9 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { classifyAffinityMessage } from './affinity-rules.mjs';
 import { isExplicitInsult } from './group-affinity-rules.mjs';
 
-const DIR = 'D:\\deepseek\\state';
-const FILE = `${DIR}\\affinity.json`;
+// 状态目录默认仍是 D:\deepseek\state；测试可显式指定，避免读写真实好感度数据。
+const DIR = process.env.AFFINITY_STATE_DIR || 'D:\\deepseek\\state';
+const FILE = process.env.AFFINITY_STATE_PATH || `${DIR}\\affinity.json`;
 const BASE_SCORE = 50;
 const DAILY_LIMIT = 3;
 const EVENT_COOLDOWN_MS = 20 * 60_000;
@@ -44,7 +45,13 @@ export function getAffinity(qq) {
   return { qq: String(qq), score, level: affinityLevel(score), events: (value.events || []).slice(-10).reverse() };
 }
 
-function applyChange(qq, delta, reason, source, now = Date.now()) {
+/** 主人通道：只跳过“每日配额 + 冷却”，不跳过关键词/模型判定，也不改步长与封顶。 */
+function ownerBypass(qq, { isOwner = false, ownerQQs = [] } = {}) {
+  if (isOwner === true) return true;
+  return Array.isArray(ownerQQs) && ownerQQs.map(String).includes(String(qq));
+}
+
+function applyChange(qq, delta, reason, source, now = Date.now(), { bypassLimits = false } = {}) {
   const state = load();
   const record = userRecord(state, String(qq));
   const day = localDate(new Date(now));
@@ -52,12 +59,12 @@ function applyChange(qq, delta, reason, source, now = Date.now()) {
   const key = delta > 0 ? 'positive' : 'negative';
   const magnitude = Math.max(-10, Math.min(10, Math.trunc(delta)));
   if (!magnitude) return getAffinity(qq);
-  if (source === 'automatic' && record.daily[key] >= DAILY_LIMIT) return getAffinity(qq);
+  if (source === 'automatic' && !bypassLimits && record.daily[key] >= DAILY_LIMIT) return getAffinity(qq);
   const bounded = source === 'automatic' ? Math.sign(magnitude) : magnitude;
   const storedScore = Number(record.score);
   const currentScore = Number.isFinite(storedScore) ? storedScore : BASE_SCORE;
   record.score = Math.max(0, Math.min(100, currentScore + bounded));
-  if (source === 'automatic') record.daily[key] += 1;
+  if (source === 'automatic' && !bypassLimits) record.daily[key] += 1;
   record.events = [...(record.events || []), { delta: bounded, reason: String(reason).slice(0, 80), at: new Date(now).toISOString(), source }].slice(-100);
   state[String(qq)] = record;
   save(state);
@@ -100,18 +107,41 @@ export function resetAffinity(qq) {
   return getAffinity(qq);
 }
 
-/** Only clear insults, repeated character-specific taboo teasing, and explicit praise affect scores. */
-export function recordAffinityMessage(qq, text, now = Date.now()) {
+/** Only directed, explicit relationship signals affect individual affinity. */
+export function recordAffinityMessage(qq, text, now = Date.now(), { directed = true, isOwner = false, ownerQQs = [] } = {}) {
   const message = String(text ?? '').trim();
-  if (!/^\d{5,20}$/.test(String(qq)) || !message || message.startsWith('/') || message.length > 300) return null;
+  if (!directed || !/^\d{5,20}$/.test(String(qq)) || !message || message.startsWith('/') || message.length > 300) return null;
   const state = load();
   const record = userRecord(state, String(qq));
-  const { insult, praise } = classifyAffinityMessage(message);
-  const direction = (insult || isExplicitInsult(message)) ? -1 : praise ? 1 : 0;
+  const { insult, praise, reason: signalReason } = classifyAffinityMessage(message);
+  const reportedOrJokingInsult = /(?:不是(?:在)?骂你|没骂你|我没说你|我不是说你|别当真|开玩笑|引用|转述|他说|她说|有人说).{0,20}(?:傻逼|傻叉|去死|滚蛋|废物|垃圾机器人|脑残|弱智|智障)/i.test(message);
+  const explicitInsult = !reportedOrJokingInsult && (insult || isExplicitInsult(message));
+  const direction = explicitInsult ? -1 : praise ? 1 : 0;
   if (!direction) return null;
+  const bypass = ownerBypass(qq, { isOwner, ownerQQs });
   const last = [...(record.events || [])].reverse().find((event) => event.source === 'automatic' && Math.sign(event.delta) === direction);
-  if (last && now - Date.parse(last.at) < EVENT_COOLDOWN_MS) return null;
-  const reason = direction > 0 ? '明确感谢或赞美' : '明确辱骂';
-  const result = applyChange(qq, direction, reason, 'automatic', now);
+  if (!bypass && last && now - Date.parse(last.at) < EVENT_COOLDOWN_MS) return null;
+  const reason = direction > 0 ? signalReason : '明确辱骂';
+  const result = applyChange(qq, direction, reason, 'automatic', now, { bypassLimits: bypass });
   return result;
+}
+
+/** Let the conversation model assess context that the explicit keyword rules miss. */
+export function shouldModelAssessAffinity(qq, text, { directed = true } = {}) {
+  const message = String(text ?? '').trim();
+  if (!directed || !/^\d{5,20}$/.test(String(qq)) || !message || message.startsWith('/') || message.length > 300) return false;
+  const { insult, praise } = classifyAffinityMessage(message);
+  return !insult && !praise && !isExplicitInsult(message);
+}
+
+/** Apply the model's contextual judgment through the same caps and cooldown as rule-based changes. */
+export function recordModelAffinityAssessment(qq, delta, reason, now = Date.now(), { directed = true, isOwner = false, ownerQQs = [] } = {}) {
+  if (!directed || !/^\d{5,20}$/.test(String(qq)) || !/^[+-]?1$/.test(String(delta))) return null;
+  const direction = Number(delta);
+  const bypass = ownerBypass(qq, { isOwner, ownerQQs });
+  const last = [...(userRecord(load(), String(qq)).events || [])].reverse()
+    .find((event) => event.source === 'automatic' && Math.sign(event.delta) === direction);
+  if (!bypass && last && now - Date.parse(last.at) < EVENT_COOLDOWN_MS) return null;
+  const cleanReason = `团团判断：${String(reason ?? '').replace(/[\r\n]/g, ' ').slice(0, 50)}`;
+  return applyChange(qq, direction, cleanReason, 'automatic', now, { bypassLimits: bypass });
 }

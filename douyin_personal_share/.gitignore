@@ -1,7 +1,10 @@
 config.json
 browser-profile/
 state.json
+daily-browse-state.json
 inbound-state.json
+inbound-diagnostics.jsonl
+interaction-state.json
 recipient-verification.json
 playwright-temp/
 .browser-profile.lock

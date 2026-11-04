@@ -29,6 +29,7 @@ export async function synthesizeAzureSpeech(text, config, fetchImpl = fetch) {
   return `base64://${audio.toString('base64')}`;
 }
 
-export function wantsVoiceReply(input, mode = 'requested') {
-  return mode === 'always' || /(?:用语音|语音(?:说|背|朗读|念|复述|回复|回答)|(?:给我)?(?:发|来|录)(?:个|句|条|段)?语音|(?:说|念|朗读|背诵).{0,20}(?:给我听|出来))/i.test(String(input ?? ''));
+export function wantsVoiceReply(input, mode = 'requested', probability = 20, random = Math.random) {
+  return /(?:用语音|语音(?:说|背|朗读|念|复述|回复|回答)|(?:给我)?(?:发|来|录)(?:个|句|条|段)?语音|(?:说|念|朗读|背诵).{0,20}(?:给我听|出来))/i.test(String(input ?? ''))
+    || mode === 'always' || (mode === 'probability' && random() * 100 < probability);
 }

@@ -37,6 +37,7 @@ test('removes media placeholders from an otherwise useful reply', () => {
 test('flags obvious non-answers to a question without rejecting short real answers', () => {
   assert.equal(replyQualityIssue('你喜欢看什么视频？', '[sticker:开心]'), 'missing-answer');
   assert.equal(replyQualityIssue('这是什么意思？', '[STICKER:897]'), 'missing-answer');
+  assert.equal(replyQualityIssue('这是什么意思？', '[table:621]'), 'missing-answer');
   assert.equal(replyQualityIssue('你喜欢看什么视频？', '哈哈'), 'generic-non-answer');
   assert.equal(replyQualityIssue('你喜欢看什么视频？', '你喜欢看什么视频？'), 'echoed-question');
   assert.equal(replyQualityIssue('你喜欢看什么视频？', '游戏实况'), '');

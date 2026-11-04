@@ -8,17 +8,21 @@ import {
   updatePaidSongOrder, registerSongOutput, listUncertainPaidSongOrders, resolvePaidSongOrder,
   savePaidSongSegments, listPaidSongSegments, getPaidSongOrder, updatePaidSongSegment
 } from './song-library.mjs';
+import { findCachedSongInPlaylist, listCachedSongPlaylist, loadSongOutputById } from './song-output-cache.mjs';
 
 // 试听 / 红包逻辑总开关（2026-10-30 按主人要求停用）。
 // 两个开关置 false 即停用；相关代码、数据库表和已缓存音频全部保留，
 // 改回 true 就能原样恢复，不需要重新实现。
-export const PREVIEW_ENABLED = false;      // 歌单试听、试听N、新歌试听、试听待核对
+export const PREVIEW_ENABLED = false;      // 旧 30 秒试听、试听N、新歌试听、试听待核对
 export const RED_PACKET_ENABLED = false;   // 红包候选通知、红包通过/拒绝/待核验、红包账本
 
 let libraryLoaded = false;
 let reservationsReconciled = false;
 const playlistSnapshots = new Map();
+const cachedPlaylistSnapshots = new Map();
 const PLAYLIST_SNAPSHOT_TTL_MS = 30 * 60_000;
+const numericPlaylistSessions = new Map();
+const NUMERIC_PLAYLIST_WINDOW_MS = 5 * 60_000;
 const lastChatterByChat = new Map();
 const SONG_CHATTER = {
   playlist: [
@@ -83,6 +87,24 @@ function cachePlaylistSnapshot(key) {
   return songs;
 }
 
+function cachedPlaylistSnapshot(key, refresh = false, getCachedPlaylist = listCachedSongPlaylist) {
+  const saved = cachedPlaylistSnapshots.get(key);
+  if (!refresh && saved?.expiresAt > Date.now()) return saved.songs;
+  const songs = getCachedPlaylist();
+  cachedPlaylistSnapshots.set(key, { songs, expiresAt: Date.now() + PLAYLIST_SNAPSHOT_TTL_MS });
+  if (cachedPlaylistSnapshots.size > 200) cachedPlaylistSnapshots.delete(cachedPlaylistSnapshots.keys().next().value);
+  return songs;
+}
+
+export function isPendingPlaylistNumber(text, key) {
+  const command = normalizeSongCommandText(text);
+  if (!/^[1-9]\d{0,3}$/.test(command)) return false;
+  const session = numericPlaylistSessions.get(key);
+  if (session && session.expiresAt <= Date.now()) numericPlaylistSessions.delete(key);
+  return Boolean(session && session.expiresAt > Date.now() && !session.used
+    && Number(command) <= session.songs.length);
+}
+
 function isFreeGroupFullSong(query) {
   const normalized = String(query ?? '').normalize('NFKC').toLowerCase()
     .replace(/雨愛/g, '雨爱').replace(/司[鳳風风]/g, '司凤')
@@ -100,20 +122,34 @@ export function normalizeSongCommandText(text, { selfNickname = '', selfQQ = '',
       || name === String(selfQQ) || name === `qq${selfQQ}`;
     if (recognized) normalized = value.slice(mention[0].length).trim();
   }
+  const fullSongForms = [
+    /^(?:唱完整首|唱完整版|唱整首)(?=\S)(.+)$/u,
+    /^(?:唱完整版|唱整首)\s+(.+)$/u,
+    /^(?:(?:请|麻烦|能不能|可不可以|可以)\s*)?(?:(?:帮我|给我|我想让你|我想听你|想听你)\s*)?唱(?:一下|一首|首)?\s*(.+?)(?:的)?(?:完整版|完整首|整首)(?:歌曲)?[吗呢吧呗呀啊。！!？?]*$/u,
+    /^(?:(?:请|麻烦|能不能|可不可以|可以)\s*)?(?:(?:帮我|给我)\s*)?把\s*(.+?)\s*(?:唱完整|唱完)(?:整首)?[吗呢吧呗呀啊。！!？?]*$/u,
+    /^[《「](.+)[》」]\s*唱(?:一下)?(?:的)?(?:完整版|完整首|整首)[吗呢吧呗呀啊。！!？?]*$/u,
+  ];
+  for (const pattern of fullSongForms) {
+    const match = normalized.match(pattern);
+    if (match) {
+      const query = match[1].trim().replace(/^[《「](.*)[》」]$/u, '$1');
+      if (query) return `唱完整首 ${query}`;
+    }
+  }
   return normalized.replace(/^(新歌试听|唱完整首)(?=\S)(.+)$/u, '$1 $2');
 }
 
 export function isSongLibraryCommand(text) {
   const command = normalizeSongCommandText(text);
-  return /^(?:歌单(?:\s+\d{1,4})?|试听\s*(?:\d{1,4}|[a-f0-9]{12})|新歌试听(?:\s+.+)?|唱完整首(?:\s+.+)?|好友列表(?:\s+\d{1,3})?|红包账本|红包待核验|红包通过\s+[a-f0-9]{64}\s+\d+\s+\S+|红包拒绝\s+[a-f0-9]{64}|余额|QQ\s*钱包余额|试听待核对|核对试听\s+[a-f0-9]{64}\s+(?:已发送|未发送)|付费订单待核对|核对付费\s+[a-f0-9]{64}(?:\s+\d+)?\s+(?:已发送|未发送)|我的点歌额度)$/i.test(command);
+  return /^(?:歌单(?:\s+\d{1,4})?|点歌\s*(?:\d{1,4}|[a-f0-9]{12})|试听\s*(?:\d{1,4}|[a-f0-9]{12})|新歌试听(?:\s+.+)?|唱完整首(?:\s+.+)?|好友列表(?:\s+\d{1,3})?|红包账本|红包待核验|红包通过\s+[a-f0-9]{64}\s+\d+\s+\S+|红包拒绝\s+[a-f0-9]{64}|余额|QQ\s*钱包余额|试听待核对|核对试听\s+[a-f0-9]{64}\s+(?:已发送|未发送)|付费订单待核对|核对付费\s+[a-f0-9]{64}(?:\s+\d+)?\s+(?:已发送|未发送)|我的点歌额度)$/i.test(command);
 }
 
 export function shouldRouteSongLibraryCommand(text, { replyEnabled = true, muted = false } = {}) {
   return isSongLibraryCommand(text) && replyEnabled === true && muted !== true;
 }
 
-export function shouldBlockLegacySongRequest(isOwner, mode = 'ai') {
-  return !isOwner && mode !== 'search';
+export function shouldBlockLegacySongRequest(isOwner, mode = 'ai', senderId = '', allowedQQs = []) {
+  return mode !== 'search' && !isOwner && !allowedQQs.includes(String(senderId));
 }
 
 export async function handleRedPacketCandidateNotice({ event, botId, chatKey, ownerIds, sendPrivate }) {
@@ -149,11 +185,15 @@ function uncertainDelivery(error) {
 
 export async function handleSongLibraryCommand({
   text, key, senderId, sourceMessageId, isGroup, isOwner = false, botId = '',
-  sendText, sendRecord, onSongDelivery = () => {}, getFriendList, refreshLibrary = refreshSongLibrary,
-  makePaidPreview, makePaidFullSong, coverEnabled = false
+  sendText, sendRecord, onSongDelivery = () => {}, onPlaylistSelection = () => {}, getFriendList, refreshLibrary = refreshSongLibrary,
+  makePaidPreview, makePaidFullSong, coverEnabled = false,
+  getCachedPlaylist = listCachedSongPlaylist, getCachedOutput = loadSongOutputById,
+  findCachedSong = findCachedSongInPlaylist
 }) {
   const command = normalizeSongCommandText(text);
   const listMatch = command.match(/^歌单(?:\s+(\d{1,4}))?$/);
+  const cachedPickMatch = command.match(/^点歌\s*(\d{1,4}|[a-f0-9]{12})$/i);
+  const numericPick = isPendingPlaylistNumber(command, key) ? command : null;
   // 分支检测保持原样，确保命令一定被识别（不能漏给模型瞎答）；
   // 停用由下面的总开关在入口处提前回绝。
   const previewMatch = command.match(/^试听\s*(\d{1,4}|[a-f0-9]{12})$/i);
@@ -170,23 +210,69 @@ export async function handleSongLibraryCommand({
   const paidPending = command === '付费订单待核对';
   const paidResolve = command.match(/^核对付费\s+([a-f0-9]{64})(?:\s+(\d+))?\s+(已发送|未发送)$/i);
   const quotaCommand = command === '我的点歌额度';
-  if (!listMatch && !previewMatch && !paidMatch && !friendMatch && !ownerQuery
+  if (!listMatch && !cachedPickMatch && !numericPick && !previewMatch && !paidMatch && !friendMatch && !ownerQuery
       && !packetPendingCommand && !packetApprove && !packetReject
       && !pendingCommand && !resolveMatch && !paidPending && !paidResolve && !quotaCommand) return false;
   if (!claimSongCommandEvent({ chatKey: key, senderId, messageId: sourceMessageId })) return true;
 
   const say = (message) => sendText(message);
   // 试听 / 红包逻辑已停用：命令仍被识别，但只做明确回绝，不再走试听与记账分支。
-  // “唱完整首”是唯一保留的付费类命令（改为主人免费），不在这里拦截。
-  if (!PREVIEW_ENABLED && (listMatch || previewMatch || pendingCommand || resolveMatch
+  // “唱完整首”保留为免费分段命令，不在这里拦截。
+  if (!PREVIEW_ENABLED && (previewMatch || pendingCommand || resolveMatch
       || quotaCommand || (paidMatch && !paidFullMatch))) {
-    await say(listMatch || previewMatch || (paidMatch && !paidFullMatch)
-      ? '歌单试听已经关掉了；想听歌直接说“唱歌 歌名”，主人可以用“唱完整首 歌名”。'
-      : '试听和点歌额度相关的命令都停用啦，直接点歌就行。');
+    await say(previewMatch || (paidMatch && !paidFullMatch)
+      ? '30 秒试听已经关掉了；可以发送“歌单”，再用“点歌1”听本地已有的歌曲。'
+      : '试听和点歌额度相关的命令都停用啦。');
     return true;
   }
   if (!RED_PACKET_ENABLED && (ownerQuery || packetPendingCommand || packetApprove || packetReject)) {
     await say('红包核验和现金账本已经停用，不再记账。');
+    return true;
+  }
+  if (listMatch && !PREVIEW_ENABLED) {
+    const songs = cachedPlaylistSnapshot(key, true, getCachedPlaylist);
+    const page = Math.max(1, Number(listMatch[1] || 1));
+    const pages = Math.max(1, Math.ceil(songs.length / 10));
+    if (!songs.length) await say('本地歌单还没有可用的流萤翻唱成品。');
+    else if (page > pages) await say(`歌单共 ${songs.length} 首，第 ${pages} 页是最后一页。`);
+    else {
+      const previous = numericPlaylistSessions.get(key);
+      const session = previous?.expiresAt > Date.now()
+        ? { ...previous, songs }
+        : { songs, used: false, expiresAt: Date.now() + NUMERIC_PLAYLIST_WINDOW_MS };
+      const lines = songs.slice((page - 1) * 10, page * 10)
+        .map((song, index) => `${(page - 1) * 10 + index + 1}. ${song.query}（${Math.round(song.seconds)} 秒，ID ${song.id.slice(0, 12)}）`);
+      await say(`本地歌单 ${page}/${pages}（共 ${songs.length} 首）\n${lines.join('\n')}\n${session.used ? '本轮纯数字点歌已用过；仍可发送“点歌1”或“点歌 ID”。' : '5 分钟内直接回复序号（如“1”）可点歌一次；也可发送“点歌1”或“点歌 ID”。'}听后说“发整首”可分段唱完整首。${songChatterLine(key, 'playlist')}`);
+      numericPlaylistSessions.set(key, session);
+      if (numericPlaylistSessions.size > 200) numericPlaylistSessions.delete(numericPlaylistSessions.keys().next().value);
+    }
+    return true;
+  }
+  if (cachedPickMatch || numericPick) {
+    const selector = (cachedPickMatch?.[1] ?? numericPick).toLowerCase();
+    const songs = numericPick ? numericPlaylistSessions.get(key).songs
+      : cachedPlaylistSnapshot(key, false, getCachedPlaylist);
+    const selected = /^\d+$/.test(selector) ? songs[Number(selector) - 1]
+      : songs.find((song) => song.id.startsWith(selector));
+    if (!selected) { await say('歌单里没有这个编号，请发送“歌单”查看。'); return true; }
+    const cached = getCachedOutput(selected.id);
+    if (!cached) { await say('这首歌的本地成品已不可用，请刷新歌单再选。'); return true; }
+    if (numericPick) numericPlaylistSessions.get(key).used = true;
+    try {
+      await sendRecord(cached.audio);
+    } catch (error) {
+      const uncertain = uncertainDelivery(error);
+      onSongDelivery({ title: cached.title, mode: 'playlist', status: uncertain ? 'uncertain' : 'failed', seconds: cached.seconds });
+      console.error(`[song-library] cached delivery ${uncertain ? 'uncertain' : 'failed'} song=${cached.id}:`, error?.message ?? error);
+      await say(uncertain ? '语音发送结果暂时无法确认，请先查看聊天记录，避免重复收到。'
+        : '语音没有发送成功；成品仍在本地，稍后可以再点这首。');
+      return true;
+    }
+    onSongDelivery({ title: cached.title, mode: 'playlist', status: 'sent', seconds: cached.seconds });
+    try { onPlaylistSelection(cached); }
+    catch (error) { console.error('[song-library] recent song save failed:', error?.message ?? error); }
+    await say(`《${cached.query}》已从本地歌单发出。想听整首可以说“发整首”。${songChatterLine(key, 'replay')}`).catch((error) =>
+      console.error('[song-library] cached delivery confirmation failed:', error?.message ?? error));
     return true;
   }
   const ensureLibrary = () => {
@@ -284,11 +370,12 @@ export async function handleSongLibraryCommand({
   if (paidMatch) {
     const fullMatch = paidFullMatch;
     const requestedQuery = String(paidPreviewMatch?.[1] ?? fullMatch?.[1] ?? '').trim().slice(0, 80);
-    // 整首只对主人开放；试听已随 PREVIEW_ENABLED 停用（paidPreviewMatch 此时恒为 null）。
-    if (!isOwner) {
+    // 群友仅可对已有歌单歌曲要求整首；不能借此制作歌单外的新歌。
+    const catalogSong = fullMatch ? findCachedSong(requestedQuery) : null;
+    if (!isOwner && !catalogSong) {
       await say(fullMatch
-        ? '“唱完整首”只有主人能用；群友想听直接说“唱歌 歌名”。'
-        : '新歌试听已经关掉了；想听歌直接说“唱歌 歌名”。');
+        ? '群友只能要求歌单里已有的歌曲唱整首；请先发送“歌单”查看。'
+        : '新歌试听已经关掉了。');
       return true;
     }
     if (!requestedQuery) { await say('请提供准确歌名，例如：唱完整首 <歌名>。'); return true; }
@@ -296,13 +383,13 @@ export async function handleSongLibraryCommand({
     // 红包入账停用后点歌单位永远是 0，整首改走免费通道（credit_source='promo'，
     // reservePaidSongOrder 对 free 只允许 kind='full' 且不扣任何单位）。
     const ownerFreeFull = Boolean(fullMatch && !PREVIEW_ENABLED && !RED_PACKET_ENABLED);
-    const query = freeFullSong ? '雨爱（司凤版）' : requestedQuery;
+    const query = catalogSong?.query ?? (freeFullSong ? '雨爱（司凤版）' : requestedQuery);
     if (!coverEnabled || (fullMatch ? typeof makePaidFullSong !== 'function' : typeof makePaidPreview !== 'function')) {
       await say('现成歌曲点唱当前未启用；需要主人先在运行设置中开启。');
       return true;
     }
     const kind = fullMatch ? 'full' : 'preview';
-    const order = reservePaidSongOrder({ senderId, chatKey: key, query, kind, free: freeFullSong || ownerFreeFull });
+    const order = reservePaidSongOrder({ senderId, chatKey: key, query, kind, free: freeFullSong || ownerFreeFull || Boolean(catalogSong) });
     if (!order.ok) {
       await say(order.reason === 'conversation-busy' ? '这个会话已有点歌订单正在处理或待核对。'
         : order.reason === 'insufficient-credit' ? `可用点歌单位不足。当前可用 ${getPaidSongUnitSummary(senderId).available} 单位；${fullMatch ? '整首需 3 单位（1 元等值）' : '试听需 1 单位（约 1/3 元等值）'}。100 分核验额度折算 3 单位，余分累计。`
@@ -310,7 +397,7 @@ export async function handleSongLibraryCommand({
       return true;
     }
     updatePaidSongOrder(order.orderId, { status: 'processing' });
-    const reservationDescription = order.creditSource === 'promo' ? '主人专属免费曲目，不扣点歌单位'
+    const reservationDescription = order.creditSource === 'promo' ? `${!isOwner && catalogSong ? '歌单整首免费' : '主人免费点唱'}，不扣点歌单位`
       : order.creditSource === 'grant' ? '预留 1 次旧版赠送整首权益'
       : order.creditSource === 'units' ? `预留 ${order.unitCost} 个点歌单位（${order.unitCost === 3 ? '1 元等值' : '约 1/3 元等值'}）`
         : `预留 ${(order.priceCents / 100).toFixed(2)} 元历史现金额度`;
@@ -382,10 +469,10 @@ export async function handleSongLibraryCommand({
         try { indexed = registerSongOutput({ file: durableSegments[0].cachePath, title: result.title, query,
           mode: 'ai', voiceVariant: result.voiceVariant ?? '', startSeconds: 0, seconds: 30 }); }
         catch (error) { console.error(`[paid-song] full catalog registration failed order=${order.orderId}:`, error?.message ?? error); }
-        const settlementDescription = order.creditSource === 'promo' ? '本首为主人专属免费曲目，未扣点歌单位'
+        const settlementDescription = order.creditSource === 'promo' ? `${!isOwner && catalogSong ? '歌单整首免费' : '主人免费点唱'}，未扣点歌单位`
           : order.creditSource === 'grant' ? '已核销 1 次旧版赠送整首权益'
           : order.creditSource === 'units' ? '已结算 3 个点歌单位（1 元等值）' : `已结算历史现金额度 ${(order.priceCents / 100).toFixed(2)} 元`;
-        try { await say(`《${result.title}》整首翻唱已由 OneBot 确认发送 ${segmentCount} 段，${settlementDescription}。${indexed ? '已加入本地歌单。' : '歌单核验未通过，暂不展示。'}${songChatterLine(key, 'full')}`); }
+        try { await say(`《${result.title}》整首翻唱已由 OneBot 确认发送 ${segmentCount} 段，${settlementDescription}。${findCachedSong(query) || indexed ? '已加入本地歌单。' : '音频已保存在本地。'}${songChatterLine(key, 'full')}`); }
         catch (error) { console.error(`[paid-song] completion notice failed order=${order.orderId}:`, error?.message ?? error); }
       } catch (error) {
         const uncertain = deliveryAttempted && uncertainDelivery(error);
@@ -522,4 +609,6 @@ export function resetSongLibraryCommandStateForTests() {
   libraryLoaded = false;
   reservationsReconciled = false;
   playlistSnapshots.clear();
+  cachedPlaylistSnapshots.clear();
+  numericPlaylistSessions.clear();
 }

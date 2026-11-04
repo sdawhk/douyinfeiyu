@@ -13,7 +13,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { SENSITIVE_RE } from './sensitive.js';
-import { isProfileApproval } from './profile-approval.mjs';
+import {
+  AVATAR_AUDIT_PATH,
+  AVATAR_STATE_PATH,
+  AVATAR_WORK_DIR,
+  avatarOptions,
+  changeAvatar,
+  isAvatarSessionAllowed,
+  previewAvatar
+} from './avatar-image.mjs';
+import { resolveFfmpegPath } from './animated-image.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -165,16 +174,224 @@ async function agentApi(path, init = {}) {
   return body;
 }
 
+async function douyinShareApi(init = {}) {
+  const consoleToken = readConsoleToken();
+  if (!consoleToken) throw new Error('本地控制台令牌不可用');
+  const res = await fetch('http://127.0.0.1:3101/douyin/share-latest', {
+    ...init,
+    headers: { 'content-type': 'application/json', 'x-console-token': consoleToken, ...(init.headers ?? {}) },
+    signal: AbortSignal.timeout(200000)
+  });
+  let body = null;
+  try { body = await res.json(); } catch {}
+  if (!res.ok) throw new Error(body?.error || `抖音分享 API HTTP ${res.status}`);
+  return body;
+}
+
+async function douyinBrowseApi(minutes) {
+  const consoleToken = readConsoleToken();
+  if (!consoleToken) throw new Error('本地控制台令牌不可用');
+  const res = await fetch('http://127.0.0.1:3101/douyin/browse', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-console-token': consoleToken },
+    body: JSON.stringify({ minutes }),
+    signal: AbortSignal.timeout(900_000)
+  });
+  let body = null;
+  try { body = await res.json(); } catch {}
+  if (!res.ok) throw new Error(body?.error || `抖音浏览 API HTTP ${res.status}`);
+  return body;
+}
+
+async function douyinInteractApi(payload) {
+  const consoleToken = readConsoleToken();
+  if (!consoleToken) throw new Error('本地控制台令牌不可用');
+  const res = await fetch('http://127.0.0.1:3101/douyin/interact', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-console-token': consoleToken },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(420_000)
+  });
+  let body = null;
+  try { body = await res.json(); } catch {}
+  if (!res.ok) throw new Error(body?.error || `抖音互动 API HTTP ${res.status}`);
+  return body;
+}
+
 async function authorizeRead(key, token) {
   await agentApi('/api/authorize/read', { method: 'POST', body: JSON.stringify({ key, token: token || undefined }) });
 }
 
+const OWNER_MEMORY_FILE = path.join(ROOT, 'state', 'owner-private-memory.json');
+const OWNER_MEMORY_KEYS = { identity: 'identityFacts', fact: 'facts', event: 'events', correction: 'corrections' };
+
+function readOwnerMemory() {
+  if (!fs.existsSync(OWNER_MEMORY_FILE)) return { schemaVersion: 2 };
+  const value = JSON.parse(fs.readFileSync(OWNER_MEMORY_FILE, 'utf8'));
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('主人私聊记忆格式无效，已拒绝覆盖');
+  return value;
+}
+
+function writeOwnerMemory(memory) {
+  fs.mkdirSync(path.dirname(OWNER_MEMORY_FILE), { recursive: true });
+  const temp = `${OWNER_MEMORY_FILE}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify({ ...memory, schemaVersion: 2 }, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(temp, OWNER_MEMORY_FILE);
+}
+
+function cleanOwnerMemoryText(value, label = '记忆内容') {
+  const text = String(value ?? '').replace(/[\r\n\u0000-\u001f]/g, ' ').trim();
+  if (!text || [...text].length > 400) throw new Error(`${label}需为 1 到 400 个字符`);
+  return text;
+}
+
 const server = new McpServer({ name: 'snowluma-safe', version: '0.1.0' });
+
+server.tool(
+  'douyin_browse_recommendations',
+  '仅主人 QQ 私聊可用。打开已登录的抖音账号，在普通“推荐”流中实际播放并理解视频，记录最近观看内容。每次 1–5 分钟，只浏览和记录，不点赞、评论、关注或发送消息。主人明确要求自己刷/逛抖音或查看新视频时调用；如果浏览器忙、登录失效或遇到验证，按工具结果如实说明。',
+  { key: z.string(), token: z.string(), minutes: z.number().int().min(1).max(5) },
+  async ({ key, token, minutes }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('抖音浏览仅允许主人 QQ 私聊调用');
+      await authorizeRead(key, token);
+      const result = await douyinBrowseApi(minutes);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `抖音浏览失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'douyin_interact_with_video',
+  '仅主人 QQ 私聊可用。对一条明确指定的抖音标准视频页点赞或评论。主人明确要求点赞时才能 action=like；评论必须逐字使用主人本轮明确给出的 commentText，不得自行编写。dryRun=true 只检查页面控件并验证输入框，不会点赞或提交评论；真正操作必须 dryRun=false。每次仅操作一条视频，不批量、不关注、不重试状态不明的操作。',
+  {
+    key: z.string(), token: z.string(), action: z.enum(['like', 'comment']),
+    videoUrl: z.string().url().max(500), commentText: z.string().max(200).optional(),
+    dryRun: z.boolean()
+  },
+  async ({ key, token, action, videoUrl, commentText, dryRun }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('抖音点赞/评论仅允许主人 QQ 私聊调用');
+      await authorizeRead(key, token);
+      if (action === 'comment' && !String(commentText ?? '').trim()) throw new Error('评论必须提供主人明确给出的原文');
+      if (action === 'like' && commentText) throw new Error('点赞操作不能附带评论文案');
+      const result = await douyinInteractApi({ action, videoUrl, commentText, dryRun });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `抖音互动失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'douyin_share_latest_watched_video',
+  '仅主人 QQ 私聊可用。把大肥鱼实际刷到并记录的最新一条未分享视频，发到已核验的主人抖音会话。一次最多一条；受每日 5 条总上限和去重限制。主人明确说分享/发给我时调用；无观看记录或发送失败时如实说明，不要重试不确定的发送。',
+  { key: z.string(), token: z.string() },
+  async ({ key, token }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('抖音视频分享仅允许主人 QQ 私聊调用');
+      await authorizeRead(key, token);
+      const result = await douyinShareApi({ method: 'POST', body: JSON.stringify({}) });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `分享最近刷到的抖音视频失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_owner_memory_query',
+  '只读查询鲸团团与主人之间的私聊长期记忆，包含身份事实、事实、共同经历和纠错。仅主人私聊可用；不要把内容带入群聊。',
+  { key: z.string(), token: z.string() },
+  async ({ key, token }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('主人私聊记忆仅允许主人私聊查询');
+      await authorizeRead(key, token);
+      return { content: [{ type: 'text', text: JSON.stringify(readOwnerMemory(), null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `主人私聊记忆读取失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_owner_memory_append',
+  '仅当主人在当前私聊明确要求“记住/记一下”或明确纠正旧记忆时，写入主人私聊长期记忆。不得自动记录推测、群聊内容、密码、账号凭据、住址等敏感信息。纠错必须提供原记忆和更正后的事实。',
+  {
+    key: z.string(), token: z.string(),
+    category: z.enum(['identity', 'fact', 'event', 'correction']),
+    content: z.string().trim().min(1).max(400),
+    replaces: z.string().trim().max(400).optional().describe('correction 时要替换的旧事实原文'),
+    occurredAt: z.string().trim().max(32).optional().describe('只有主人明确提供事件发生时间时填写；不要推测')
+  },
+  async ({ key, token, category, content, replaces, occurredAt }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('主人私聊记忆仅允许主人私聊写入');
+      await authorizeRead(key, token);
+      const clean = cleanOwnerMemoryText(content);
+      const previous = category === 'correction' ? cleanOwnerMemoryText(replaces, '待更正的旧记忆') : '';
+      const keyName = OWNER_MEMORY_KEYS[category];
+      const memory = readOwnerMemory();
+      const entries = Array.isArray(memory[keyName]) ? [...memory[keyName]] : [];
+      const matches = (item, value) => typeof item === 'string' ? item === value
+        : item && typeof item === 'object' && [item.content, item.text, item.summary, item.fact, item.previous].some((candidate) => candidate === value);
+      if (category === 'correction') {
+        for (const oldKey of ['identityFacts', 'identity', 'facts', 'events', 'corrections']) {
+          memory[oldKey] = (Array.isArray(memory[oldKey]) ? memory[oldKey] : []).filter((item) => !matches(item, previous));
+        }
+        const corrections = Array.isArray(memory.corrections) ? memory.corrections : [];
+        const duplicate = corrections.some((item) => item && typeof item === 'object' && item.content === clean && item.previous === previous);
+        memory.corrections = (duplicate ? corrections : [...corrections,
+          { content: clean, previous, source: '主人明确纠正', confidence: 'confirmed', recordedAt: new Date().toISOString() }]).slice(-100);
+      } else {
+        const duplicate = entries.some((item) => matches(item, clean));
+        if (!duplicate) entries.push({ content: clean, source: '主人明确要求记录', confidence: 'confirmed', recordedAt: new Date().toISOString(),
+          ...(category === 'event' && occurredAt ? { occurredAt: cleanOwnerMemoryText(occurredAt, '事件时间') } : {}) });
+        memory[keyName] = entries.slice(-100);
+      }
+      writeOwnerMemory(memory);
+      return { content: [{ type: 'text', text: `主人私聊记忆已${category === 'correction' ? '更正' : '记录'}：${clean}` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `主人私聊记忆写入失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_owner_memory_remove',
+  '仅主人明确要求忘记或删除某条私聊记忆时使用；精确删除匹配条目。仅主人私聊可用，不影响群聊记忆。',
+  {
+    key: z.string(), token: z.string(),
+    category: z.enum(['identity', 'fact', 'event', 'correction']),
+    content: z.string().trim().min(1).max(400)
+  },
+  async ({ key, token, category, content }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('主人私聊记忆仅允许主人私聊删除');
+      await authorizeRead(key, token);
+      const clean = cleanOwnerMemoryText(content);
+      const memory = readOwnerMemory();
+      const keyName = OWNER_MEMORY_KEYS[category];
+      const entries = Array.isArray(memory[keyName]) ? memory[keyName] : [];
+      const matches = (item) => typeof item === 'string' ? item === clean
+        : item && typeof item === 'object' && [item.content, item.text, item.summary, item.fact, item.previous].some((candidate) => candidate === clean);
+      const remaining = entries.filter((item) => !matches(item));
+      const removed = remaining.length !== entries.length;
+      memory[keyName] = remaining;
+      writeOwnerMemory(memory);
+      return { content: [{ type: 'text', text: removed ? `已从主人私聊记忆删除：${clean}` : '没有找到完全匹配的主人私聊记忆，未删除其他内容。' }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `主人私聊记忆删除失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
 
 async function qzoneTool(action, args) {
   try {
     const data = await agentApi('/api/qzone/tool', {
-      method: 'POST', body: JSON.stringify({ action, ...args }), timeoutMs: action === 'post' ? 80_000 : 25_000
+      method: 'POST', body: JSON.stringify({ action, ...args }), timeoutMs: ['post', 'replace'].includes(action) ? 80_000 : 25_000
     });
     return { content: [{ type: 'text', text: data.result }] };
   } catch (error) {
@@ -183,7 +400,7 @@ async function qzoneTool(action, args) {
 }
 
 server.tool('qq_post_qzone',
-  '在自己的 QQ 空间发布一条完整说说。仅主人私聊会话可用；内容会经过公开文本检查、重复话题检查与发送后回读确认。不要把私聊、群聊原文或工具诊断直接公开；发送结果不确定时先查动态，不要立即重试。',
+  '在自己的 QQ 空间发布一条完整说说。爸已授予持续权限，无需逐次批准；仅主人私聊会话可用。内容会经过公开文本检查、重复话题检查与发送后回读确认。不要把私聊、群聊原文或工具诊断直接公开；发送结果不确定时先查动态，不要立即重试。',
   { key: z.string().describe('当前主人私聊会话 key，格式 private:QQ号'), token: z.string().describe('当前会话令牌'), content: z.string().describe('要公开发布的完整说说正文') },
   (args) => qzoneTool('post', args));
 
@@ -201,6 +418,16 @@ server.tool('qq_comment_qzone',
   '回复机器人自己说说下的指定评论或楼中楼。先用 qq_qzone_detail 确认评论路径；路径如 1 或 1.1。仅主人私聊会话可用，回复内容最多 500 字。',
   { key: z.string().describe('当前主人私聊会话 key'), token: z.string().describe('当前会话令牌'), index: z.number().int().min(1).max(110).describe('动态全局序号'), path: z.string().regex(/^\d+(?:\.\d+)*$/).describe('评论路径，例如 1.1'), content: z.string().min(1).max(500).describe('回复正文') },
   (args) => qzoneTool('comment', args));
+
+server.tool('qq_delete_my_qzone',
+  '删除自己 QQ 空间的一条说说。爸已授予持续权限，无需逐次批准；仅主人私聊可用。必须先调用 qq_list_my_qzone/qq_qzone_detail 核实序号确属机器人自己的动态，再提供 index。删除不可撤销，不得删除他人动态。',
+  { key: z.string().describe('当前主人私聊会话 key'), token: z.string().describe('当前会话令牌'), index: z.number().int().min(1).max(110).describe('从自己的动态列表确认的全局序号') },
+  (args) => qzoneTool('delete', args));
+
+server.tool('qq_replace_my_qzone',
+  '修订自己 QQ 空间的一条旧说说。爸已授予持续权限，无需逐次批准；仅主人私聊可用。先按 index 读取并核实自己的旧动态，再发布新版本；只有新版本确认成功后才删除旧动态。平台没有原地改正文接口，所以这是先发新再删旧的替换。',
+  { key: z.string().describe('当前主人私聊会话 key'), token: z.string().describe('当前会话令牌'), index: z.number().int().min(1).max(110).describe('从自己的动态列表确认的全局序号'), content: z.string().trim().min(1).describe('修订后的完整动态正文') },
+  (args) => qzoneTool('replace', args));
 
 server.tool(
   'qq_status',
@@ -224,18 +451,16 @@ server.tool(
 
 server.tool(
   'qq_set_my_profile',
-  '修改机器人当前登录 QQ 账号自己的昵称或个性签名。仅主人私聊可用；必须先在当前对话明确候选，再等主人明确同意后调用。主人只需回复一句“我给你授权”或“确认改昵称和签名”，不要求重复候选。approvalText 填主人刚刚的授权原话；“再试试”“我看看”等不算授权。禁止修改其他人的资料。',
+  '修改机器人当前登录 QQ 账号自己的昵称或个性签名。爸已授予持续权限，无需逐次批准；仅主人私聊可用。禁止修改爸或其他人的资料。',
   {
     key: z.string().describe('当前主人私聊会话 key，格式 private:主人QQ号'),
     token: z.string().describe('当前会话令牌'),
-    approvalText: z.string().min(1).max(100).describe('主人刚刚明确授权修改的原话，逐字填写'),
     nickname: z.string().trim().min(1).max(20).optional().describe('要设置的新昵称（1 至 20 字）'),
     personalNote: z.string().trim().min(1).max(30).optional().describe('要设置的新个性签名（1 至 30 字）')
   },
-  async ({ key, token, approvalText, nickname, personalNote }) => {
+  async ({ key, token, nickname, personalNote }) => {
     try {
       if (!isOwnerPrivateSession(key)) throw new Error('修改 QQ 资料仅允许主人私聊操作');
-      if (!isProfileApproval(approvalText)) throw new Error('没有检测到主人对本次资料修改的明确授权');
       if (!nickname && !personalNote) throw new Error('请至少提供昵称或个性签名其中一项');
       for (const [label, value, maxLength] of [['昵称', nickname, 20], ['签名', personalNote, 30]]) {
         if (value && ([...value].length > maxLength || /[\r\n\u0000-\u001f]/.test(value))) {
@@ -250,6 +475,127 @@ server.tool(
       return { content: [{ type: 'text', text: `资料修改已由 OneBot 确认成功：${nickname ? `昵称「${nickname}」` : ''}${nickname && personalNote ? '，' : ''}${personalNote ? `签名「${personalNote}」` : ''}` }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `修改 QQ 资料失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+// ── 个人头像（P0）：仅主人私聊；只接受本机图库/表情/内置形象/指定消息 ──────
+// 不暴露 URL 来源；旧头像备份失败即中止；真正上传前必须经过预览或 confirm=true。
+function avatarReadMessageFor(key, token) {
+  return async (messageId) => {
+    const q = new URLSearchParams({ key, messageId: String(messageId) });
+    const data = await agentApi(`/api/images/message?${q.toString()}`, {
+      headers: token ? { 'x-agent-token': token } : {},
+      timeoutMs: 180000
+    });
+    const images = Array.isArray(data?.images) ? data.images : [];
+    const image = images.find((item) => item?.data && item?.mimeType);
+    if (!image) throw new Error(data?.note || '这条消息里没有可用的图片');
+    return { data: image.data, mimeType: image.mimeType };
+  };
+}
+
+async function fetchAvatarBytes(url) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length < 1024) throw new Error('下载到的旧头像为空或过小');
+  return buffer;
+}
+
+function avatarQuotaText(quota) {
+  if (!quota || typeof quota !== 'object') return '';
+  if (!quota.ok) return `\n配额提示：${quota.reason}`;
+  return quota.remaining == null ? '' : `\n今日剩余次数：${quota.remaining}`;
+}
+
+server.tool(
+  'qq_set_my_avatar',
+  '修改机器人当前登录 QQ 自己（鲸团团）的个人头像。仅主人 QQ 私聊可用，群聊与非主人私聊一律拒绝。图片来源只允许四类：archive=本机图库里的 imageId（如 2026-11-01/aa8faf3e18fbad42.gif）、sticker=收藏表情 id、self=内置形象 deepseek娘.png、message=当前会话中指定 messageId 的图片；不接受任何外部 URL，也不能拿群友或他人的图片。两段式：先不带 confirm（或 dryRun=true）只做预览，得到主人本轮明确确认后再带 confirm=true 才会真正更换。真正更换前会先把旧头像备份到 state/avatar-history/，备份失败即中止；只有工具返回成功后才可以声称头像已更换。',
+  {
+    key: z.string().describe('当前主人私聊会话 key，格式 private:主人QQ号'),
+    token: z.string().describe('当前会话令牌'),
+    sourceType: z.enum(['archive', 'sticker', 'self', 'message']).describe('图片来源类型'),
+    imageId: z.string().optional().describe('archive 来源必填：图库里的“日期/文件名”'),
+    stickerId: z.string().optional().describe('sticker 来源必填：收藏表情 id 或图库文件名'),
+    messageId: z.union([z.number(), z.string()]).optional().describe('message 来源必填：当前会话里带图片的消息 id'),
+    confirm: z.boolean().optional().default(false).describe('主人明确确认后才传 true；否则只预览'),
+    dryRun: z.boolean().optional().default(false).describe('true 时只预览，绝不更换头像')
+  },
+  async ({ key, token, sourceType, imageId, stickerId, messageId, confirm, dryRun }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('换头像仅允许主人私聊操作，群聊与非主人一律拒绝');
+      const current = getConfig();
+      if (!isAvatarSessionAllowed(key, current)) throw new Error('换头像仅允许主人私聊操作，群聊与非主人一律拒绝');
+      const options = avatarOptions(current.imageAvatar);
+      if (!options.enabled) throw new Error('换头像功能未启用');
+      if (sourceType === 'archive' && !String(imageId ?? '').trim()) {
+        throw new Error('sourceType=archive 时必须提供 imageId（形如 2026-11-01/aa8faf3e18fbad42.gif）');
+      }
+      if (sourceType === 'sticker' && !String(stickerId ?? '').trim()) {
+        throw new Error('sourceType=sticker 时必须提供 stickerId');
+      }
+      if (sourceType === 'message' && String(messageId ?? '').trim() === '') {
+        throw new Error('sourceType=message 时必须提供 messageId');
+      }
+      await authorizeRead(key, token);
+
+      const deps = {
+        uin: current.selfQQ || current.ownerQQ,
+        readMessage: avatarReadMessageFor(key, token),
+        fetchAvatar: fetchAvatarBytes,
+        upload: async (b64) => { await onebot('set_qq_avatar', { file: `base64://${b64}` }); },
+        ffmpegPath: resolveFfmpegPath(options.ffmpegPath),
+        statePath: AVATAR_STATE_PATH,
+        auditPath: AVATAR_AUDIT_PATH,
+        workRoot: AVATAR_WORK_DIR,
+        now: () => Date.now()
+      };
+      const input = { sourceType, imageId, stickerId, messageId };
+
+      // 预览分支：dryRun 或未确认。只读配额，不备份、不上传、不写配额。
+      if (dryRun || (options.requireConfirm && !confirm)) {
+        const preview = await previewAvatar({ input, options, deps });
+        if (!preview.ok) {
+          return { content: [{ type: 'text', text: `换头像预览失败（阶段：${preview.stage}）：${preview.reason}。未更换头像。` }], isError: true };
+        }
+        const p = preview.preview;
+        const quotaLine = preview.quota?.ok === false
+          ? `当前配额：${preview.quota.reason}`
+          : `当前配额：今日剩余 ${preview.quota?.remaining ?? options.dailyLimit} 次`;
+        return {
+          content: [{
+            type: 'text',
+            text: [
+              '换头像预览（未执行，头像没有变化）：',
+              `来源：${p.ref}`,
+              `原图：${String(p.format).toUpperCase()}，${Math.round(p.inputBytes / 1024)} KB，${p.animated ? '动图，只取首帧' : '静态图'}`,
+              `将上传：JPEG ${p.width}×${p.height}，${Math.round(p.outputBytes / 1024)} KB`,
+              quotaLine,
+              '得到主人本轮明确同意后，再以 confirm=true 调用本工具才会真正更换；dryRun=true 永远只预览。'
+            ].join('\n')
+          }]
+        };
+      }
+
+      const result = await changeAvatar({ input, options, deps });
+      if (!result.ok) {
+        return {
+          content: [{
+            type: 'text',
+            text: `换头像失败（阶段：${result.stage}）：${result.reason}。头像未确认更换，不要对外声称已换。${result.backupPath ? `\n旧头像备份：${result.backupPath}` : ''}`
+          }],
+          isError: true
+        };
+      }
+      return {
+        content: [{
+          type: 'text',
+          text: `头像已更换成功：来源 ${result.preview.ref}，JPEG ${result.preview.width}×${result.preview.height}，${Math.round(result.preview.outputBytes / 1024)} KB。${result.preview.animated ? '（原图为动图，只用了首帧）' : ''}\n旧头像已备份：${result.backupPath}${avatarQuotaText(result.quota)}`
+        }]
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `换头像失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );
@@ -378,7 +724,7 @@ server.tool(
 
 server.tool(
   'qq_send_private_message',
-  '向指定 QQ 好友发送一条私聊消息。若提供 replyToMessageId，会以 QQ 引用/回复形式发出（引用条 + 文本）。replyToMessageId 必须是非零整数消息 id（QQ 消息 id 可能为负数），可先用 qq_get_message_detail 查询。二代模式（reserved2）下这是可用的发送工具之一，但优先使用 qq_send_message；调用时必须携带会话令牌 token，否则会被拒绝。不要在发送后输出“已发送”类汇报。目标 QQ 必须命中系统白名单（config.json 的 allow.private），否则拒绝。',
+  '向指定 QQ 好友发送一条私聊消息。若提供 replyToMessageId，会以 QQ 引用/回复形式发出（引用条 + 文本）。replyToMessageId 必须是非零整数消息 id（QQ 消息 id 可能为负数），可先用 qq_get_message_detail 查询。二代模式（reserved2）下这是可用的发送工具之一，但优先使用 qq_send_message；调用时必须携带会话令牌 token，否则会被拒绝。不要在发送后输出“已发送”类汇报。目标 QQ 必须命中系统白名单（config.json 的 allow.private），否则拒绝。只有主人为来源会话单独配置跨会话发送权限时，才可用当前来源会话令牌向其他白名单好友发送。',
   {
     userId: z.union([z.number(), z.string()]).describe('好友 QQ 号（必须在白名单内）'),
     message: z.string().describe('消息文本，纯文本，不要用 Markdown 或 CQ 码'),
@@ -402,7 +748,7 @@ server.tool(
 // ── 二代仿真模式（reserved2）工具 ─────────────────────────────────────────
 server.tool(
   'qq_get_prompt',
-  '查看当前二代仿真模式的提示词/角色/推荐值/可用工具/当前唤醒配置（只读）。',
+  '查看当前二代仿真模式的提示词/角色/推荐值/可用工具/当前唤醒配置（只读）。若当前来源会话获准跨会话访问，响应还会列出可查看、可发送的私聊白名单会话。',
   { key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'), token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）') },
   async ({ key, token }) => {
     try {
@@ -430,7 +776,7 @@ server.tool(
 
 server.tool(
   'qq_get_recent_messages',
-  '查看指定会话的最近消息（只读），支持 offset 扩大范围。',
+  '查看指定会话的最近消息（只读），支持 offset 扩大范围。普通会话只能查看自己的记录；被主人单独授权跨会话查看时，可把 qq_get_prompt 返回的 crossSessionAccess.privateSessions 中的私聊 key 与当前来源会话 token 一起使用。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),

@@ -2,6 +2,13 @@
   "recipient_profile_url": "",
   "recipient_handle": "",
   "daily_max": 5,
+  "daily_browse": {
+    "enabled": false,
+    "time": "20:30",
+    "minutes": 10,
+    "share_to_owner": true,
+    "post_qzone": true
+  },
   "scheduled_enabled": true,
   "reply_backend": {
     "enabled": false,

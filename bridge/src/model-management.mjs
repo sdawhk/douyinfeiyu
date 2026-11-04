@@ -179,6 +179,59 @@ async function waitForDshModel(dsh, model) {
   }
   throw new Error(`DSH 尚未加载模型 ${model}`);
 }
+export async function testQQSessionChain(model = readPolicy().primary) {
+  if (!MODEL_ID.test(model || '')) throw Object.assign(new Error('模型 ID 格式无效'), { status: 400 });
+  const started = Date.now();
+  let dsh;
+  let sessionId;
+  try {
+    dsh = await dshClient();
+    await waitForDshModel(dsh, model);
+    const session = await dsh.sessions.create({ request: { cwd: process.cwd(), agentPreset: 'qq-chat' } });
+    sessionId = session?.sessionId;
+    if (!sessionId) throw new Error('DSH 未返回测试会话 ID');
+    await dsh.sessions.selectModel({ sessionId, provider: 'dsh', model });
+    await dsh.sessions.prompt({ request: {
+      sessionId,
+      requestId: `qq-chain-test-${Date.now()}`,
+      mode: 'queue',
+      content: [{ type: 'text', text: '这是 QQ 会话链路自检。请只用中文纯文字回复“QQ会话链路正常”，不要调用任何工具。' }]
+    } });
+
+    const deadline = Date.now() + 75_000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const projection = await dsh.sessions.projections({ request: { sessionId } });
+      const outline = projection?.values?.turnOutline ?? [];
+      if (!Number.isSafeInteger(projection?.asOfSeq)) continue;
+      const page = await dsh.sessions.page({
+        address: { kind: 'session', sessionId },
+        throughSeq: projection.asOfSeq,
+        maxMessages: 100,
+        turnWindow: { minMessages: 2, minTurns: 1 }
+      });
+      const events = (page?.records ?? []).map((record) => record?.event).filter(Boolean);
+      const interactiveTool = events.find((event) => event.type === 'tool/call'
+        && /^(?:ask_user_question|ask_user_input|request_user_input|ask_user_confirmation)$/.test(String(event.data?.name ?? '')));
+      if (interactiveTool) throw new Error(`QQ 会话调用了不受支持的交互工具：${interactiveTool.data.name}`);
+      const completedTurn = [...outline].reverse().find((turn) => turn.response);
+      if (!completedTurn) continue;
+      const messages = events.filter((event) => event.type === 'assistant/message' && event.data?.turn === completedTurn.turn)
+        .sort((a, b) => a.seq - b.seq);
+      const final = messages.at(-1);
+      const text = (final?.data?.message?.content ?? [])
+        .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+        .map((block) => block.text).join('').trim();
+      if (text) return { model, ok: true, elapsedMs: Date.now() - started };
+    }
+    throw new Error('QQ 会话链路等待纯文字回复超时（75 秒）');
+  } catch (error) {
+    if (dsh && sessionId) {
+      try { await dsh.sessions.cancel({ request: { sessionId } }); } catch {}
+    }
+    return { model, ok: false, elapsedMs: Date.now() - started, reason: safeFailure(error) };
+  }
+}
 function updatedDshSource(source, model) {
   const block = /(- id: agent-default-model\r?\n[\s\S]*?\bmodel:\s*)\S+/;
   const changed = source.replace(block, `$1${model}`);
@@ -217,13 +270,15 @@ export async function saveModelPolicy(input) {
     }
     atomicWrite(DSH_PATCH_FILE, updatedDshSource(previousDsh, next.primary));
     await waitForDshModel(dsh, next.primary);
+    const qqSessionTest = await testQQSessionChain(next.primary);
+    if (!qqSessionTest.ok) throw new Error(`QQ 会话链路自检失败：${qqSessionTest.reason}`);
     for (const session of sessions) {
       await dsh.sessions.selectModel({ sessionId: session.sessionId, provider: 'dsh', model: next.primary });
       applied.push(session);
     }
     const status = await modelStatus();
     if (!status.effective) throw new Error('模型代理或 DSH 配置未生效');
-    return { saved: next, tests, sessions: { updated: applied.length, total: sessions.length }, status };
+    return { saved: next, tests, qqSessionTest, sessions: { updated: applied.length, total: sessions.length }, status };
   } catch (error) {
     if (previousPolicy == null) { try { unlinkSync(POLICY_FILE); } catch {} }
     else atomicWrite(POLICY_FILE, previousPolicy);

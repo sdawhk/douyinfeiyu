@@ -4,11 +4,108 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { callOnebotApi } from '../src/onebot-api.mjs';
+import { findCachedSongInPlaylist, listCachedSongPlaylist, loadSongOutputById, saveSongOutput } from '../src/song-output-cache.mjs';
 
 const FRAME_SIZE = Math.floor(144 * 128_000 / 44_100);
 const FRAMES = 1150;
 
-test('active bridge song commands are deterministic and settle quota only on OneBot success', async (t) => {
+test('full-song aliases and natural phrasing normalize to the deterministic command', async () => {
+  const commands = await import(`../src/song-library-commands.mjs?full-song-aliases=${Date.now()}`);
+  for (const [input, expected] of [
+    ['唱完整首雨爱司凤版', '唱完整首 雨爱司凤版'],
+    ['唱完整版 嘲', '唱完整首 嘲'],
+    ['唱整首嘲', '唱完整首 嘲'],
+    ['唱整首 嘲', '唱完整首 嘲'],
+    ['唱完整版嘲', '唱完整首 嘲'],
+    ['唱《嘲》的完整版', '唱完整首 嘲'],
+    ['给我唱一下《嘲》完整版', '唱完整首 嘲'],
+    ['我想听你唱《嘲》的完整版', '唱完整首 嘲'],
+    ['能不能唱一下嘲的完整版', '唱完整首 嘲'],
+    ['把《嘲》唱完整', '唱完整首 嘲'],
+    ['把嘲唱完', '唱完整首 嘲'],
+    ['能不能把嘲唱完', '唱完整首 嘲'],
+    ['《嘲》唱完整版', '唱完整首 嘲'],
+  ]) {
+    assert.equal(commands.normalizeSongCommandText(input), expected);
+    assert.equal(commands.isSongLibraryCommand(input), true, `${input} stays on the deterministic full-song route`);
+  }
+});
+
+test('current song policy lists and sends cached songs, while keeping previews and red packets off', async (t) => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'song-current-policy-test-'));
+  const cacheRoot = path.join(temp, 'song-cache');
+  const cached = saveSongOutput({ query: '测试歌', title: '测试歌', mode: 'ai', candidate: 1,
+    startSeconds: 30, seconds: 60, voiceVariant: 'rvc:0:clear-v4' }, Buffer.alloc(2048, 4), { root: cacheRoot });
+  let testNow = Date.now();
+  t.mock.method(Date, 'now', () => testNow);
+  process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
+  const library = await import('../src/song-library.mjs');
+  const commands = await import(`../src/song-library-commands.mjs?current=${Date.now()}`);
+  t.after(() => { library.closeSongLibraryForTests(); delete process.env.DSH_SONG_LIBRARY_DB; rmSync(temp, { recursive: true, force: true }); });
+  const messages = [];
+  const deliveryFacts = [];
+  const catalog = { getCachedPlaylist: () => listCachedSongPlaylist({ root: cacheRoot }),
+    getCachedOutput: (id) => loadSongOutputById(id, { root: cacheRoot }),
+    findCachedSong: (query) => findCachedSongInPlaylist(query, { root: cacheRoot }) };
+  const base = { key: 'group:12345', senderId: '67890', isGroup: true,
+    sendText: async (message) => messages.push(message), sendRecord: async () => assert.fail('disabled preview must not send audio'),
+    onSongDelivery: (event) => deliveryFacts.push(event), ...catalog };
+  assert.equal(commands.shouldBlockLegacySongRequest(false, 'ai', '67890', []), true);
+  assert.equal(commands.shouldBlockLegacySongRequest(false, 'ai', '67890', ['67890']), false);
+  assert.equal(commands.shouldBlockLegacySongRequest(false, 'original', '67890', ['67890']), false);
+  assert.equal(commands.shouldBlockLegacySongRequest(false, 'search', '67890', []), false);
+  assert.equal(commands.shouldBlockLegacySongRequest(true, 'ai', '67890', []), false);
+  assert.equal(commands.isSongLibraryCommand('点歌1'), true);
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, text: '歌单' }), true);
+  assert.match(messages.at(-1), /测试歌/);
+  assert.match(messages.at(-1), /点歌1/);
+  assert.equal(commands.isSongLibraryCommand('1'), false, 'plain numbers are never global commands');
+  assert.equal(commands.isPendingPlaylistNumber('1', base.key), true);
+  assert.equal(commands.isPendingPlaylistNumber('2', base.key), false);
+  assert.equal(commands.isPendingPlaylistNumber('1', 'group:other'), false);
+  for (const text of ['试听1', '新歌试听 测试歌', '我的点歌额度']) {
+    assert.equal(await commands.handleSongLibraryCommand({ ...base, text }), true);
+    assert.match(messages.at(-1), /停用|关掉/);
+  }
+  let selected = null;
+  let sends = 0;
+  const pick = { ...base, text: '点歌1', sourceMessageId: 'qq-pick-1',
+    coverEnabled: false, sendRecord: async (audio) => { sends++; assert.equal(audio[0], 4); },
+    onPlaylistSelection: (song) => { selected = song; } };
+  assert.equal(await commands.handleSongLibraryCommand({ ...pick, text: '1', sourceMessageId: 'qq-number-1' }), true);
+  assert.equal(sends, 1);
+  assert.equal(commands.isPendingPlaylistNumber('1', base.key), false, 'a numeric selection closes the five-minute window');
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, text: '歌单' }), true);
+  assert.match(messages.at(-1), /纯数字点歌已用过/);
+  assert.equal(commands.isPendingPlaylistNumber('1', base.key), false, 'relisting cannot reset the window');
+  assert.equal(await commands.handleSongLibraryCommand(pick), true);
+  assert.equal(sends, 2, 'the explicit 点歌 command remains available');
+  assert.equal(selected.id, cached.id);
+  assert.equal(deliveryFacts.at(-1).status, 'sent');
+  assert.equal(await commands.handleSongLibraryCommand({ ...pick, key: 'g12345' }), true);
+  assert.equal(sends, 2, 'the same QQ event cannot send twice through both bridge listeners');
+  testNow += 5 * 60_000 + 1;
+  assert.equal(commands.isPendingPlaylistNumber('1', base.key), false);
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, text: '歌单' }), true);
+  assert.equal(commands.isPendingPlaylistNumber('1', base.key), true, 'a new list opens one numeric selection after five minutes');
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, text: '红包账本' }), true);
+  assert.match(messages.at(-1), /停用/);
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, text: '唱完整首 歌单外', coverEnabled: true }), true);
+  assert.match(messages.at(-1), /歌单里已有/);
+  let sent = 0;
+  assert.equal(await commands.handleSongLibraryCommand({ ...base, senderId: '60000',
+    text: '唱完整版 测试歌', coverEnabled: true,
+    makePaidFullSong: async () => ({ title: '测试歌', sourceIdentity: 'source:current-policy', voiceVariant: 'rvc:0',
+      segments: [{ segmentIndex: 0, startSeconds: 0, seconds: 30, audio: Buffer.alloc(1024), cachePath: path.join(temp, 'song.mp3') }] }),
+    sendRecord: async () => { sent++; } }), true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sent, 1);
+  assert.match(messages.join('\n'), /歌单整首免费/);
+  assert.match(messages.join('\n'), /不扣点歌单位/);
+});
+
+// 历史付费/试听流程已通过总开关停用；保留用例供重新启用时复核。
+test.skip('active bridge song commands are deterministic and settle quota only on OneBot success', async (t) => {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'song-command-test-'));
   process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
   const library = await import('../src/song-library.mjs');
@@ -30,8 +127,6 @@ test('active bridge song commands are deterministic and settle quota only on One
   assert.equal(commands.shouldBlockLegacySongRequest(true, 'ai'), false, 'the owner keeps the legacy singing command');
   assert.equal(commands.normalizeSongCommandText('@小鲸鱼 歌单', { selfNickname: '小鲸鱼' }), '歌单');
   assert.equal(commands.normalizeSongCommandText('@群友 歌单', { selfNickname: '小鲸鱼' }), '@群友 歌单');
-  assert.equal(commands.normalizeSongCommandText('唱完整首雨爱司凤版'), '唱完整首 雨爱司凤版');
-  assert.equal(commands.isSongLibraryCommand('唱完整首雨爱司凤版'), true, 'compact full-song command stays on the deterministic song route');
   assert.equal(commands.isSongLibraryCommand('新歌试听雨爱司凤版'), true, 'compact preview command stays on the deterministic song route');
 
   const audio = Buffer.alloc(FRAME_SIZE * FRAMES);
@@ -115,7 +210,7 @@ test('active bridge song commands are deterministic and settle quota only on One
   assert.match(messages.at(-1), /只允许主人私聊/);
 });
 
-test('candidate notification is private, owner-only, and excludes the bot account', async (t) => {
+test.skip('candidate notification is private, owner-only, and excludes the bot account', async (t) => {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'red-packet-notice-test-'));
   process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
   const library = await import('../src/song-library.mjs');
@@ -149,7 +244,7 @@ test('candidate notification is private, owner-only, and excludes the bot accoun
   assert.equal(library.getVerifiedCreditBalance('80000'), 100);
 });
 
-test('full-song paid order preserves confirmed segments and resumes without duplicate sends', async (t) => {
+test.skip('full-song paid order preserves confirmed segments and resumes without duplicate sends', async (t) => {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'paid-full-command-test-'));
   process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
   const library = await import(`../src/song-library.mjs?paid-full=${Date.now()}`);
@@ -186,7 +281,7 @@ test('full-song paid order preserves confirmed segments and resumes without dupl
   assert.equal(library.getPaidSongUnitSummary('67890').consumed, 3, 'full order consumes three units after every segment is confirmed');
 });
 
-test('gifted full-song command reserves, resumes, and consumes an entitlement without cash wording', async (t) => {
+test.skip('gifted full-song command reserves, resumes, and consumes an entitlement without cash wording', async (t) => {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'paid-gift-command-test-'));
   process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');
   const library = await import('../src/song-library.mjs');

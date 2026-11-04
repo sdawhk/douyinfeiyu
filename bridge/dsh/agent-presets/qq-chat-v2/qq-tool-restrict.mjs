@@ -42,8 +42,8 @@ const SAFE_PREFIXES = [
   'mcp__web-search-safe__',
 ]
 
-// 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
-// todo_write 仅维护任务列表。若后续 preset 不再挂载这些工具，保留无害。
+// 无害模型侧工具：todo_write 仅维护任务列表。QQ 不提供 DSH WebUI 的交互提问流程，
+// 因此 ask_user_question 不在 QQ 预设白名单中；需要澄清时必须用普通 QQ 文本提问。
 //
 // mcp__router__search_and_activate：@yilinxiao/dsh-mcp-lazy 的路由工具。
 // 该插件（若装在宿主上）会接管兼容 MCP，默认把 mcp__snowluma__* 等工具的说明
@@ -52,7 +52,6 @@ const SAFE_PREFIXES = [
 // 它本身只做「显示某个 MCP 的工具」，不执行任何外部动作，放行是安全的；
 // 被唤出的工具仍要逐个过上面的前缀白名单。
 const SAFE_EXACT = new Set([
-  'ask_user_question',
   'todo_write',
   'mcp__router__search_and_activate',
 ])

@@ -16,7 +16,7 @@ test('clearer RVC mix uses a new cache variant so old mixes are regenerated', as
     saveSongOutput({ ...base, voiceVariant: 'rvc:0' }, audio, { root });
     assert.equal(loadSongOutput({ ...base, voiceVariant: 'rvc:0' }, { root })?.audio.length, 2048);
     assert.equal(loadSongOutput({ ...base, voiceVariant: LIUYING_SINGING_VOCAL_VARIANT(0) }, { root }), null);
-    assert.equal(LIUYING_SINGING_VOCAL_PROFILE, 'clear-v2');
+    assert.equal(LIUYING_SINGING_VOCAL_PROFILE, 'clear-v4');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -48,8 +48,8 @@ test('full song segments use one fully measured exact source and source-specific
     assert.equal(downloads, 1);
     assert.equal(full.url, 'https://www.youtube.com/watch?v=one-source');
     assert.ok(Math.abs(full.duration - 68) < 1);
-    assert.equal(full.segments.length, 3);
-    assert.deepEqual(full.segments.map((item) => item.startSeconds), [0, 30, 60]);
+    assert.equal(full.segments.length, 2);
+    assert.deepEqual(full.segments.map((item) => item.startSeconds), [0, 60]);
     assert.ok(full.segments.every((item) => Buffer.isBuffer(item.audio)));
     const options = { query: '夜曲', mode: 'ai', startSeconds: 0, seconds: 30, voiceVariant: 'rvc:0', sourceIdentity: full.url, segmentIndex: 0 };
     saveSongOutput(options, Buffer.alloc(2048, 1), { root });
@@ -86,7 +86,11 @@ test('natural song requests route to an existing song clip', () => {
   assert.deepEqual(parseExistingSongCommand('我想让你唱歌唱雨夜'), { mode: 'ai', song: '雨夜', candidate: 1 });
   assert.deepEqual(parseExistingSongCommand('唱一下雨夜'), { mode: 'ai', song: '雨夜', candidate: 1 });
   assert.deepEqual(parseExistingSongCommand('唱雨夜'), { mode: 'ai', song: '雨夜', candidate: 1 });
+  assert.deepEqual(parseExistingSongCommand('唱嘲'), { mode: 'ai', song: '嘲', candidate: 1 });
+  assert.deepEqual(parseExistingSongCommand('唱一首嘲'), { mode: 'ai', song: '嘲', candidate: 1 });
+  assert.deepEqual(parseExistingSongCommand('唱歌 嘲'), { mode: 'ai', song: '嘲', candidate: 1 });
   assert.deepEqual(parseExistingSongCommand('唱一首歌'), { mode: 'ai', song: '', candidate: 1 });
+  assert.equal(parseExistingSongCommand('唱好'), null);
   assert.equal(parseExistingSongCommand('我会唱歌'), null);
   assert.equal(parseExistingSongCommand('唱歌真好听'), null);
   assert.equal(parseExistingSongCommand('唱得好听'), null);
@@ -140,6 +144,27 @@ test('song search rejects accompaniment, drama, and unrelated titles', async () 
     { title: '雨夜 DJ版 原唱', webpage_url: 'https://www.youtube.com/watch?v=exact123', duration: 190 }
   ] : [] }) });
   assert.deepEqual(exactAfterPartial.map((item) => item.title), ['雨夜 DJ版 原唱']);
+});
+
+test('one-character Chinese song titles are searched and matched exactly', async () => {
+  let searchIndex = 0;
+  const found = await searchExistingSongs('嘲', {
+    fetchImpl: async () => new Response('blocked', { status: 412 }),
+    runImpl: async (_file, args) => {
+      const source = args.at(-1).startsWith('bilisearch') ? 'bilibili' : 'youtube';
+      searchIndex++;
+      return JSON.stringify({ entries: source === 'bilibili' ? [
+        { title: '《嘲》官方MV', url: 'https://www.bilibili.com/video/BV1234567890', duration: 180 },
+      ] : [
+        { title: '嘲笑合集', url: 'https://www.youtube.com/watch?v=not-exact', duration: 180 },
+      ] });
+    }
+  });
+  assert.equal(searchIndex, 2);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].title, '《嘲》官方MV');
+  assert.equal(isExactSongMatch('嘲', '《嘲》官方MV'), true);
+  assert.equal(isExactSongMatch('嘲', '嘲笑合集'), false);
 });
 
 test('song search keeps exact matches from each provider for automatic download fallback', async () => {

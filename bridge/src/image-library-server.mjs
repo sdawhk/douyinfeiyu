@@ -14,7 +14,7 @@ import { generateSong, downloadSong } from './singing.mjs';
 import { applyLiuyingSpeech, applyLiuyingVoice } from './rvc-singing.mjs';
 import { readStickerSemantics, setStickerSemantics } from './sticker-semantics.mjs';
 import { readImageAnalyses } from './image-analysis-store.mjs';
-import { modelStatus, modelCatalog, testModel, saveModelPolicy, syncPromotedModel } from './model-management.mjs';
+import { modelStatus, modelCatalog, testModel, testQQSessionChain, saveModelPolicy, syncPromotedModel } from './model-management.mjs';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.IMAGE_LIBRARY_PORT || 18902);
@@ -305,14 +305,15 @@ async function handle(req, res) {
     try { return json(res, 200, await modelCatalog()); }
     catch (error) { return json(res, 503, { error: error.message }); }
   }
-  if ((req.method === 'POST' && url.pathname === '/api/models/test')
+  if ((req.method === 'POST' && (url.pathname === '/api/models/test' || url.pathname === '/api/models/test-qq'))
       || (req.method === 'PUT' && url.pathname === '/api/models/policy')) {
     if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机管理页面修改模型配置' });
     let body;
     try { body = await readBody(req); }
     catch (error) { return json(res, error.status || 400, { error: error.message }); }
     try {
-      if (url.pathname.endsWith('/test')) return json(res, 200, await testModel(body.model));
+      if (url.pathname === '/api/models/test') return json(res, 200, await testModel(body.model));
+      if (url.pathname === '/api/models/test-qq') return json(res, 200, await testQQSessionChain(body.model));
       return await serialMutation(async () => json(res, 200, await saveModelPolicy(body)));
     } catch (error) { return json(res, error.status || 500, { error: error.message, tests: error.tests }); }
   }

@@ -1805,12 +1805,32 @@ async function main() {
     let consoleToken = tokenValid ? configuredToken : loadOrCreateConsoleToken();
     if (!tokenValid && configuredToken) log(`控制台 config.consoleToken 长度/字符不合法，已忽略并回退到自动生成令牌`);
     if (!configuredToken) log(`控制台未配置 consoleToken，已自动生成：${String(consoleToken).slice(0, 6)}…（完整值保存在 state/console-token）`);
-    // 二代会话级隔离：MCP 工具调用时若带 x-agent-token，则必须匹配该会话的 agentToken。
+    // 二代会话级隔离：默认只接受目标会话的 agentToken；跨私聊访问必须按来源单独配置读/发权限。
     // 控制台/管理端请求不带此头，仍走 consoleToken 管理通道。
-    const agentTokenOk = (key, token) => {
+    const agentTokenOk = (key, token, capability = null) => {
       const canonical = canonicalV2Key(key);
-      const st = socialV2.conversations.get(canonical ?? key);
-      return !!st && !!st.agentToken && token === st.agentToken;
+      const targetKey = canonical ?? key;
+      const target = socialV2.conversations.get(targetKey);
+      if (target?.agentToken && token === target.agentToken) return true;
+      if (!token || !['private-read', 'private-send'].includes(capability)) return false;
+
+      let sourceKey = null;
+      for (const [sessionKey, state] of socialV2.conversations) {
+        if (state?.agentToken === token) {
+          sourceKey = sessionKey;
+          break;
+        }
+      }
+      const sourceMatch = /^(private):(\d+)$/.exec(sourceKey ?? '');
+      const targetMatch = /^(private):(\d+)$/.exec(targetKey);
+      if (!sourceMatch || !targetMatch || sourceMatch[2] === targetMatch[2]) return false;
+      const access = cfg.socialV2?.crossSessionAccess ?? {};
+      const allowedSources = capability === 'private-read' ? access.privateReadFrom : access.privateSendFrom;
+      if (!Array.isArray(allowedSources) || !allowedSources.map(String).includes(sourceMatch[2])) return false;
+      const privateAllowlist = (cfg.allow?.private ?? []).map(String);
+      if (!privateAllowlist.includes(sourceMatch[2]) || !privateAllowlist.includes(targetMatch[2])) return false;
+      return modeAllowed(sourceKey, 'private', Number(sourceMatch[2]), cfg, currentMode) &&
+        modeAllowed(targetKey, 'private', Number(targetMatch[2]), cfg, currentMode);
     };
     // 二代会话工具必须仍命中当前模式的白名单/准入；避免白名单移除后旧 agentToken 继续读状态。
     const v2SessionAllowed = isSessionAllowedInCurrentMode;
@@ -2010,7 +2030,7 @@ async function main() {
             sendJson({ ok: false, error: '会话令牌无效或已失效' }, 403);
             return;
           }
-          if (socialV2.paused || !['post', 'list', 'detail', 'comment'].includes(action)) {
+          if (socialV2.paused || !['post', 'list', 'detail', 'comment', 'delete', 'replace'].includes(action)) {
             sendJson({ ok: false, error: 'QQ 空间工具未启用或操作无效' }, 403);
             return;
           }
@@ -2019,7 +2039,7 @@ async function main() {
               method: 'POST',
               headers: { 'content-type': 'application/json', 'x-console-token': consoleToken },
               body: JSON.stringify({ action, page: body.page, index: body.index, path: body.path, content: body.content }),
-              signal: AbortSignal.timeout(action === 'post' ? 75_000 : 20_000)
+              signal: AbortSignal.timeout(['post', 'replace'].includes(action) ? 75_000 : 20_000)
             });
             const data = await response.json();
             sendJson(data, response.ok ? 200 : response.status);
@@ -2889,7 +2909,7 @@ async function main() {
         if (req.method === 'GET' && url.pathname === '/api/socialV2/state') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'], 'private-read')) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('socialState')) { sendJson({ ok: false, error: '工具未启用：qq_social_state' }, 403); return; }
           const st = getSocialV2State(key);
@@ -2908,7 +2928,7 @@ async function main() {
         if (req.method === 'GET' && url.pathname === '/api/socialV2/prompt') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'], 'private-read')) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('getPrompt')) { sendJson({ ok: false, error: '工具未启用：qq_get_prompt' }, 403); return; }
           const st = getSocialV2State(key);
@@ -2917,6 +2937,10 @@ async function main() {
             try { await syncStickerLibrary(false); } catch {}
           }
           const roleState = readRoleState();
+          const sourceId = /^private:(\d+)$/.exec(key)?.[1];
+          const crossAccess = cfg.socialV2?.crossSessionAccess ?? {};
+          const mayReadPrivate = Array.isArray(crossAccess.privateReadFrom) && crossAccess.privateReadFrom.map(String).includes(sourceId);
+          const maySendPrivate = Array.isArray(crossAccess.privateSendFrom) && crossAccess.privateSendFrom.map(String).includes(sourceId);
           const toolMap = {
             getPrompt: 'qq_get_prompt',
             getUnread: 'qq_get_unread_messages',
@@ -2965,6 +2989,16 @@ async function main() {
               wait: cfg.socialV2?.wait ?? {},
               proactive: cfg.socialV2?.proactive ?? {}
             },
+            ...(mayReadPrivate ? {
+              crossSessionAccess: {
+                privateRead: true,
+                privateSend: maySendPrivate,
+                privateSessions: [...new Set((cfg.allow?.private ?? []).map(String))]
+                  .filter((id) => modeAllowed(`private:${id}`, 'private', Number(id), cfg, currentMode))
+                  .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
+                  .map((userId) => ({ key: `private:${userId}`, userId }))
+              }
+            } : {}),
             enabledTools,
             unreadCount: st.unread.length,
             recentCount: st.recentMessages.length,
@@ -2996,7 +3030,7 @@ async function main() {
           const key = String(url.searchParams.get('key') ?? '').trim();
           const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 30));
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'], 'private-read')) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('getUnread')) { sendJson({ ok: false, error: '工具未启用：qq_get_unread_messages' }, 403); return; }
           const st = getSocialV2State(key);
@@ -3008,7 +3042,7 @@ async function main() {
           const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 20));
           const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'], 'private-read')) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('getRecent')) { sendJson({ ok: false, error: '工具未启用：qq_get_recent_messages' }, 403); return; }
           const st = getSocialV2State(key);
@@ -3276,7 +3310,7 @@ async function main() {
             sendJson({ ok: false, error: '已禁用多条发送，请合并为一条消息' }, 403);
             return;
           }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'], 'private-send')) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendBurst')) { sendJson({ ok: false, error: '工具未启用：qq_send_burst' }, 403); return; }
           if (currentMode !== 'reserved2') {
@@ -3402,7 +3436,7 @@ async function main() {
             sendJson({ ok: false, error: '已禁用多条发送，请合并为一条消息' }, 403);
             return;
           }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'], 'private-send')) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendMessage')) { sendJson({ ok: false, error: '工具未启用：qq_send_message' }, 403); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
@@ -4321,7 +4355,7 @@ async function main() {
             sendJson({ ok: false, error: 'key/tool/token 不能为空' }, 400);
             return;
           }
-          if (!agentTokenOk(key, token)) {
+          if (!agentTokenOk(key, token, 'private-send')) {
             sendJson({ ok: false, error: 'agent token 无效' }, 403);
             return;
           }
@@ -4419,7 +4453,7 @@ async function main() {
           const key = String(url.searchParams.get('key') ?? '').trim();
           const messageId = String(url.searchParams.get('messageId') ?? '').trim();
           if (!key || !messageId) { sendJson({ ok: false, error: 'key 和 messageId 不能为空' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'], 'private-read')) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('getMessageDetail')) { sendJson({ ok: false, error: '工具未启用：qq_get_message_detail' }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
@@ -4561,7 +4595,7 @@ async function main() {
           const key = String(body.key ?? '').trim();
           const media = Array.isArray(body.media) ? body.media : [];
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'], 'private-read')) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('getForwardMsg')) { sendJson({ ok: false, error: '工具未启用：qq_get_forward_msg' }, 403); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '转发媒体读取仅 reserved2 模式可用' }, 403); return; }
@@ -4825,11 +4859,12 @@ async function main() {
           const token = String(body.token ?? '').trim();
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
-          if (currentMode === 'reserved2' && !agentTokenOk(key, token)) {
+          const isPrivate = keyMatch[1] === 'private';
+          if (currentMode === 'reserved2' && !agentTokenOk(key, token, 'private-read')) {
             sendJson({ ok: false, error: 'reserved2 模式下旧只读工具不可用，请使用带会话令牌的 v2 读工具' }, 403);
             return;
           }
-          if (token && !agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (token && !agentTokenOk(key, token, isPrivate ? 'private-send' : null)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           const kind = keyMatch[1];
           const id = Number(keyMatch[2]);
           if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
@@ -4855,7 +4890,7 @@ async function main() {
             sendJson({ ok: false, error: '一代 chat/reserved 模式图片已自动内联，按需图片工具仅 reserved2 模式可用' }, 403);
             return;
           }
-          if (agentToken && !agentTokenOk(key, agentToken)) {
+          if (agentToken && !agentTokenOk(key, agentToken, 'private-read')) {
             sendJson({ ok: false, error: 'agent token 无效' }, 403);
             return;
           }
@@ -7578,6 +7613,13 @@ async function main() {
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
+    const sourceId = /^private:(\d+)$/.exec(key)?.[1];
+    const crossAccess = cfg.socialV2?.crossSessionAccess ?? {};
+    const mayReadPrivate = Array.isArray(crossAccess.privateReadFrom) && crossAccess.privateReadFrom.map(String).includes(sourceId);
+    const maySendPrivate = Array.isArray(crossAccess.privateSendFrom) && crossAccess.privateSendFrom.map(String).includes(sourceId);
+    const crossSessionLine = mayReadPrivate
+      ? `【跨会话授权】主人允许你查看并列出私聊白名单中的会话${maySendPrivate ? '，也允许你向这些白名单好友发送消息' : ''}。先用 qq_get_prompt 查看 crossSessionAccess.privateSessions，再用读取/发送工具；每次发送仍须由当前对话明确要求。\n\n`
+      : '';
     const memoryText = formatMemoryV2(st);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
@@ -7644,7 +7686,7 @@ async function main() {
     if (wcTr.anyMessage) wcTriggers.push('任意消息');
     if (Number(wcTr.probability) > 0) wcTriggers.push(`概率${wcTr.probability}`);
     const wakeLine = `【当前唤醒】${wcMode}，${wcTime}${wcTriggers.length ? `；触发：${wcTriggers.join('/')}` : ''}\n\n`;
-    const base = roleLine + tokenLine + antiAiLine + proactiveLine + stickerLine + localPackLine + cadenceLine + preSleepLine + statusLine + wakeLine + memoryLine + participationLine;
+    const base = roleLine + tokenLine + crossSessionLine + antiAiLine + proactiveLine + stickerLine + localPackLine + cadenceLine + preSleepLine + statusLine + wakeLine + memoryLine + participationLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看你的角色、推荐值、可用工具和当前状态，然后用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -8074,6 +8116,8 @@ async function main() {
     const fastCommandText = normalizeSongCommandText(quickPlainCommandText(event.message), {
       selfNickname, selfQQ: event?.self_id ?? bridgeStatus.selfId ?? '', hasBotMention: botMentionedForCommand
     });
+    // 歌单编号依赖主桥接保存的会话快照；由 qq-bot 单独处理，避免侧车抢到请求。
+    if (TOOL_SIDECAR && /^(?:歌单(?:\s+\d{1,4})?|点歌\s*(?:\d{1,4}|[a-f0-9]{12})|唱完整首(?:\s+.+)?)$/i.test(fastCommandText)) return;
     if (isSongLibraryCommand(fastCommandText)) {
       const songCommandGate = () => {
         const replyControl = readSettingsDocument().settings.replyControl;

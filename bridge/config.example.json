@@ -5,6 +5,7 @@
     "model": "glm-4.6v-flash",
     "reasoningEffort": ""
   },
+  "voiceReplyProbability": 20,
   "azureTts": {
     "enabled": false,
     "mode": "requested",
@@ -207,6 +208,7 @@
     "enabled": true,
     "autoReplyCheckMs": 30000,
     "agentPreset": "qq-chat-v2",
+    "crossSessionAccess": { "privateReadFrom": [], "privateSendFrom": [] },
     "provideRecommendations": true,
     "tools": {
       "getPrompt": true,

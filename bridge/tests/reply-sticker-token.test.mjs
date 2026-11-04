@@ -15,3 +15,14 @@ test('text send guard removes even malformed sticker directives', () => {
   assert.equal(stickerTokens('【STICKER：897】').at(0)?.[1], '897');
   assert.equal(stripStickerDirectives('[sticker] sent'), '');
 });
+
+test('legacy table markers resolve to the archived DeepSeek sticker keys without leaking as text', () => {
+  const reply = '还好吧[table:621] 不是每个人都能像她这样聪明[table:917]';
+  assert.deepEqual(stickerTokens(reply).map((match) => match[1]), ['DeepSeek娘621', 'DeepSeek娘917']);
+  assert.equal(stripStickerDirectives(reply), '还好吧 不是每个人都能像她这样聪明');
+  assert.equal(hasStickerDirective(reply), true);
+  assert.equal(stripStickerDirectives('说完了[table:621'), '说完了');
+  assert.equal(stripStickerDirectives('说完了[table:未知]'), '说完了');
+  assert.equal(stripStickerDirectives('说完了[DeepSeek娘617'), '说完了');
+  assert.equal(stickerTokens('[DeepSeek娘617]').at(0)?.[1], 'DeepSeek娘617');
+});

@@ -30,3 +30,12 @@ test('persona permits scoped QQ tools without duplicating automatic replies', ()
   assert.match(persona, /工具发送成功后只输出 \[SILENT\]/);
   assert.doesNotMatch(persona, /本环境没有工具，也没有联网能力/);
 });
+
+test('owner role card can be reused in Douyin with channel-correct capability limits', () => {
+  const persona = loadRolePersona('鲸团团-主人私聊', { channel: 'douyin' });
+  assert.match(persona, /在 QQ 按 QQ 号核验，在抖音按已配置的抖音号核验；两边是同一个人/);
+  assert.match(persona, /当前是抖音主人私聊/);
+  assert.match(persona, /QQ 专属工具、账号操作和权限说明只适用于 QQ/);
+  assert.doesNotMatch(persona, /本环境已接入 QQ、表情、记忆和安全联网 MCP 工具/);
+  assert.doesNotMatch(persona, /本地表情库/);
+});

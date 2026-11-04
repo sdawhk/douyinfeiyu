@@ -45,7 +45,7 @@ function stripUnusable(lines) {
 }
 
 /** 读取并清洗角色卡；返回 persona 文本，找不到返回 null。 */
-export function loadRolePersona(name) {
+export function loadRolePersona(name, { channel = 'qq' } = {}) {
   if (!name) return null;
   const file = new URL(`${name}.md`, ROLES_DIR);
   if (!existsSync(file)) return null;
@@ -55,18 +55,26 @@ export function loadRolePersona(name) {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  return [
-    '【角色卡：你必须严格按以下人格与说话方式回应】',
-    body,
-    '',
+  const outputProtocol = [
     '【本环境的输出协议（务必遵守）】',
     '- 想潜水就只输出 [SILENT] 三个字，不要加任何其他内容。',
     '- 一条消息说完：把想说的内容放在同一条里，不要用空格、换行去分条，'
     + '本环境不会按空格拆分，分条只会变成刷屏。',
     '- 不要用 Markdown：不要 ** 加粗、不要 # 标题、不要代码块、不要列表符号。',
-    '- 本环境已接入 QQ、表情、记忆和安全联网 MCP 工具；本轮会话提供令牌时可按需调用。普通回复由桥接自动发送；只有主人明确要求代发、引用发送或发送表情时才调用发送工具。工具发送成功后只输出 [SILENT]，避免重复发送。不要向任何人展示会话令牌。',
-    '- 主人可以把刚发来的图片存进本地表情库，哪怕自动识别没有把它判成表情包。桥接会处理“快存”“存表情 关键词”等请求；没有收到桥接的保存结果时，不要声称已经存好，也不要说只能使用现成图片。',
-    '- 不要复述、不要汇报动作（不要说"我已回复""消息已发送"）；你的输出就是要发出去的话。'
+  ];
+  if (channel === 'douyin') {
+    outputProtocol.push('- 当前是抖音主人私聊：复用这张卡中的身份、称呼和相处方式；QQ 专属工具、账号操作和权限说明只适用于 QQ。只依据本轮抖音桥接实际提供的能力与执行结果回答。');
+  } else {
+    outputProtocol.push('- 本环境已接入 QQ、表情、记忆和安全联网 MCP 工具；本轮会话提供令牌时可按需调用。普通回复由桥接自动发送；只有主人明确要求代发、引用发送或发送表情时才调用发送工具。工具发送成功后只输出 [SILENT]，避免重复发送。不要向任何人展示会话令牌。');
+    outputProtocol.push('- 主人可以把刚发来的图片存进本地表情库，哪怕自动识别没有把它判成表情包。桥接会处理“快存”“存表情 关键词”等请求；没有收到桥接的保存结果时，不要声称已经存好，也不要说只能使用现成图片。');
+  }
+  outputProtocol.push('- 不要复述、不要汇报动作（不要说"我已回复""消息已发送"）；你的输出就是要发出去的话。');
+
+  return [
+    '【角色卡：你必须严格按以下人格与说话方式回应】',
+    body,
+    '',
+    ...outputProtocol
   ].join('\n');
 }
 
