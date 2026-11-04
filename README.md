@@ -14,12 +14,19 @@ A complete engineering effort to make a QQ group bot *talk like an actual group 
 
 一个跑在 QQ 群里的 AI 群友（人格叫「小鲸鱼」）。它不是客服式问答机器人 —— 目标是**混在群里像个真人**：会潜水、会插话、会发表情包、会戳回去、看得见图片和视频、记得住群友是谁。
 
-仓库包含七块可独立使用的东西：
+### 主要功能
+
+- **唱歌：** 搜索并翻唱现成歌曲，可选用 RVC 转换为流萤音色；主人也可启用 Mureka 生成原创短歌，完成后以 QQ 语音发送。详细说明见 [桥接文档](bridge/README.zh.md#原创歌曲与流萤-rvc)。
+- **抖音互动：** 主人在 QQ 私聊中可对明确指定的一条视频点赞，或按主人提供的原文发表评论。支持先 dry-run 检查；不批量操作、不自动编写评论。详见[抖音工具说明](douyin_personal_share/README.md)。
+- **抖音分享与浏览：** 支持定时分享推荐视频、查看推荐流并记录观看内容；浏览不会自动点赞或评论。详见[抖音工具说明](douyin_personal_share/README.md)。
+
+仓库主要目录如下：
 
 | 目录 | 内容 | 语言 |
 |---|---|---|
 | [`plugins/`](plugins/) | 59 个 AstrBot 插件 —— 机器人的全部能力 | Python |
-| [`bridge/`](bridge/) | QQ ↔ DeepSeek Harness 桥接（另一条技术路线） | Node.js |
+| [`bridge/`](bridge/) | QQ ↔ DeepSeek Harness 桥接，集成聊天、唱歌和抖音理解/互动能力 | Node.js |
+| [`douyin_personal_share/`](douyin_personal_share/) | 抖音推荐内容定时分享、只读浏览与单条视频互动工具 | Python |
 | [`console/`](console/) | 安卓控制台 App + 服务端后台 | Java / Python |
 | [`desktop-controller/`](desktop-controller/) | Windows EXE 控制台：填服务器信息 → 自动部署并启动 → 在线改配置 | Python |
 | [`mobile-controller/`](mobile-controller/) | 安卓 APK：开放式登录（QQ 号密码 / 本地渲染扫码 / 快速登录）+ 三步部署，无任何预置配置 | Java |
@@ -229,18 +236,25 @@ MIT，见 [LICENSE](LICENSE)。
 
 An AI "group member" that lives in a QQ group (persona: *Little Whale*). Not a Q&A support bot — the goal is to **blend in as a real person**: it lurks, jumps into conversations, sends stickers, pokes back, sees images and videos, and remembers who people are.
 
-Eight independently usable parts:
+Main components:
 
 | Directory | Contents | Language |
 |---|---|---|
 | [`plugins/`](plugins/) | 59 AstrBot plugins — all bot capabilities | Python |
-| [`bridge/`](bridge/) | QQ ↔ DeepSeek Harness bridge (an alternative approach) | Node.js |
+| [`bridge/`](bridge/) | QQ ↔ DeepSeek Harness bridge with chat, singing, and Douyin understanding/interaction features | Node.js |
+| [`douyin_personal_share/`](douyin_personal_share/) | Scheduled Douyin sharing, read-only browsing, and single-video interaction tools | Python |
 | [`console/`](console/) | Android console app + server backend | Java / Python |
 | [`desktop-controller/`](desktop-controller/) | Windows EXE console: enter server details → auto-deploy and start → edit config online | Python |
 | [`mobile-controller/`](mobile-controller/) | Android APK: open login (QQ password / locally-rendered QR / quick login) + three-step deploy, zero baked-in configuration | Java |
 | [`deploy/`](deploy/) | Deployment interface: config item list + runtime config template | JSON / env |
 | [`node-studio/`](node-studio/) | Behaviour-node Studio: an offline visual node-graph prototype, fully isolated from the bot (no QQ/AstrBot/server) | Python / JavaScript |
 | [`docs/`](docs/) | Deployment manual and 45 technical documents (root-cause analyses, designs, implementation records) | Markdown |
+
+### Core features
+
+- **Singing:** Search and cover existing songs, optionally convert vocals to the Liuying voice with RVC, or let the owner enable Mureka for original short songs. Results are sent as QQ voice messages. See the [bridge guide](bridge/README.zh.md#原创歌曲与流萤-rvc).
+- **Douyin interactions:** In the owner's QQ private chat, like one explicitly selected video or comment with text supplied verbatim by the owner. A dry-run check is available; bulk actions and generated public comments are not supported. See the [Douyin guide](douyin_personal_share/README.md).
+- **Douyin sharing and browsing:** Schedule shares of recommendation-feed videos and browse the feed in read-only mode. Browsing does not automatically like or comment. See the [Douyin guide](douyin_personal_share/README.md).
 
 ### Changelog
 
