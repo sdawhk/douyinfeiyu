@@ -16,6 +16,7 @@ import tempfile
 import time as time_module
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -45,6 +46,8 @@ INBOUND_DIAGNOSTICS_PATH = ROOT / "inbound-diagnostics.jsonl"
 DAILY_BROWSE_STATE_PATH = ROOT / "daily-browse-state.json"
 INTERACTION_STATE_PATH = ROOT / "interaction-state.json"
 PROFILE_LOCK_PATH = ROOT / ".browser-profile.lock"
+BROWSE_REQUEST_PATH = ROOT / "browse-request.json"
+BROWSE_ACTIVE_PATH = ROOT / "browse-request-active.json"
 LOCAL_TEMP_DIR = ROOT / "playwright-temp"
 VIDEO_ANALYZER = ROOT.parent / "bridge" / "scripts" / "analyze-douyin-video.mjs"
 SINGAPORE = ZoneInfo("Asia/Singapore")
@@ -852,6 +855,15 @@ def interaction_comment_key(video_url: str, comment_text: str) -> str:
     return hashlib.sha256(f"{video_url}\0{comment_text}".encode("utf-8")).hexdigest()
 
 
+def daily_like_attempts(state: dict, day_key: str | None = None) -> int:
+    key = day_key or datetime.now(SINGAPORE).date().isoformat()
+    counts = state.get("like_attempts_by_day", {})
+    try:
+        return max(0, int(counts.get(key, 0)))
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
 def _save_interaction_state(state: dict) -> None:
     INTERACTION_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = INTERACTION_STATE_PATH.with_suffix(".json.tmp")
@@ -1027,7 +1039,12 @@ def interact_with_video(action: str, video_url: str, comment_text: str = "", dry
                 attempts = state.setdefault("like_attempts", [])
                 if url in attempts:
                     raise RuntimeError("这条视频曾尝试点赞但结果未确认；请先在抖音页面核对，不会重复点击。")
+                today = datetime.now(SINGAPORE).date().isoformat()
+                if daily_like_attempts(state, today) >= 5:
+                    raise RuntimeError("今天已达到最多 5 次点赞尝试的上限；未执行本次操作。")
                 attempts.append(url)
+                by_day = state.setdefault("like_attempts_by_day", {})
+                by_day[today] = daily_like_attempts(state, today) + 1
                 _save_interaction_state(state)
                 button.click()
                 page.wait_for_timeout(1200)
@@ -1363,10 +1380,16 @@ def browse_session(minutes: int, wait_seconds: int = 0) -> list[dict]:
         raise RuntimeError("Playwright is missing. Install the dependencies from requirements.txt.")
     prepare_browser_temp()
     with sync_playwright() as playwright, browser_profile_lock(wait_seconds=wait_seconds):
-        context = playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR), channel="msedge", headless=False,
-            viewport={"width": 1365, "height": 900}
-        )
+        try:
+            context = playwright.chromium.launch_persistent_context(
+                str(PROFILE_DIR), channel="msedge", headless=False,
+                viewport={"width": 1365, "height": 900}
+            )
+        except Exception as exc:
+            message = browse_launch_failure_message(exc)
+            if message:
+                raise RuntimeError(message) from None
+            raise
         try:
             page = context.pages[0] if context.pages else context.new_page()
             return browse_feed(page, minutes)
@@ -1374,12 +1397,80 @@ def browse_session(minutes: int, wait_seconds: int = 0) -> list[dict]:
             context.close()
 
 
+def browse_launch_failure_message(exc: Exception) -> str:
+    """Explain launch-time Edge exits without claiming that browsing succeeded."""
+    details = f"{exc.__class__.__name__}: {exc}".lower()
+    known_launch_exit = (
+        "targetclosederror" in details
+        or "target page, context or browser has been closed" in details
+        or "user data directory is already in use" in details
+        or "processsingleton" in details
+    )
+    if not known_launch_exit:
+        return ""
+    return (
+        "抖音浏览器在启动阶段就退出了，本次没有打开页面、播放视频或写入观看记录。"
+        "该抖音 Edge 配置可能正被另一个窗口或进程占用；大肥鱼无法读取那个窗口当前显示的内容。"
+        "关闭占用该配置的 Edge 窗口后再试。"
+    )
+
+
+def format_browse_review(rows: list[dict]) -> str:
+    lines: list[str] = []
+    for row in rows:
+        lines.append(f"- 视频：{row['title']} | 作者：{row.get('author') or '未知作者'} | 实际播放：{int(row.get('watched_seconds', 0))} 秒")
+        if row.get("content_summary"):
+            lines.append(f"  内容摘要：{row['content_summary']}")
+        if row.get("transcript"):
+            lines.append(f"  语音转写：{row['transcript'][:240]}")
+        if row.get("tags"):
+            lines.append(f"  标签：{'、'.join(row['tags'][:5])}")
+        lines.append(f"  视频页：{row['url']}")
+    return "\n".join(lines)
+
+
 def run_browse(minutes: int) -> int:
     rows = browse_session(minutes)
-    for row in rows:
-        print(f"- {row['title']} | {row['author'] or '未知作者'} | {int(row['watched_seconds'])} 秒")
+    review = format_browse_review(rows)
+    if review:
+        print(review)
     if not rows:
         print("没有确认到持续播放的视频；未保存观看记录。")
+    return 0
+
+
+def request_browse_from_listener(minutes: int, timeout_seconds: int | None = None) -> str:
+    """Ask the persistent inbox listener to browse using its already-open profile."""
+    if not 1 <= minutes <= 5:
+        raise RuntimeError("浏览时长须为 1 到 5 分钟")
+    if BROWSE_REQUEST_PATH.exists() or BROWSE_ACTIVE_PATH.exists():
+        raise RuntimeError("已有一项抖音浏览请求正在等待或执行；请稍后再试。")
+    request_id = uuid.uuid4().hex
+    request_path = BROWSE_REQUEST_PATH.with_suffix(f".{request_id}.tmp")
+    request_path.write_text(json.dumps({"id": request_id, "minutes": minutes}), encoding="utf-8")
+    try:
+        os.replace(request_path, BROWSE_REQUEST_PATH)
+    finally:
+        request_path.unlink(missing_ok=True)
+    deadline = time_module.monotonic() + (timeout_seconds or minutes * 60 + 240)
+    response_path = ROOT / f"browse-response-{request_id}.json"
+    while time_module.monotonic() < deadline:
+        if response_path.is_file():
+            try:
+                response = json.loads(response_path.read_text(encoding="utf-8"))
+            finally:
+                response_path.unlink(missing_ok=True)
+            if response.get("ok") is not True:
+                raise RuntimeError(str(response.get("error") or "抖音浏览请求执行失败。"))
+            return str(response.get("result") or "")
+        time_module.sleep(0.5)
+    raise RuntimeError("等待抖音收件箱监听器执行浏览请求超时；请求可能仍在执行，请先检查浏览器状态。")
+
+
+def run_browse_request(minutes: int) -> int:
+    result = request_browse_from_listener(minutes)
+    if result:
+        print(result)
     return 0
 
 
@@ -1780,6 +1871,48 @@ def arm_inbox_mutation_observer(page, row_selector: str) -> None:
     }""", row_selector)
 
 
+def service_browse_request(page, cfg: dict, selectors: dict):
+    """Run one queued feed browse inside the inbox listener's existing Edge context."""
+    if not BROWSE_REQUEST_PATH.is_file():
+        return None
+    try:
+        os.replace(BROWSE_REQUEST_PATH, BROWSE_ACTIVE_PATH)
+    except OSError:
+        return None
+    request = {}
+    response = {"ok": False, "error": "抖音浏览请求执行失败。"}
+    editor = None
+    try:
+        request = json.loads(BROWSE_ACTIVE_PATH.read_text(encoding="utf-8"))
+        minutes = int(request.get("minutes", 0))
+        if not 1 <= minutes <= 5:
+            raise RuntimeError("浏览时长须为 1 到 5 分钟")
+        rows = browse_feed(page, minutes)
+        result = format_browse_review(rows) or "没有确认到持续播放的视频；未保存观看记录。"
+        response = {"ok": True, "result": result}
+    except Exception as exc:
+        response = {"ok": False, "error": str(exc) or exc.__class__.__name__}
+    finally:
+        try:
+            editor = open_recipient_chat(page, cfg)
+            arm_inbox_mutation_observer(page, selectors["message_selector"])
+        except Exception as exc:
+            detail = f"抖音收件箱恢复失败：{exc.__class__.__name__}: {exc}"
+            response["restoreError"] = detail
+            if response.get("ok"):
+                response["result"] += f"\n\n{detail}"
+        request_id = str(request.get("id", ""))
+        if re.fullmatch(r"[0-9a-f]{32}", request_id):
+            response_path = ROOT / f"browse-response-{request_id}.json"
+            temporary = response_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, response_path)
+        BROWSE_ACTIVE_PATH.unlink(missing_ok=True)
+    if editor is None:
+        raise RuntimeError("抖音收件箱恢复失败；监听器将重新连接浏览器。")
+    return editor, page.url
+
+
 def run_inbox(inspect_only: bool) -> int:
     cfg = load_config()
     require_recipient_verification(cfg, read_json(VERIFICATION_PATH, {}))
@@ -1855,6 +1988,10 @@ def run_inbox_listener() -> int:
                             maintenance_due = True
                             break
                         next_schedule_check = time_module.monotonic() + 15
+                    browse_session_result = service_browse_request(page, cfg, selectors)
+                    if browse_session_result:
+                        editor, conversation_url = browse_session_result
+                        continue
                     version = page.evaluate("() => window.__daFeiYuInboxMutationVersion || 0")
                     try:
                         page.wait_for_function(
@@ -1894,6 +2031,7 @@ def main() -> int:
     parser.add_argument("--poll-inbox", action="store_true", help="Process at most one new inbound message when verified selectors are configured")
     parser.add_argument("--listen-inbox", action="store_true", help="Keep the verified inbox open and react to new-message DOM changes")
     parser.add_argument("--browse", action="store_true", help="Browse the visible feed for a bounded session and share watch history with QQ")
+    parser.add_argument("--request-browse", action="store_true", help="Ask the persistent inbox listener to browse in its existing Edge session")
     parser.add_argument("--interact", choices=("like", "comment"), help="Interact with exactly one explicitly selected video")
     parser.add_argument("--video-url", help="Canonical Douyin /video/<id> URL for --interact")
     parser.add_argument("--comment-text", default="", help="Exact user-provided single-line comment for --interact comment")
@@ -1909,11 +2047,11 @@ def main() -> int:
         parser.error("--max-items must be between 1 and 5")
     if not 1 <= args.minutes <= 15:
         parser.error("--minutes must be between 1 and 15")
-    if args.browse and (args.share_latest or args.send or args.scheduled or args.login or args.verify_recipient
+    if (args.browse or args.request_browse) and (args.share_latest or args.send or args.scheduled or args.login or args.verify_recipient
                         or args.inspect_inbox or args.poll_inbox or args.listen_inbox or args.interact):
-        parser.error("--browse is a separate read-only browser mode")
-    if args.minutes != 10 and not args.browse:
-        parser.error("--minutes can only be used with --browse")
+        parser.error("--browse/--request-browse is a separate read-only browser mode")
+    if args.minutes != 10 and not (args.browse or args.request_browse):
+        parser.error("--minutes can only be used with --browse/--request-browse")
     if args.login and (args.send or args.verify_recipient or args.scheduled):
         parser.error("--login cannot be combined with send or recipient verification")
     if args.verify_recipient and (args.send or args.scheduled):
@@ -1931,7 +2069,7 @@ def main() -> int:
     if not args.interact and (args.video_url or args.comment_text or args.dry_run):
         parser.error("--video-url/--comment-text/--dry-run require --interact")
     if sum(bool(value) for value in (args.login, args.verify_recipient, args.inspect_inbox, args.poll_inbox,
-                                     args.listen_inbox, args.browse, args.scheduled, args.share_latest, args.interact)) > 1:
+                                     args.listen_inbox, args.browse, args.request_browse, args.scheduled, args.share_latest, args.interact)) > 1:
         parser.error("Choose only one browser mode")
     if args.send and (args.inspect_inbox or args.poll_inbox):
         parser.error("--inspect-inbox never sends; --poll-inbox is separately gated by inbound configuration")
@@ -1944,6 +2082,8 @@ def main() -> int:
             return run_inbox(inspect_only=False)
         if args.listen_inbox:
             return run_inbox_listener()
+        if args.request_browse:
+            return run_browse_request(args.minutes)
         if args.browse:
             return run_browse(args.minutes)
         if args.interact:

@@ -191,15 +191,42 @@ async function douyinShareApi(init = {}) {
 async function douyinBrowseApi(minutes) {
   const consoleToken = readConsoleToken();
   if (!consoleToken) throw new Error('本地控制台令牌不可用');
-  const res = await fetch('http://127.0.0.1:3101/douyin/browse', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-console-token': consoleToken },
-    body: JSON.stringify({ minutes }),
-    signal: AbortSignal.timeout(900_000)
-  });
+  let res;
+  try {
+    res = await fetch('http://127.0.0.1:3101/douyin/browse', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-console-token': consoleToken },
+      body: JSON.stringify({ minutes }),
+      signal: AbortSignal.timeout(20_000)
+    });
+  } catch (error) {
+    const code = error?.cause?.code ? ` (${error.cause.code})` : '';
+    throw new Error(`本机抖音浏览接口未能接通${code}；浏览任务没有得到启动确认。请勿推断浏览器或视频状态。`);
+  }
   let body = null;
   try { body = await res.json(); } catch {}
   if (!res.ok) throw new Error(body?.error || `抖音浏览 API HTTP ${res.status}`);
+  return body;
+}
+
+async function douyinBrowseStatusApi(jobId) {
+  const consoleToken = readConsoleToken();
+  if (!consoleToken) throw new Error('本地控制台令牌不可用');
+  let res;
+  try {
+    res = await fetch('http://127.0.0.1:3101/douyin/browse-status', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-console-token': consoleToken },
+      body: JSON.stringify({ jobId }),
+      signal: AbortSignal.timeout(10_000)
+    });
+  } catch (error) {
+    const code = error?.cause?.code ? ` (${error.cause.code})` : '';
+    throw new Error(`本机抖音浏览状态接口未能接通${code}；任务状态未知。`);
+  }
+  let body = null;
+  try { body = await res.json(); } catch {}
+  if (!res.ok) throw new Error(body?.error || `抖音浏览状态 API HTTP ${res.status}`);
   return body;
 }
 
@@ -249,14 +276,14 @@ const server = new McpServer({ name: 'snowluma-safe', version: '0.1.0' });
 
 server.tool(
   'douyin_browse_recommendations',
-  '仅主人 QQ 私聊可用。打开已登录的抖音账号，在普通“推荐”流中实际播放并理解视频，记录最近观看内容。每次 1–5 分钟，只浏览和记录，不点赞、评论、关注或发送消息。主人明确要求自己刷/逛抖音或查看新视频时调用；如果浏览器忙、登录失效或遇到验证，按工具结果如实说明。',
+  '仅主人 QQ 私聊可用。启动一项后台抖音浏览任务：在普通“推荐”流只读浏览 1–5 分钟并记录实际播放的视频，不点赞、评论、关注或发送消息。此工具快速返回 jobId；必须接着用 douyin_browse_status 查询，status=running 时稍等后继续查询，直到 completed 或 failed。不要把任务已启动说成已浏览完成。',
   { key: z.string(), token: z.string(), minutes: z.number().int().min(1).max(5) },
   async ({ key, token, minutes }) => {
     try {
       if (!isOwnerPrivateSession(key)) throw new Error('抖音浏览仅允许主人 QQ 私聊调用');
       await authorizeRead(key, token);
       const result = await douyinBrowseApi(minutes);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: 'text', text: JSON.stringify({ ...result, next: 'Use douyin_browse_status with this jobId until status is completed or failed.' }, null, 2) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `抖音浏览失败：${error?.message ?? error}` }], isError: true };
     }
@@ -264,20 +291,38 @@ server.tool(
 );
 
 server.tool(
+  'douyin_browse_status',
+  '仅主人 QQ 私聊可用。查询 douyin_browse_recommendations 返回的 jobId。status=running 时稍等后再次调用；只有 status=completed 且包含实际结果时才能说浏览完成。failed 时只转述 error，不推测浏览器、截图或视频状态。',
+  { key: z.string(), token: z.string(), jobId: z.string().uuid() },
+  async ({ key, token, jobId }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('抖音浏览状态仅允许主人 QQ 私聊查询');
+      await authorizeRead(key, token);
+      const result = await douyinBrowseStatusApi(jobId);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `抖音浏览状态查询失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
   'douyin_interact_with_video',
-  '仅主人 QQ 私聊可用。对一条明确指定的抖音标准视频页点赞或评论。主人明确要求点赞时才能 action=like；评论必须逐字使用主人本轮明确给出的 commentText，不得自行编写。dryRun=true 只检查页面控件并验证输入框，不会点赞或提交评论；真正操作必须 dryRun=false。每次仅操作一条视频，不批量、不关注、不重试状态不明的操作。',
+  '仅主人 QQ 私聊可用。对一条明确指定的抖音标准视频页点赞或评论。目标可用 videoUrl，或用 videoTitle 从最近观看记录唯一定位；标题需足够具体，不能唯一匹配时工具会拒绝。主人明确要求/确认点赞时才能 action=like；评论必须逐字使用主人本轮明确给出的 commentText，不得自行编写。dryRun=true 只检查页面控件并验证输入框，不会点赞或提交评论；真正操作必须 dryRun=false。每次仅操作一条视频，不批量、不关注、不重试状态不明的操作。',
   {
     key: z.string(), token: z.string(), action: z.enum(['like', 'comment']),
-    videoUrl: z.string().url().max(500), commentText: z.string().max(200).optional(),
+    videoUrl: z.string().url().max(500).optional(), videoTitle: z.string().min(2).max(300).optional(),
+    commentText: z.string().max(200).optional(),
     dryRun: z.boolean()
   },
-  async ({ key, token, action, videoUrl, commentText, dryRun }) => {
+  async ({ key, token, action, videoUrl, videoTitle, commentText, dryRun }) => {
     try {
       if (!isOwnerPrivateSession(key)) throw new Error('抖音点赞/评论仅允许主人 QQ 私聊调用');
       await authorizeRead(key, token);
+      if (Boolean(videoUrl) === Boolean(videoTitle)) throw new Error('videoUrl 和 videoTitle 必须且只能提供一个');
       if (action === 'comment' && !String(commentText ?? '').trim()) throw new Error('评论必须提供主人明确给出的原文');
       if (action === 'like' && commentText) throw new Error('点赞操作不能附带评论文案');
-      const result = await douyinInteractApi({ action, videoUrl, commentText, dryRun });
+      const result = await douyinInteractApi({ action, videoUrl, videoTitle, commentText, dryRun });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `抖音互动失败：${error?.message ?? error}` }], isError: true };

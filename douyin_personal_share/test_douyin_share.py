@@ -37,10 +37,16 @@ from douyin_share import (
     clean_observation,
     latest_unsent_video,
     save_watch_history,
+    format_browse_review,
+    browse_launch_failure_message,
+    service_browse_request,
+    BROWSE_REQUEST_PATH,
+    BROWSE_ACTIVE_PATH,
     PlaywrightTimeout,
     normalize_comment_text,
     like_control_state,
     interaction_comment_key,
+    daily_like_attempts,
 )
 
 
@@ -291,6 +297,11 @@ class ShareLogicTests(unittest.TestCase):
         self.assertEqual(first, interaction_comment_key("https://www.douyin.com/video/123", "很好看"))
         self.assertNotEqual(first, interaction_comment_key("https://www.douyin.com/video/123", "不一样"))
 
+    def test_daily_like_attempt_counter_is_safe_for_old_or_invalid_state(self):
+        self.assertEqual(daily_like_attempts({"like_attempts_by_day": {"2026-11-04": 4}}, "2026-11-04"), 4)
+        self.assertEqual(daily_like_attempts({"like_attempts_by_day": {"2026-11-04": "bad"}}, "2026-11-04"), 0)
+        self.assertEqual(daily_like_attempts({}, "2026-11-04"), 0)
+
     def test_profile_url_is_verified_by_visible_handle_not_url_token(self):
         cfg = {
             "recipient_profile_url": "https://www.douyin.com/user/example-sec-uid",
@@ -373,6 +384,52 @@ class ShareLogicTests(unittest.TestCase):
         self.assertIn("分享给你", message)
         self.assertNotIn("你可能会感兴趣", message)
         self.assertTrue(message.endswith("https://www.douyin.com/video/9"))
+
+    def test_browse_review_includes_summary_transcript_tags_and_canonical_link(self):
+        rendered = format_browse_review([{
+            "url": "https://www.douyin.com/video/9", "title": "园艺视频", "author": "小园丁",
+            "watched_seconds": 12, "content_summary": "修剪月季的步骤", "transcript": "先剪掉枯枝",
+            "tags": ["园艺", "月季"],
+        }])
+        self.assertIn("内容摘要：修剪月季的步骤", rendered)
+        self.assertIn("语音转写：先剪掉枯枝", rendered)
+        self.assertIn("标签：园艺、月季", rendered)
+        self.assertIn("视频页：https://www.douyin.com/video/9", rendered)
+
+    def test_browse_launch_failure_says_no_video_was_watched(self):
+        error = RuntimeError("Target page, context or browser has been closed")
+        message = browse_launch_failure_message(error)
+        self.assertIn("本次没有打开页面、播放视频或写入观看记录", message)
+        self.assertIn("无法读取那个窗口当前显示的内容", message)
+
+    def test_unrelated_browse_launch_error_is_not_mislabeled_as_profile_busy(self):
+        self.assertEqual(browse_launch_failure_message(RuntimeError("network timeout")), "")
+
+    def test_listener_services_browse_request_in_existing_page_and_restores_inbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request_path = root / "browse-request.json"
+            active_path = root / "browse-request-active.json"
+            response_path = root / "browse-response-0123456789abcdef0123456789abcdef.json"
+            request_path.write_text(json.dumps({"id": "0123456789abcdef0123456789abcdef", "minutes": 2}), encoding="utf-8")
+            page = Mock()
+            page.url = "https://www.douyin.com/user/example"
+            editor = Mock()
+            with patch("douyin_share.BROWSE_REQUEST_PATH", request_path), \
+                    patch("douyin_share.BROWSE_ACTIVE_PATH", active_path), \
+                    patch("douyin_share.ROOT", root), \
+                    patch("douyin_share.browse_feed", return_value=[{"title": "测试视频"}]) as browse, \
+                    patch("douyin_share.format_browse_review", return_value="视频：测试视频"), \
+                    patch("douyin_share.open_recipient_chat", return_value=editor) as restore, \
+                    patch("douyin_share.arm_inbox_mutation_observer") as arm:
+                result = service_browse_request(page, {"test": True}, {"message_selector": ".message"})
+            self.assertEqual(result, (editor, page.url))
+            browse.assert_called_once_with(page, 2)
+            restore.assert_called_once_with(page, {"test": True})
+            arm.assert_called_once_with(page, ".message")
+            response = json.loads(response_path.read_text(encoding="utf-8"))
+            self.assertEqual(response, {"ok": True, "result": "视频：测试视频"})
+            self.assertFalse(active_path.exists())
 
     def test_watch_history_accepts_only_canonical_videos_with_meaningful_playback(self):
         self.assertIsNone(clean_observation({
