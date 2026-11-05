@@ -48,6 +48,7 @@ INTERACTION_STATE_PATH = ROOT / "interaction-state.json"
 PROFILE_LOCK_PATH = ROOT / ".browser-profile.lock"
 BROWSE_REQUEST_PATH = ROOT / "browse-request.json"
 BROWSE_ACTIVE_PATH = ROOT / "browse-request-active.json"
+LISTENER_HEARTBEAT_PATH = ROOT / "listener-heartbeat.json"
 LOCAL_TEMP_DIR = ROOT / "playwright-temp"
 VIDEO_ANALYZER = ROOT.parent / "bridge" / "scripts" / "analyze-douyin-video.mjs"
 SINGAPORE = ZoneInfo("Asia/Singapore")
@@ -133,6 +134,25 @@ def prepare_browser_temp() -> Path:
     os.environ["TEMP"] = str(chosen)
     os.environ["TMP"] = str(chosen)
     return chosen
+
+
+_last_heartbeat_write = 0.0
+
+
+def write_listener_heartbeat(busy: bool, force: bool = False) -> None:
+    """Publish listener liveness so the bridge can refuse to queue while it is offline."""
+    global _last_heartbeat_write
+    now = time_module.monotonic()
+    if not force and now - _last_heartbeat_write < 30:
+        return
+    payload = {"at": int(time_module.time() * 1000), "busy": bool(busy), "pid": os.getpid()}
+    temporary = LISTENER_HEARTBEAT_PATH.with_suffix(".tmp")
+    try:
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temporary, LISTENER_HEARTBEAT_PATH)
+        _last_heartbeat_write = now
+    except OSError:
+        pass
 
 
 def select_videos(videos: list[Video], sent_urls: set[str], limit: int) -> list[Video]:
@@ -448,6 +468,20 @@ def load_config() -> dict:
     return cfg
 
 
+INTERNAL_MARKER_RE = re.compile(
+    r"[\[［【]\s*sticker\s*[\]］】]\s*sent"
+    r"|[\[［【]\s*(?:sticker\b|table\s*[:：])[^\]］】\r\n]*[\]］】]?"
+    r"|[\[［【]\s*DeepSeek娘\s*\d{3,4}\s*[\]］】]?",
+    re.IGNORECASE,
+)
+
+
+def sanitize_outbound_text(value: object) -> str:
+    """Remove QQ-only internal directives before any text is submitted to Douyin."""
+    text = INTERNAL_MARKER_RE.sub("", str(value or ""))
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
 def request_inbound_reply(cfg: dict, state: dict, sender_handle: str, message_id: str,
                           text: str, state_path: Path | None = INBOUND_STATE_PATH,
                           opener=urllib.request.urlopen, video_context: dict | None = None) -> str | None:
@@ -497,7 +531,7 @@ def request_inbound_reply(cfg: dict, state: dict, sender_handle: str, message_id
         raise RuntimeError("Local model reply was malformed; inbound message was consumed and will not be retried automatically")
     if not result.get("ok") or result.get("duplicate"):
         return None
-    reply_text = str(result.get("reply", "")).strip()
+    reply_text = sanitize_outbound_text(result.get("reply", ""))
     return reply_text[:4000] or None
 
 
@@ -807,6 +841,10 @@ def inspect_inbox_shape(page) -> dict:
 
 
 def send_text_in_open_chat(page, editor, message: str) -> None:
+    # Final boundary: Douyin only accepts plain text, so no QQ internal directive may reach the editor.
+    message = sanitize_outbound_text(message)
+    if not message:
+        raise RuntimeError("Refusing to send an empty message after removing internal markers.")
     existing = page.get_by_text(message, exact=True)
     if existing.count():
         raise RuntimeError("The exact message already appears in the conversation; refusing a duplicate send.")
@@ -1439,32 +1477,69 @@ def run_browse(minutes: int) -> int:
     return 0
 
 
+BROWSE_REQUEST_STALE_SECONDS = 2 * 60 * 60
+
+
+def cleanup_browse_queue(request_id: str) -> None:
+    """Remove only this request's queue files so a timeout cannot block later requests."""
+    for path in (BROWSE_REQUEST_PATH, BROWSE_ACTIVE_PATH):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+        if isinstance(payload, dict) and str(payload.get("id")) == request_id:
+            path.unlink(missing_ok=True)
+    (ROOT / f"browse-response-{request_id}.json").unlink(missing_ok=True)
+
+
+def discard_stale_browse_queue() -> None:
+    """Drop a queue entry that has been sitting far longer than any browse can take."""
+    try:
+        payload = json.loads(BROWSE_REQUEST_PATH.read_text(encoding="utf-8"))
+        created_at = float(payload.get("created_at") or 0)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, OSError):
+        return
+    if not created_at or time_module.time() - created_at <= BROWSE_REQUEST_STALE_SECONDS:
+        return
+    if isinstance(payload, dict):
+        cleanup_browse_queue(str(payload.get("id") or ""))
+
+
 def request_browse_from_listener(minutes: int, timeout_seconds: int | None = None) -> str:
     """Ask the persistent inbox listener to browse using its already-open profile."""
     if not 1 <= minutes <= 5:
         raise RuntimeError("浏览时长须为 1 到 5 分钟")
+    discard_stale_browse_queue()
     if BROWSE_REQUEST_PATH.exists() or BROWSE_ACTIVE_PATH.exists():
         raise RuntimeError("已有一项抖音浏览请求正在等待或执行；请稍后再试。")
     request_id = uuid.uuid4().hex
     request_path = BROWSE_REQUEST_PATH.with_suffix(f".{request_id}.tmp")
-    request_path.write_text(json.dumps({"id": request_id, "minutes": minutes}), encoding="utf-8")
+    request_path.write_text(
+        json.dumps({"id": request_id, "minutes": minutes, "created_at": time_module.time()}),
+        encoding="utf-8",
+    )
     try:
         os.replace(request_path, BROWSE_REQUEST_PATH)
     finally:
         request_path.unlink(missing_ok=True)
-    deadline = time_module.monotonic() + (timeout_seconds or minutes * 60 + 240)
+    timeout = minutes * 60 + 240 if timeout_seconds is None else max(0, timeout_seconds)
+    deadline = time_module.monotonic() + timeout
     response_path = ROOT / f"browse-response-{request_id}.json"
-    while time_module.monotonic() < deadline:
-        if response_path.is_file():
-            try:
-                response = json.loads(response_path.read_text(encoding="utf-8"))
-            finally:
-                response_path.unlink(missing_ok=True)
-            if response.get("ok") is not True:
-                raise RuntimeError(str(response.get("error") or "抖音浏览请求执行失败。"))
-            return str(response.get("result") or "")
-        time_module.sleep(0.5)
-    raise RuntimeError("等待抖音收件箱监听器执行浏览请求超时；请求可能仍在执行，请先检查浏览器状态。")
+    try:
+        while time_module.monotonic() < deadline:
+            if response_path.is_file():
+                try:
+                    response = json.loads(response_path.read_text(encoding="utf-8"))
+                finally:
+                    response_path.unlink(missing_ok=True)
+                if response.get("ok") is not True:
+                    raise RuntimeError(str(response.get("error") or "抖音浏览请求执行失败。"))
+                return str(response.get("result") or "")
+            time_module.sleep(0.5)
+        raise RuntimeError("等待抖音收件箱监听器执行浏览请求超时；请求可能仍在执行，请先检查浏览器状态。")
+    finally:
+        # 超时/异常必须清掉自己的排队文件，否则下一次请求会被永久挡住。
+        cleanup_browse_queue(request_id)
 
 
 def run_browse_request(minutes: int) -> int:
@@ -1882,6 +1957,7 @@ def service_browse_request(page, cfg: dict, selectors: dict):
     request = {}
     response = {"ok": False, "error": "抖音浏览请求执行失败。"}
     editor = None
+    write_listener_heartbeat(busy=True, force=True)
     try:
         request = json.loads(BROWSE_ACTIVE_PATH.read_text(encoding="utf-8"))
         minutes = int(request.get("minutes", 0))
@@ -1908,6 +1984,7 @@ def service_browse_request(page, cfg: dict, selectors: dict):
             temporary.write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
             os.replace(temporary, response_path)
         BROWSE_ACTIVE_PATH.unlink(missing_ok=True)
+        write_listener_heartbeat(busy=False, force=True)
     if editor is None:
         raise RuntimeError("抖音收件箱恢复失败；监听器将重新连接浏览器。")
     return editor, page.url
@@ -1981,6 +2058,7 @@ def run_inbox_listener() -> int:
                 process_inbox_page(page, editor, cfg, selectors, state)
                 print("Persistent Douyin inbox listener is active.")
                 while True:
+                    write_listener_heartbeat(busy=False)
                     if time_module.monotonic() >= next_schedule_check:
                         daily_state = read_json(DAILY_BROWSE_STATE_PATH, {})
                         flush_daily_report(cfg, daily_state)

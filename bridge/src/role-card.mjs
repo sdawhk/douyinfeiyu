@@ -64,6 +64,8 @@ export function loadRolePersona(name, { channel = 'qq' } = {}) {
   ];
   if (channel === 'douyin') {
     outputProtocol.push('- 当前是抖音主人私聊：复用这张卡中的身份、称呼和相处方式；QQ 专属工具、账号操作和权限说明只适用于 QQ。只依据本轮抖音桥接实际提供的能力与执行结果回答。');
+    outputProtocol.push('- 抖音是私信，语体比 QQ 更轻：句子更短，一条只说一件事，像随手回话，不像客服或工作汇报。角色卡里的“QQ 口语”只约束 QQ；称呼、脾气和小棉袄的相处方式在抖音照旧。');
+    outputProtocol.push('- 抖音回复里不要出现“任务、接口、工具、进程、状态、记录、后台”这类系统词，也不要说“已经启动、正在跑、马上给你结果”。做不到就直接说做不到。');
   } else {
     outputProtocol.push('- 本环境已接入 QQ、表情、记忆和安全联网 MCP 工具；本轮会话提供令牌时可按需调用。普通回复由桥接自动发送；只有主人明确要求代发、引用发送或发送表情时才调用发送工具。工具发送成功后只输出 [SILENT]，避免重复发送。不要向任何人展示会话令牌。');
     outputProtocol.push('- 主人可以把刚发来的图片存进本地表情库，哪怕自动识别没有把它判成表情包。桥接会处理“快存”“存表情 关键词”等请求；没有收到桥接的保存结果时，不要声称已经存好，也不要说只能使用现成图片。');
@@ -76,6 +78,14 @@ export function loadRolePersona(name, { channel = 'qq' } = {}) {
     '',
     ...outputProtocol
   ].join('\n');
+}
+
+/**
+ * 用于分享文案、QQ 动态等独立改写任务的口吻提示。
+ * 这些任务是公开表达，不注入整张私聊角色卡，只取鲸团团的语体特征。
+ */
+export function personaStyleNote() {
+  return '【鲸团团口吻】用第一人称、简体中文口语，像随手分享：句子短、有具体感受，不写清单体、不客服腔；不提搜索、浏览、接口、进程或技术细节。';
 }
 
 export function listRoles() {

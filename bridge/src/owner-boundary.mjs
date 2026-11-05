@@ -38,9 +38,10 @@ export function directOwnerIdentityReply(input, isOwner) {
   return null;
 }
 
-export function enforceOwnerBoundary(reply, { isOwner = false } = {}) {
+export function enforceOwnerBoundary(reply, { isOwner = false, ownerAddress = '' } = {}) {
   const text = String(reply ?? '');
   if (!text || text.trim() === '[SILENT]') return text;
+  const address = String(ownerAddress ?? '').trim();
   const deniesOwner = /(?:^|[，。！？!\s])(?:我|咱|鲸鲸|小鲸鱼)?(?:可|本来)?(?:没有|没|无)(?:什么|任何)?主人(?:[，。！？!\s呀啊呢啦吧哈]|$)|哪(?:来|有)的主人|没人(?:是|当)我主人/.test(text)
     && !/不是(?:没有|没|无)主人/.test(text);
   const assignsRecipient = !isOwner && (
@@ -50,6 +51,8 @@ export function enforceOwnerBoundary(reply, { isOwner = false } = {}) {
     || /(?:^|[，。！？!\s])(?:行|好|嗯|收到|知道了)?[，\s]*主人(?:[，。！？!\s]|$)/.test(text)
   );
   if (deniesOwner || assignsRecipient) {
+    // 面对主人本人时不要突然改用真名，沿用本轮指定称呼（抖音场景是“爸”）。
+    if (deniesOwner && isOwner && address) return `你是${address}，这个身份不用改。`;
     return `我的主人是 ${OWNER_NAME}，普通聊天可以照常聊，但这个身份不能随便改。`;
   }
   if (!isOwner && /(?:好|行|可以|没问题|听你的|答应).{0,12}(?:以后|今后|从现在起).{0,25}(?:每句话|每条(?:回复|消息)|一直|永远|都(?:加|带|叫|说))/.test(text)) {

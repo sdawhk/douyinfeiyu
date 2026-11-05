@@ -1,5 +1,7 @@
 import { dirname } from 'node:path';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { stripStickerDirectives } from './reply-sticker-token.mjs';
+import { commitmentClaimIssue, stripInternalChatMarkers } from './reply-output-safety.mjs';
 
 const cleanHandle = (value) => String(value ?? '').trim().replace(/^@/, '');
 
@@ -73,9 +75,25 @@ export function createDouyinOwnerReplyGate({ configuredHandle, ownerId, statePat
     try {
       state.consumedMessageIds.push(id);
       persist(state.consumedMessageIds);
-      const response = String(await generate({ ownerId: String(ownerId), messageId: id, text: content,
+      // 最后一道发送前兜底：抖音发送端只接受纯文本，任何 QQ 内部标记都不能进入消息正文。
+      const generated = String(await generate({ ownerId: String(ownerId), messageId: id, text: content,
         videoContext: safeVideoContext })).trim();
+      let response = stripInternalChatMarkers(stripStickerDirectives(generated)).trim();
       if (!response) throw new Error('Model returned an empty reply');
+      // 没有实际结果却声称“任务已在跑/马上给你”时，纠正一次；仍不合格走明确兜底。
+      if (commitmentClaimIssue(response)) {
+        const retried = String(await generate({
+          ownerId: String(ownerId),
+          messageId: `${id}:retry`,
+          text: content,
+          videoContext: safeVideoContext,
+          correction: '不要声称你已经在刷、任务已启动、在跑或马上给结果；你在抖音私信这边没有这些工具，没拿到结果就直说没拿到。'
+        })).trim();
+        response = stripInternalChatMarkers(stripStickerDirectives(retried)).trim();
+        if (!response || commitmentClaimIssue(response)) {
+          response = '爸，我这边还没真拿到结果，先不跟你说已经在弄了。';
+        }
+      }
       return { ok: true, duplicate: false, reply: response.slice(0, 4000) };
     } finally {
       inFlight.delete(id);

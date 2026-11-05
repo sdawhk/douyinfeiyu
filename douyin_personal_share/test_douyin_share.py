@@ -27,6 +27,7 @@ from douyin_share import (
     run_scheduled,
     scheduled_work_due,
     request_inbound_reply,
+    sanitize_outbound_text,
     extract_inbound_messages,
     extract_inbound_events,
     recent_shared_video_context,
@@ -47,6 +48,10 @@ from douyin_share import (
     like_control_state,
     interaction_comment_key,
     daily_like_attempts,
+    request_browse_from_listener,
+    cleanup_browse_queue,
+    write_listener_heartbeat,
+    LISTENER_HEARTBEAT_PATH,
 )
 
 
@@ -186,6 +191,36 @@ class ShareLogicTests(unittest.TestCase):
             self.assertEqual(payload["videoContext"]["url"], "https://www.douyin.com/video/123")
             self.assertEqual(payload["videoContext"]["summary"], "一只猫在窗边")
             self.assertEqual(calls[0][1], 260)
+
+    def test_outbound_text_removes_qq_sticker_directives(self):
+        self.assertEqual(sanitize_outbound_text('好呀 [sticker:DeepSeek娘019] 我记住啦'), '好呀 我记住啦')
+        self.assertEqual(sanitize_outbound_text('[STICKER：开心] 走啦'), '走啦')
+        self.assertEqual(sanitize_outbound_text('答复 [sticker:开心'), '答复')
+        self.assertEqual(sanitize_outbound_text('[table:621]不错'), '不错')
+        self.assertEqual(sanitize_outbound_text('[sticker] sent'), '')
+        self.assertEqual(sanitize_outbound_text('[sticker:DeepSeek娘019]'), '')
+
+    def test_inbound_reply_backend_strips_sticker_directives_before_send(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            token_file = root / "token"
+            token_file.write_text("local-test-token", encoding="utf-8")
+
+            class Response:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def read(self):
+                    return '{"ok":true,"duplicate":false,"reply":"好呀 [sticker:DeepSeek娘019]"}'.encode("utf-8")
+
+            cfg = {"recipient_handle": "dyecfcykdwea", "reply_backend": {
+                "enabled": True, "url": "http://127.0.0.1:3101/douyin/reply", "token_file": str(token_file)
+            }}
+            self.assertEqual(request_inbound_reply(cfg, {}, "dyecfcykdwea", "msg-sticker", "hello",
+                                                   None, lambda _request, timeout: Response()), "好呀")
 
     def test_inbound_poll_requires_explicit_verified_selectors(self):
         with self.assertRaisesRegex(RuntimeError, "disabled"):
@@ -630,6 +665,56 @@ class ShareLogicTests(unittest.TestCase):
                 self.assertFalse(scheduled_work_due({"scheduled_enabled": True, "daily_browse": {}}))
             saved = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(len(saved["daily_plans"]["2026-10-30"]), 5)
+
+
+class BrowseQueueTests(unittest.TestCase):
+    def test_timeout_removes_queued_request_so_later_requests_are_not_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "browse-request.json"
+            active_path = Path(tmp) / "browse-request-active.json"
+            with patch("douyin_share.BROWSE_REQUEST_PATH", request_path), \
+                    patch("douyin_share.BROWSE_ACTIVE_PATH", active_path), \
+                    patch("douyin_share.ROOT", Path(tmp)):
+                with self.assertRaisesRegex(RuntimeError, "超时"):
+                    request_browse_from_listener(1, timeout_seconds=0)
+                self.assertFalse(request_path.exists())
+                self.assertFalse(active_path.exists())
+                self.assertEqual(list(Path(tmp).glob("browse-response-*.json")), [])
+
+    def test_stale_queue_entry_is_discarded_before_a_new_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "browse-request.json"
+            active_path = Path(tmp) / "browse-request-active.json"
+            request_path.write_text(json.dumps({
+                "id": "a" * 32, "minutes": 1, "created_at": 1.0,
+            }), encoding="utf-8")
+            with patch("douyin_share.BROWSE_REQUEST_PATH", request_path), \
+                    patch("douyin_share.BROWSE_ACTIVE_PATH", active_path), \
+                    patch("douyin_share.ROOT", Path(tmp)):
+                with self.assertRaisesRegex(RuntimeError, "超时"):
+                    request_browse_from_listener(1, timeout_seconds=0)
+                self.assertFalse(request_path.exists())
+
+    def test_cleanup_only_removes_the_matching_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "browse-request.json"
+            request_path.write_text(json.dumps({"id": "b" * 32, "minutes": 1}), encoding="utf-8")
+            with patch("douyin_share.BROWSE_REQUEST_PATH", request_path), \
+                    patch("douyin_share.BROWSE_ACTIVE_PATH", Path(tmp) / "active.json"), \
+                    patch("douyin_share.ROOT", Path(tmp)):
+                cleanup_browse_queue("c" * 32)
+                self.assertTrue(request_path.exists())
+
+    def test_heartbeat_records_liveness_and_busy_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "listener-heartbeat.json"
+            with patch("douyin_share.LISTENER_HEARTBEAT_PATH", path), \
+                    patch("douyin_share._last_heartbeat_write", 0.0):
+                write_listener_heartbeat(True, force=True)
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                self.assertTrue(payload["busy"])
+                self.assertIsInstance(payload["at"], int)
+                self.assertGreater(payload["at"], 0)
 
 
 if __name__ == "__main__":
