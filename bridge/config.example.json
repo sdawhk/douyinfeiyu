@@ -51,7 +51,17 @@
     "coverEnabled": true,
     "apiKey": "",
     "rvcEnabled": false,
-    "rvcPitch": 0
+    "rvcPitch": 0,
+    "singingPitch": {
+      "enabled": true,
+      "anchorHz": 310,
+      "detectMaxHz": 1300,
+      "pitchCeilingHz": 780,
+      "minShiftSemitones": 4,
+      "maxShiftSemitones": 8,
+      "minVocalSeconds": 8,
+      "manualOverride": false
+    }
   },
   "stickerVisionBaseUrl": "http://127.0.0.1:18901/v1",
   "stickerVisionModels": [

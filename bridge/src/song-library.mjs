@@ -493,6 +493,16 @@ export function getPaidSongOrder(orderId) {
     segment_count,confirmed_segments,output_path,credit_source,grant_id,unit_cost,process_pid FROM paid_song_orders WHERE order_id=?`).get(String(orderId)) ?? null;
 }
 
+// 主人中途说“不用制作”时，把本会话还在做的整首订单标记取消；
+// 后台制作任务在发送前会检查这个状态，取消后不再发剩余分段。
+export function cancelPaidSongOrders(chatKey, senderId) {
+  const now = Date.now();
+  const result = db().prepare(`UPDATE paid_song_orders SET status='cancelled',updated_at=?
+    WHERE chat_key=? AND sender_id=? AND status IN ('reserved','processing','partial')`)
+    .run(now, String(chatKey), String(senderId));
+  return result.changes;
+}
+
 export function savePaidSongSegments(orderId, { sourceIdentity, title, voiceVariant = '', segments, now = Date.now() }) {
   if (!Array.isArray(segments) || !segments.length || segments.some((item, index) => item.segmentIndex !== index || !item.cachePath)) return false;
   const database = db();

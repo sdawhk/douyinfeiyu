@@ -119,6 +119,38 @@ export function loadExistingSongOutput(options, { root = CACHE_ROOT } = {}) {
   return null;
 }
 
+// 自动变调在生成前不知道 shift，不能按精确 variant 预查；这里只复用「同一来源 + 当前音色
+// profile」的既有自动产物。手动指定变调的缓存带 pitchMode=manual，不会被自动模式误用。
+export function loadAutoSongOutput(options, { root = CACHE_ROOT, profile = '' } = {}) {
+  if (!profile || !['ai', 'generated'].includes(options?.mode)) return null;
+  const query = comparableSongName(options.query);
+  if (!query) return null;
+  let names;
+  try { names = readdirSync(root).filter((name) => /^[a-f0-9]{64}\.json$/.test(name)); }
+  catch { return null; }
+  const matches = [];
+  for (const name of names) {
+    try {
+      const meta = JSON.parse(readFileSync(path.join(root, name), 'utf8'));
+      if (meta.id !== name.slice(0, -5) || meta.pitchMode !== 'auto'
+          || meta.mode !== options.mode || comparableSongName(meta.query) !== query
+          || Number(meta.candidate ?? 1) !== Number(options.candidate ?? 1)
+          || (meta.startSeconds ?? null) !== (options.startSeconds ?? null)
+          || (meta.seconds ?? null) !== (options.seconds ?? null)
+          || (options.sourceIdentity && meta.sourceIdentity !== options.sourceIdentity)
+          || !Number.isInteger(meta.pitch)
+          || normalized(meta.voiceVariant) !== normalized(`rvc:${meta.pitch}:${profile}`)) continue;
+      matches.push(meta);
+    } catch { /* 损坏的元数据不能作为缓存候选。 */ }
+  }
+  matches.sort((a, b) => Number(b.at) - Number(a.at));
+  for (const meta of matches) {
+    const cached = loadSongOutputById(meta.id, { root });
+    if (cached) return cached;
+  }
+  return null;
+}
+
 export function saveSongOutput(options, audio, { root = CACHE_ROOT } = {}) {
   if (!Buffer.isBuffer(audio) || audio.length < 1024 || audio.length > MAX_AUDIO_BYTES) {
     throw new Error('歌曲缓存音频为空或超过 QQ 语音大小限制');

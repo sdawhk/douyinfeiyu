@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { findCachedSongInPlaylist, listCachedSongPlaylist, loadExistingSongOutput, loadSongOutput,
-  loadSongOutputById, saveSongOutput } from '../src/song-output-cache.mjs';
+import { findCachedSongInPlaylist, listCachedSongPlaylist, loadAutoSongOutput, loadExistingSongOutput,
+  loadSongOutput, loadSongOutputById, saveSongOutput } from '../src/song-output-cache.mjs';
 
 test('an existing song reuses a verified cache across punctuation aliases', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'song-alias-cache-'));
@@ -21,6 +21,23 @@ test('an existing song reuses a verified cache across punctuation aliases', asyn
     assert.equal(loadExistingSongOutput({ ...alias, sourceIdentity: 'https://example.test/other' }, { root }), null);
     await writeFile(path.join(root, `${saved.id}.mp3`), Buffer.alloc(2048, 8));
     assert.equal(loadExistingSongOutput(alias, { root }), null, 'damaged audio must not be sent');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('auto-pitch cache reuses any detected shift under the current profile but never manual variants', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'song-auto-cache-'));
+  try {
+    const options = { query: '夜曲', mode: 'ai', candidate: 1, startSeconds: 30, seconds: 30 };
+    const autoAudio = Buffer.alloc(2048, 5);
+    saveSongOutput({ ...options, title: '夜曲', pitchMode: 'auto', pitch: 5, voiceVariant: 'rvc:5:clear-v5' }, autoAudio, { root });
+    assert.equal(loadAutoSongOutput(options, { root, profile: 'clear-v5' })?.audio.equals(autoAudio), true);
+    assert.equal(loadAutoSongOutput(options, { root, profile: 'clear-v4' }), null);
+    saveSongOutput({ ...options, query: '晴天', title: '晴天', pitchMode: 'manual', pitch: 5,
+      voiceVariant: 'rvc:5:clear-v5' }, Buffer.alloc(2048, 6), { root });
+    assert.equal(loadAutoSongOutput({ ...options, query: '晴天' }, { root, profile: 'clear-v5' }), null,
+      'manual pitch output must not satisfy an auto request');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

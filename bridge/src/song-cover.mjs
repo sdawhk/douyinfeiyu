@@ -61,6 +61,20 @@ export function parseExistingSongCommand(text, { botNickname = '', botSelf = '',
   return null;
 }
 
+/**
+ * 识别「翻唱/点唱」里的完整版/整首是不是整首歌意图，返回去掉修饰后的歌名；不是则返回 null。
+ * 只认开头的「完整版X」和结尾的「X的完整版」，避免把「十年 8D环绕完整版」这类音源标题误判成整首。
+ */
+export function parseFullSongIntentQuery(query) {
+  const raw = String(query ?? '').trim();
+  const leading = raw.match(/^(?:完整版|完整首|整首版|整首|全曲)(?:的)?\s*(.+)$/u);
+  const trailing = raw.match(/^(.+?)\s*的\s*(?:完整版|完整首|整首版|整首|全曲)(?:歌曲)?$/u);
+  const matched = leading ?? trailing;
+  if (!matched) return null;
+  const base = matched[1].trim().replace(/\s+#?[1-8]$/u, '').trim();
+  return base ? { query: base } : null;
+}
+
 export function parseRecentSongReplayRequest(text, { hasBotMention = false } = {}) {
   let input = String(text ?? '').trim();
   if (hasBotMention) input = input.replace(/^@[^\s@]+\s+/, '').trim();
@@ -141,7 +155,9 @@ function reliableSongResults(query, entries, limit) {
         || (entry.duration != null && (entry.duration < 45 || entry.duration > 900))) return null;
     const score = hits * 10 + (isExactSongMatch(query, title) ? 30 : 0)
       + (/(?:dj|remix)/i.test(query) && /(?:dj|remix)/i.test(title) ? 5 : 0)
-      + (/官方|原唱|演唱|mv|歌詞|歌词|完整版/i.test(title) ? 2 : 0);
+      + (/官方|原唱|演唱|mv|歌詞|歌词|完整版/i.test(title) ? 2 : 0)
+      // 多机位/剪辑/现场/饭拍这类音源底噪和欢呼很重，同等匹配下让位给录音室版本。
+      - (/(?:多机位|多機位|剪辑版|剪輯版|剪辑|剪輯|现场|現場|饭拍|飯拍|演唱会|演唱會|巡演|音乐节|音樂節|live)/i.test(title) ? 8 : 0);
     return { entry, score, index };
   }).filter(Boolean).sort((a, b) => b.score - a.score || a.index - b.index)
     .filter(({ entry }, index, ranked) => ranked.findIndex((item) => item.entry.title === entry.title) === index)
@@ -358,8 +374,11 @@ export async function makeExistingSongSegments(query, { chunkSeconds = 60, fetch
       if (!Number.isFinite(actual) || Math.abs(actual - seconds) > 0.5) throw new Error(`第 ${segmentIndex + 1} 段时长未通过校验`);
       segments.push({ segmentIndex, startSeconds, seconds, audio });
     }
-    const sourceHash = createHash('sha256').update(await readFile(sourceFile)).digest('hex');
-    return { title: selected.title, source: selected.source, url: selected.url, sourceIdentity: `${selected.url}#sha256=${sourceHash}`, duration, segments };
+    // 整首音频交给点歌编排做“整首一次分离 + 一次变调检测”，分段只切不重复分离。
+    const sourceAudio = await readFile(sourceFile);
+    const sourceHash = createHash('sha256').update(sourceAudio).digest('hex');
+    return { title: selected.title, source: selected.source, url: selected.url, sourceAudio,
+      sourceIdentity: `${selected.url}#sha256=${sourceHash}`, duration, segments };
   } finally {
     await rm(work, { recursive: true, force: true });
   }

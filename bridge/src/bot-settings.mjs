@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { singingPitchOptions } from './rvc-pitch.mjs';
 
 export const CONFIG_PATH = fileURLToPath(new URL('../config.json', import.meta.url));
 
@@ -61,6 +62,7 @@ export function publicSettings(config) {
     },
     singing: { enabled: singing.enabled === true, coverEnabled: singing.coverEnabled !== false, hasApiKey: Boolean(singing.apiKey),
       rvcEnabled: singing.rvcEnabled === true, rvcPitch: Number.isInteger(singing.rvcPitch) ? singing.rvcPitch : 0,
+      singingPitch: singingPitchOptions(singing.singingPitch),
       allowedQQs: Array.isArray(singing.allowedQQs) ? singing.allowedQQs.map(String) : [] },
     edgeTts: { enabled: edgeTts.enabled === true, mode: ['always', 'probability'].includes(edgeTts.mode) ? edgeTts.mode : 'requested',
       url: edgeTts.workerUrl || edgeTts.url || 'https://tts.wangwangit.com', voice: edgeTts.voice || 'zh-CN-XiaoxiaoNeural' },

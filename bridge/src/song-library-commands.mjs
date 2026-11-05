@@ -122,6 +122,11 @@ export function normalizeSongCommandText(text, { selfNickname = '', selfQQ = '',
       || name === String(selfQQ) || name === `qq${selfQQ}`;
     if (recognized) normalized = value.slice(mention[0].length).trim();
   }
+  // 裸命令先原样返回。否则下面的「唱(…)完整/整首」模式会把“唱完整首”拆成
+  // 歌名“完”、“唱完整首歌”拆成歌名“歌”，导致误点一首叫《完》的歌。
+  if (/^(?:唱完整首|唱完整首歌|唱整首|唱完整版|整首|发整首|来整首|续唱整首|续唱完整首)$/u.test(normalized)) {
+    return normalized;
+  }
   const fullSongForms = [
     /^(?:唱完整首|唱完整版|唱整首)(?=\S)(.+)$/u,
     /^(?:唱完整版|唱整首)\s+(.+)$/u,
@@ -132,7 +137,10 @@ export function normalizeSongCommandText(text, { selfNickname = '', selfQQ = '',
   for (const pattern of fullSongForms) {
     const match = normalized.match(pattern);
     if (match) {
-      const query = match[1].trim().replace(/^[《「](.*)[》」]$/u, '$1');
+      // 整首链路只有一个音源候选；把「#3 / 3」这类候选序号从歌名里去掉，
+      // 既避免搜索带上序号失败，也避免把序号当成歌名的一部分。
+      const query = match[1].trim().replace(/^[《「](.*)[》」]$/u, '$1')
+        .replace(/\s+#?[1-8]$/u, '').trim();
       if (query) return `唱完整首 ${query}`;
     }
   }
@@ -447,6 +455,8 @@ export async function handleSongLibraryCommand({
         }
         if (!updatePaidSongOrder(order.orderId, { status: 'processing', sourceIdentity: result.sourceIdentity, title: result.title })) throw new Error('paid full-song order could not enter delivery');
         for (const segment of result.segments) {
+          // 主人在制作过程中说了“不用制作”：取消后立即停止，不再发送剩余分段。
+          if (getPaidSongOrder(order.orderId)?.status === 'cancelled') return;
           const state = listPaidSongSegments(order.orderId)[segment.segmentIndex];
           if (!state || state.segment_index !== segment.segmentIndex) throw new Error('paid segment index is not contiguous');
           if (state.status === 'sent') continue;

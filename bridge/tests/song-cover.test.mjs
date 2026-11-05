@@ -16,7 +16,7 @@ test('clearer RVC mix uses a new cache variant so old mixes are regenerated', as
     saveSongOutput({ ...base, voiceVariant: 'rvc:0' }, audio, { root });
     assert.equal(loadSongOutput({ ...base, voiceVariant: 'rvc:0' }, { root })?.audio.length, 2048);
     assert.equal(loadSongOutput({ ...base, voiceVariant: LIUYING_SINGING_VOCAL_VARIANT(0) }, { root }), null);
-    assert.equal(LIUYING_SINGING_VOCAL_PROFILE, 'clear-v4');
+    assert.equal(LIUYING_SINGING_VOCAL_PROFILE, 'clear-v5');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

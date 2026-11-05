@@ -80,12 +80,13 @@ import { synthesizeVoiceClone } from './voice-clone-tts.mjs';
 import { MAX_SPEECH_BYTES, transcribeLocalSpeech } from './local-stt.mjs';
 import { directOwnerIdentityReply, enforceOwnerBoundary, isOwnerTopic, isVerifiedDouyinOwnerTurn, ownerBoundaryPrompt } from './owner-boundary.mjs';
 import { parseSingCommand, generateSong, downloadSong } from './singing.mjs';
-import { parseExistingSongCommand, parseRecentSongReplayRequest, searchExistingSongs, makeExistingSongClip, isExactSongMatch } from './song-cover.mjs';
-import { findCachedSongInPlaylist, loadExistingSongOutput, loadSongOutput, saveSongOutput } from './song-output-cache.mjs';
+import { parseExistingSongCommand, parseFullSongIntentQuery, parseRecentSongReplayRequest, searchExistingSongs, makeExistingSongClip, isExactSongMatch } from './song-cover.mjs';
+import { loadAutoSongOutput, loadExistingSongOutput, loadSongOutput, saveSongOutput } from './song-output-cache.mjs';
 import { songDeliveryJournal } from './song-delivery-journal.mjs';
-import { applyLiuyingSpeech, applyLiuyingVoice, LIUYING_SINGING_VOCAL_PROFILE, LIUYING_SINGING_VOCAL_VARIANT } from './rvc-singing.mjs';
+import { applyLiuyingSpeech, applyLiuyingVoiceDetailed, LIUYING_SINGING_VOCAL_PROFILE, LIUYING_SINGING_VOCAL_VARIANT } from './rvc-singing.mjs';
+import { resolveSingingPitchPlan } from './rvc-pitch.mjs';
 import { collectExistingGroupIds, initializeGroupInterjectionSettings, isGroupInterjectionEnabled, setGroupInterjectionEnabled } from './group-interjection-settings.mjs';
-import { getVerifiedCreditBalance, getVerifiedSongPreview, hasRedPacketMarker, listSongs, listUncertainPreviews, markFreeQuotaExemptSenders, ownerLedgerSummary, redPacketCapabilityStatus, reconcilePreviewReservations, refreshSongLibrary, registerSongOutput, reserveFreePreview, resolveUncertainPreview, settleFreePreview } from './song-library.mjs';
+import { getVerifiedCreditBalance, getVerifiedSongPreview, hasRedPacketMarker, listSongs, listUncertainPreviews, markFreeQuotaExemptSenders, ownerLedgerSummary, redPacketCapabilityStatus, reconcilePreviewReservations, refreshSongLibrary, registerSongOutput, reserveFreePreview, resolveUncertainPreview, settleFreePreview, cancelPaidSongOrders } from './song-library.mjs';
 
 const CFG_PATH = new URL('../config.json', import.meta.url);
 const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
@@ -120,7 +121,10 @@ let songLibraryLoaded = false;
 let songPreviewRecoveryDone = false;
 let botNickname = '';
 const songCandidateCache = new Map();
+const PENDING_FULL_SONG_TTL_MS = 5 * 60_000;
+const pendingFullSongChoices = new Map();
 const recentSongOutputs = new Map();
+const recentChatSongOutputs = new Map();
 function songDeliveryFailureStatus(error) {
   return error?.uncertain === true || error?.name === 'AbortError' || error?.name === 'TimeoutError'
     || /timeout|timed out|aborted|econnreset|epipe|fetch failed|socket hang up/i.test(String(error?.message ?? error))
@@ -144,7 +148,8 @@ function persistSongArtifact(saved) {
   try {
     const meta = saveSongOutput({ query: saved.query, mode: saved.mode, candidate: saved.candidate ?? 1,
       startSeconds: generated ? null : (saved.startSeconds ?? 30), seconds: generated ? null : (saved.seconds ?? 30),
-      voiceVariant, voiceProfile: saved.voiceProfile ?? 'original', title: saved.title, url: saved.url, source: saved.source, duration: saved.duration, pitch: saved.pitch }, saved.audio);
+      voiceVariant, voiceProfile: saved.voiceProfile ?? 'original', title: saved.title, url: saved.url, source: saved.source, duration: saved.duration, pitch: saved.pitch,
+      pitchMode: saved.pitchMode ?? (saved.pitch != null ? 'manual' : null) }, saved.audio);
     if (!generated && saved.seconds === 30) {
       try { registerSongOutput({ file: join(fileURLToPath(new URL('../state/song-cache/', import.meta.url)), `${meta.id}.mp3`),
         title: saved.title, query: saved.query, mode: saved.mode, voiceVariant, startSeconds: saved.startSeconds ?? 30,
@@ -153,12 +158,20 @@ function persistSongArtifact(saved) {
     }
   } catch (error) { log('[song-cache] save failed:', error?.message ?? error); }
 }
-function rememberSongOutput(sender, { audio, title, query, mode, url, source, duration, seconds, startSeconds, candidate, pitch, voiceProfile }, chatKey = '', recordDelivery = true, persist = true) {
+function rememberSongOutput(sender, { audio, title, query, mode, url, source, duration, seconds, startSeconds, candidate, pitch, pitchMode, voiceProfile }, chatKey = '', recordDelivery = true, persist = true) {
   const key = String(sender);
   if (!/^\d{5,20}$/.test(key) || !Buffer.isBuffer(audio) || audio.length > 12 * 1024 * 1024) return;
-  const saved = { audio, title, query, mode, url, source, duration, seconds, startSeconds, candidate, pitch,
+  const saved = { audio, title, query, mode, url, source, duration, seconds, startSeconds, candidate, pitch, pitchMode,
     voiceProfile: voiceProfile ?? 'original', chatKey: String(chatKey ?? ''), at: Date.now() };
   recentSongOutputs.set(key, saved);
+  if (recordDelivery && chatKey) {
+    // 记录本会话最近一次真正发送出去的歌，供「引用机器人语音」续唱时定位。
+    recentChatSongOutputs.set(String(chatKey), { query: saved.query, title: saved.title, mode: saved.mode,
+      seconds: saved.seconds, chatKey: String(chatKey), at: saved.at });
+    if (recentChatSongOutputs.size > 100) {
+      recentChatSongOutputs.delete(recentChatSongOutputs.keys().next().value);
+    }
+  }
   if (recordDelivery) songDeliveryJournal.record({ chatKey, title: title || query, mode, status: 'sent', seconds });
   try {
     mkdirSync(RECENT_SONG_DIR, { recursive: true });
@@ -167,6 +180,14 @@ function rememberSongOutput(sender, { audio, title, query, mode, url, source, du
     writeFileSync(join(RECENT_SONG_DIR, `recent-song-${key}.json`), JSON.stringify(meta));
   } catch (error) { log('[song-replay] cache save failed:', error?.message ?? error); }
   if (persist) persistSongArtifact(saved);
+}
+function recentChatSongOutput(chatKey) {
+  const key = String(chatKey ?? '');
+  if (!key) return null;
+  const saved = recentChatSongOutputs.get(key);
+  if (saved && Date.now() - saved.at < RECENT_SONG_TTL_MS) return saved;
+  recentChatSongOutputs.delete(key);
+  return null;
 }
 function recentSongOutput(sender) {
   const key = String(sender);
@@ -182,6 +203,7 @@ function recentSongOutput(sender) {
     const saved = { audio, title: String(meta.title ?? ''), query: String(meta.query ?? ''), mode: String(meta.mode ?? ''),
       url: String(meta.url ?? ''), source: String(meta.source ?? ''), duration: Number(meta.duration) || null,
       candidate: Number(meta.candidate) || 1, pitch: Number.isFinite(Number(meta.pitch)) ? Number(meta.pitch) : null,
+      pitchMode: meta.pitchMode ? String(meta.pitchMode) : null,
       voiceProfile: String(meta.voiceProfile ?? 'original'),
       chatKey: String(meta.chatKey ?? ''),
       seconds: Number(meta.seconds) || 30,
@@ -201,6 +223,38 @@ function recentSongCandidates(key) {
   if (!saved) return null;
   if (saved.expiresAt > Date.now()) return saved.results;
   songCandidateCache.delete(key);
+  return null;
+}
+
+function rememberPendingFullSongChoice(chatKey, { senderId, query, candidate = 1, mode = 'ai', seconds }) {
+  pendingFullSongChoices.delete(chatKey);
+  pendingFullSongChoices.set(chatKey, { senderId: String(senderId), query, candidate, mode, seconds,
+    expiresAt: Date.now() + PENDING_FULL_SONG_TTL_MS });
+  if (pendingFullSongChoices.size > 100) {
+    pendingFullSongChoices.delete(pendingFullSongChoices.keys().next().value);
+  }
+}
+
+/** 只认同一会话、同一发言人对「整首/试听」的回答；说别的就作废，避免群里别人接话。 */
+function takePendingFullSongChoice(chatKey, senderId, text) {
+  const pending = pendingFullSongChoices.get(chatKey);
+  if (!pending) return null;
+  if (pending.expiresAt <= Date.now()) {
+    pendingFullSongChoices.delete(chatKey);
+    return null;
+  }
+  if (String(pending.senderId) !== String(senderId)) return null;
+  const choice = String(text ?? '').normalize('NFKC').replace(/[。！!，,、\s]/gu, '')
+    .replace(/[吧呀啊呢]$/u, '').toLowerCase();
+  if (/^(?:要|就|直接)?(?:整首|完整版|完整首|整首版|全曲|全部)(?:唱)?$/u.test(choice)) {
+    pendingFullSongChoices.delete(chatKey);
+    return { ...pending, choice: 'full' };
+  }
+  if (/^(?:先)?(?:试听|试听版|听一下|先听|片段|一小段)$/u.test(choice) || /^60(?:秒|s)$/u.test(choice)) {
+    pendingFullSongChoices.delete(chatKey);
+    return { ...pending, choice: 'preview' };
+  }
+  pendingFullSongChoices.delete(chatKey);
   return null;
 }
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
@@ -2985,6 +3039,14 @@ async function processMessage(ev) {
     await sendText(target, guide, isGroup);
     return;
   }
+  // 主人中途取消正在制作的整首：必须拦在点歌路由和模型之前，否则模型嘴上答应、后台照样发歌。
+  if (isOwner(sender) && /^(?:不用制作|别制作了|取消制作|取消整首|不用唱了|别唱了|不要唱了|不唱了)[。！!？?]*$/u.test(t0)) {
+    const cancelled = cancelPaidSongOrders(chatKey, sender);
+    if (cancelled) {
+      await sendText(target, '好，那这首不唱了。', isGroup);
+      return;
+    }
+  }
   // 红包核验命令已停用（RED_PACKET_ENABLED=false）
   if (RED_PACKET_ENABLED && /^(?:红包待核验|红包通过\s+[a-f0-9]{64}\s+\d+\s+\S+|红包拒绝\s+[a-f0-9]{64})$/i.test(t0)) {
     const handled = await handleSongLibraryCommand({
@@ -3105,14 +3167,36 @@ async function processMessage(ev) {
     return;
   }
 
-  const fullFollowup = /^(?:发整首|唱整首|整首|来整首)$/.test(t0);
-  const recentForFull = fullFollowup ? recentSongOutput(sender) : null;
+  // 引用机器人自己发的语音再说「唱完整首」时，优先用本会话最近发送的那首歌；
+  // 没有引用时才退回本人最近点过的歌。
+  const quotedBotVoice = Boolean(quotedMessage && messageReferences.replyId
+    && String(messageReferences.quotedUserId ?? '') === String(currentBotQQ ?? '')
+    && (messageHasRecord(quotedMessage.message) || messageHasRecord(quotedMessage.raw_message)));
+  if (quotedBotVoice) {
+    const quotedSong = recentChatSongOutput(chatKey) ?? recentSongOutput(sender);
+    if (quotedSong) {
+      // 引用内容原本只有「[非文本消息]」，补上歌名，避免模型把「唱完整首」当成新点歌。
+      messageReferences.context = `${messageReferences.context ?? ''}\n【引用的机器人语音是歌曲：《${quotedSong.title || quotedSong.query}》】`.trim();
+    }
+  }
+  const fullFollowup = /^(?:发整首|唱整首|唱完整首|唱完整首歌|唱完整版|整首|来整首|续唱整首|续唱完整首|续唱完整版|接着唱整首|继续唱整首|续上整首|把整首唱完)(?:吧|呗|呀|啊|嘛|哦|呢)?$/u.test(t0);
+  const recentForFull = fullFollowup
+    ? (quotedBotVoice
+      ? (recentChatSongOutput(chatKey) ?? recentSongOutput(sender))
+      : recentSongOutput(sender))
+    : null;
+  // 最近一首是同一会话里本人点过的 AI 翻唱时，直接用它续做整首；不再要求歌单缓存，
+  // 否则引用语音说「唱完整首」会被误判成缺歌名。
+  const recentFullQuery = recentForFull
+    ? (parseFullSongIntentQuery(recentForFull.query)?.query
+      ?? String(recentForFull.query ?? '').replace(/\s+#?[1-8]$/u, '').trim())
+    : '';
   if (fullFollowup && (!recentForFull || recentForFull.chatKey !== chatKey
-      || recentForFull.mode !== 'ai' || !findCachedSongInPlaylist(recentForFull.query))) {
-    await sendText(target, '先发送“歌单”并点一首，之后我才能接着唱整首；也可以说“唱完整首 歌名”。', isGroup);
+      || recentForFull.mode !== 'ai' || !recentFullQuery)) {
+    await sendText(target, '要唱哪首？说“唱完整首 歌名”，或者先点一首、再引用它的语音说“唱完整首”。', isGroup);
     return;
   }
-  const routedSongCommand = fullFollowup ? `唱完整首 ${recentForFull.query}` : t0;
+  const routedSongCommand = fullFollowup ? `唱完整首 ${recentFullQuery}` : t0;
   if (isSongLibraryCommand(routedSongCommand) || isPendingPlaylistNumber(routedSongCommand, chatKey)) {
     const handled = await handleSongLibraryCommand({
       text: routedSongCommand, key: chatKey, senderId: sender,
@@ -3330,7 +3414,10 @@ async function processMessage(ev) {
         await sendText(target, `《${saved.title}》已经唱到结尾了。`, isGroup);
         return;
       }
-      const voiceVariant = saved.mode === 'ai' ? LIUYING_SINGING_VOCAL_VARIANT(runtimeSinging.rvcPitch ?? 0) : 'original';
+      const pitchPlan = resolveSingingPitchPlan(runtimeSinging);
+      // 续段沿用上一段的实际 shift（自动模式也不重新算），避免同一首歌段间突然变调。
+      const continuationPitch = Number.isInteger(saved.pitch) ? saved.pitch : pitchPlan.pitch;
+      const voiceVariant = saved.mode === 'ai' ? LIUYING_SINGING_VOCAL_VARIANT(continuationPitch) : 'original';
       const cachedSegment = loadSongOutput({ query: saved.query, mode: saved.mode,
         candidate: saved.candidate ?? 1, startSeconds, seconds, voiceVariant });
       if (cachedSegment) {
@@ -3360,12 +3447,16 @@ async function processMessage(ev) {
           const clip = await makeExistingSongClip(saved.query, { seconds, startSeconds,
             searchImpl: async () => [picked, ...alternatives] });
           if (isMuted(chatKey) || !canReply(settingsDocument.settings.replyControl, isGroup, target)) return;
-          const audio = saved.mode === 'ai'
-            ? await applyLiuyingVoice(clip.audio, { pitch: runtimeSinging.rvcPitch ?? 0 }) : clip.audio;
+          const detail = saved.mode === 'ai'
+            ? await applyLiuyingVoiceDetailed(clip.audio, { pitch: pitchPlan.pitch, pitchMode: pitchPlan.mode,
+              pitchShift: Number.isInteger(saved.pitch) ? saved.pitch : null, pitchConfig: pitchPlan.config })
+            : null;
+          const audio = detail ? detail.audio : clip.audio;
           if (isMuted(chatKey) || !canReply(settingsDocument.settings.replyControl, isGroup, target)) return;
           const output = { audio, title: clip.title, query: saved.query, mode: saved.mode,
             url: clip.url, source: clip.source, duration: clip.duration, seconds: clip.seconds, startSeconds: clip.startSeconds,
-            candidate: saved.candidate ?? 1, pitch: saved.mode === 'ai' ? (runtimeSinging.rvcPitch ?? 0) : null,
+            candidate: saved.candidate ?? 1, pitch: detail ? detail.pitchShift : null,
+            pitchMode: detail ? detail.pitchMode : null,
             voiceProfile: saved.mode === 'ai' ? LIUYING_SINGING_VOCAL_PROFILE : 'original' };
           persistSongArtifact(output);
           await sendSegments(target, [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], isGroup);
@@ -3463,8 +3554,18 @@ async function processMessage(ev) {
       }
       return;
     }
+    // 「翻唱 完整版X」先问整首还是试听，避免把音源标题里的完整版当成时长，也避免误做整首。
+    const fullSongIntent = coverRequest.mode === 'ai' ? parseFullSongIntentQuery(coverRequest.song) : null;
+    if (fullSongIntent) {
+      rememberPendingFullSongChoice(chatKey, { senderId: sender, query: fullSongIntent.query,
+        candidate: coverRequest.candidate, mode: coverRequest.mode, seconds: coverRequest.seconds });
+      await sendText(target, `《${fullSongIntent.query.slice(0, 24)}》是要整首（分段发、制作久一点），还是先听 ${coverRequest.seconds ?? 60} 秒试听？回“整首”或“试听”就行。`, isGroup);
+      log(`[full-song-choice] asked query=${fullSongIntent.query.slice(0, 40)} target=${target}`);
+      return;
+    }
     const requestedSeconds = coverRequest.seconds ?? 60;
-    const voiceVariant = coverRequest.mode === 'ai' ? LIUYING_SINGING_VOCAL_VARIANT(runtimeSinging.rvcPitch ?? 0) : 'original';
+    const pitchPlan = resolveSingingPitchPlan(runtimeSinging);
+    const voiceVariant = coverRequest.mode === 'ai' ? LIUYING_SINGING_VOCAL_VARIANT(pitchPlan.pitch) : 'original';
     const cacheRequest = { query: coverRequest.song, mode: coverRequest.mode,
       candidate: coverRequest.candidate, startSeconds: 30, seconds: requestedSeconds, voiceVariant };
     const recentOutput = recentSongOutput(sender);
@@ -3473,8 +3574,14 @@ async function processMessage(ev) {
         === coverRequest.song.normalize('NFKC').toLowerCase().replace(/雨愛/g, '雨爱').replace(/司[鳳風风]/g, '司凤')
       && recentOutput.mode === coverRequest.mode && recentOutput.seconds === requestedSeconds
       && (recentOutput.candidate ?? 1) === coverRequest.candidate
-      && (coverRequest.mode !== 'ai' || recentOutput.voiceProfile === LIUYING_SINGING_VOCAL_PROFILE);
-    const cachedSong = loadExistingSongOutput(cacheRequest) || (sameRecentRequest ? recentOutput : null);
+      && (coverRequest.mode !== 'ai' || (recentOutput.voiceProfile === LIUYING_SINGING_VOCAL_PROFILE
+        && (pitchPlan.mode !== 'auto' || recentOutput.pitchMode === 'auto')));
+    const recentMatch = sameRecentRequest ? recentOutput : null;
+    // 自动模式生成前不知道实际 shift，按「同来源 + 当前 profile」的自动缓存复用；
+    // 手动模式仍走精确 variant，避免把自动产物当成指定变调的结果。
+    const cachedSong = recentMatch || (coverRequest.mode === 'ai' && pitchPlan.mode === 'auto'
+      ? loadAutoSongOutput(cacheRequest, { profile: LIUYING_SINGING_VOCAL_PROFILE })
+      : loadExistingSongOutput(cacheRequest));
     if (cachedSong) {
       try {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${cachedSong.audio.toString('base64')}` } }], isGroup);
@@ -3504,18 +3611,21 @@ async function processMessage(ev) {
           return;
         }
         log('[song-cover] selected', picked.title);
-        await sendText(target, `找到《${picked.title.slice(0, 80)}》，正在制作${coverRequest.mode === 'ai' ? '流萤翻唱' : '原唱片段'}。`, isGroup);
+        await sendText(target, `找到《${picked.title.slice(0, 80)}》，这次先做 ${requestedSeconds} 秒${coverRequest.mode === 'ai' ? '试听' : '原唱片段'}，不是整首${coverRequest.mode === 'ai' ? `；要整首说“唱完整首 ${coverRequest.song.slice(0, 24)}”` : ''}。`, isGroup);
         const clip = await makeExistingSongClip(coverRequest.song, {
           candidate: coverRequest.candidate, searchImpl: async () => results,
           ...(coverRequest.seconds ? { seconds: coverRequest.seconds } : {})
         });
         if (isMuted(chatKey) || !canReply(settingsDocument.settings.replyControl, isGroup, target)) return;
-        const audio = coverRequest.mode === 'ai'
-          ? await applyLiuyingVoice(clip.audio, { pitch: runtimeSinging.rvcPitch ?? 0 }) : clip.audio;
+        const detail = coverRequest.mode === 'ai'
+          ? await applyLiuyingVoiceDetailed(clip.audio, { pitch: pitchPlan.pitch, pitchMode: pitchPlan.mode,
+            pitchConfig: pitchPlan.config })
+          : null;
+        const audio = detail ? detail.audio : clip.audio;
         if (isMuted(chatKey) || !canReply(settingsDocument.settings.replyControl, isGroup, target)) return;
         const output = { audio, title: clip.title, query: coverRequest.song, mode: coverRequest.mode,
           url: clip.url, source: clip.source, duration: clip.duration, seconds: clip.seconds, startSeconds: clip.startSeconds,
-          candidate: coverRequest.candidate, pitch: coverRequest.mode === 'ai' ? (runtimeSinging.rvcPitch ?? 0) : null,
+          candidate: coverRequest.candidate, pitch: detail ? detail.pitchShift : null, pitchMode: detail ? detail.pitchMode : null,
           voiceProfile: coverRequest.mode === 'ai' ? LIUYING_SINGING_VOCAL_PROFILE : 'original' };
         persistSongArtifact(output);
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], isGroup);
@@ -3544,14 +3654,21 @@ async function processMessage(ev) {
       await sendText(target, '我能发晓晓音色的朗读语音；原创歌曲也能生成后发成 QQ 语音，不过这项功能目前还没启用。到运行设置的“原创唱歌”填写 Mureka 音乐 API Key 并开启就行。', isGroup);
       return;
     }
+    const pitchPlan = resolveSingingPitchPlan(runtimeSinging);
     const generatedVoiceVariant = runtimeSinging.rvcEnabled === true
-      ? LIUYING_SINGING_VOCAL_VARIANT(runtimeSinging.rvcPitch ?? 0) : 'original';
+      ? LIUYING_SINGING_VOCAL_VARIANT(pitchPlan.pitch) : 'original';
     const recentGenerated = recentSongOutput(sender);
-    const cachedGenerated = loadSongOutput({ query: singTheme, mode: 'generated', candidate: 1,
-      startSeconds: null, seconds: null, voiceVariant: generatedVoiceVariant })
-      || (recentGenerated?.mode === 'generated' && recentGenerated.query.normalize('NFKC').toLowerCase() === singTheme.normalize('NFKC').toLowerCase()
-        && recentGenerated.voiceProfile === (runtimeSinging.rvcEnabled === true ? LIUYING_SINGING_VOCAL_PROFILE : 'original')
-        ? recentGenerated : null);
+    const recentGeneratedMatch = recentGenerated?.mode === 'generated'
+      && recentGenerated.query.normalize('NFKC').toLowerCase() === singTheme.normalize('NFKC').toLowerCase()
+      && recentGenerated.voiceProfile === (runtimeSinging.rvcEnabled === true ? LIUYING_SINGING_VOCAL_PROFILE : 'original')
+      && (runtimeSinging.rvcEnabled !== true || pitchPlan.mode !== 'auto' || recentGenerated.pitchMode === 'auto')
+      ? recentGenerated : null;
+    // 自动模式不知道实际 shift：复用同主题、同 profile 的自动产物，避免重复消耗生成次数。
+    const cachedGenerated = recentGeneratedMatch || (runtimeSinging.rvcEnabled === true && pitchPlan.mode === 'auto'
+      ? loadAutoSongOutput({ query: singTheme, mode: 'generated', candidate: 1,
+        startSeconds: null, seconds: null }, { profile: LIUYING_SINGING_VOCAL_PROFILE })
+      : loadSongOutput({ query: singTheme, mode: 'generated', candidate: 1,
+        startSeconds: null, seconds: null, voiceVariant: generatedVoiceVariant }));
     if (cachedGenerated) {
       try {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${cachedGenerated.audio.toString('base64')}` } }], isGroup);
@@ -3574,10 +3691,13 @@ async function processMessage(ev) {
         const song = await generateSong(singTheme, runtimeSinging);
         if (isMuted(chatKey) || !canReply(settingsDocument.settings.replyControl, isGroup, target)) return;
         let audio;
+        let voiceDetail = null;
         try {
           audio = await downloadSong(song.url);
           if (runtimeSinging.rvcEnabled === true) {
-            audio = await applyLiuyingVoice(audio, { pitch: runtimeSinging.rvcPitch ?? 0 });
+            voiceDetail = await applyLiuyingVoiceDetailed(audio, { pitch: pitchPlan.pitch,
+              pitchMode: pitchPlan.mode, pitchConfig: pitchPlan.config });
+            audio = voiceDetail.audio;
           }
         } catch (audioError) {
           log('[singing] audio processing failed:', audioError?.message ?? audioError);
@@ -3588,7 +3708,8 @@ async function processMessage(ev) {
         try {
           const title = `原创歌曲：${singTheme}`;
           const output = { audio, title, query: singTheme, mode: 'generated', candidate: 1,
-            pitch: runtimeSinging.rvcEnabled === true ? (runtimeSinging.rvcPitch ?? 0) : null,
+            pitch: runtimeSinging.rvcEnabled === true ? (voiceDetail ? voiceDetail.pitchShift : pitchPlan.pitch) : null,
+            pitchMode: voiceDetail ? voiceDetail.pitchMode : null,
             voiceProfile: runtimeSinging.rvcEnabled === true ? LIUYING_SINGING_VOCAL_PROFILE : 'original' };
           persistSongArtifact(output);
           await sendSegments(target, [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], isGroup);
@@ -4177,6 +4298,12 @@ async function fetchImageOriginalBytes(file, maxBytes) {
   } catch {
     return null;
   }
+}
+
+function messageHasRecord(message) {
+  if (Array.isArray(message)) return message.some((segment) => segment?.type === 'record');
+  if (message && typeof message === 'object' && message.type === 'record') return true;
+  return /\[CQ:record[,\]]/u.test(String(message ?? ''));
 }
 
 function extractText(message) {

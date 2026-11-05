@@ -12,6 +12,7 @@ import { synthesizeEdgeSpeechLocal, edgeTtsLocalReady } from './edge-tts-local.m
 import { synthesizeVoiceClone } from './voice-clone-tts.mjs';
 import { generateSong, downloadSong } from './singing.mjs';
 import { applyLiuyingSpeech, applyLiuyingVoice } from './rvc-singing.mjs';
+import { resolveSingingPitchPlan } from './rvc-pitch.mjs';
 import { readStickerSemantics, setStickerSemantics } from './sticker-semantics.mjs';
 import { readImageAnalyses } from './image-analysis-store.mjs';
 import { modelStatus, modelCatalog, testModel, testQQSessionChain, saveModelPolicy, syncPromotedModel } from './model-management.mjs';
@@ -439,7 +440,11 @@ async function handle(req, res) {
       const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
       const song = await generateSong('小鲸鱼在晴天里和朋友一起散步', config.singing);
       let audio = await downloadSong(song.url);
-      if (config.singing?.rvcEnabled === true) audio = await applyLiuyingVoice(audio, { pitch: config.singing.rvcPitch ?? 0 });
+      if (config.singing?.rvcEnabled === true) {
+        const pitchPlan = resolveSingingPitchPlan(config.singing);
+        audio = await applyLiuyingVoice(audio, { pitch: pitchPlan.pitch, pitchMode: pitchPlan.mode,
+          pitchConfig: pitchPlan.config });
+      }
       res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': audio.length,
         'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       return res.end(audio);
