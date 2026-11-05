@@ -10,3 +10,9 @@ playwright-temp/
 .browser-profile.lock
 .venv/
 __pycache__/
+
+# 浏览/调试产生的运行期临时目录与监听器心跳
+tmp*/
+listener-heartbeat.json
+browse-request*.json
+browse-response-*.json
