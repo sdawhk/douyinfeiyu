@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +30,10 @@ const OWNER_STATE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..'
 const BRIDGE_LOG = 'D:\\deepseek\\logs\\bridge.log';
 const PAGE_SIZE_MAX = 72;
 const IMAGE_NAME = /^[a-f0-9]{16}\.(?:jpg|jpeg|png|gif|webp)$/i;
+const TRASH_ROOT = path.resolve(process.env.IMAGE_TRASH_ROOT
+  || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'state', 'image-trash'));
+const TRASH_AUDIT = path.join(TRASH_ROOT, 'audit.log');
+const TRASH_BATCH_MAX = 200;
 let mutationQueue = Promise.resolve();
 
 const mimeTypes = {
@@ -123,6 +127,96 @@ function safeImagePath(day, file) {
   const target = path.resolve(folder, file);
   if (path.dirname(target) !== folder) return null;
   return target;
+}
+
+function ensureTrashRoot() {
+  if (!existsSync(TRASH_ROOT)) mkdirSync(TRASH_ROOT, { recursive: true });
+}
+
+/** 目标必须真实存在于图片库根目录内：挡住 ..、绝对路径、符号链接与链接目录。 */
+function realInsideImageRoot(target) {
+  const root = realpathSync(IMAGE_ROOT);
+  const real = realpathSync(target);
+  const relative = path.relative(root, real);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function trashSource(day, file) {
+  if (typeof day !== 'string' || typeof file !== 'string') return null;
+  const target = safeImagePath(day, file);
+  if (!target || !existsSync(target)) return null;
+  const info = lstatSync(target);
+  if (!info.isFile() || info.isSymbolicLink()) return null;
+  if (!realInsideImageRoot(target)) return null;
+  return { day, file, target, bytes: info.size };
+}
+
+function detachAliases(index, day, file) {
+  const removed = aliasesFor(index, day, file);
+  const otherCopy = readdirSync(IMAGE_ROOT, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== day && /^\d{4}-\d{2}-\d{2}$/.test(entry.name))
+    .map((entry) => ({ day: entry.name, path: path.join(IMAGE_ROOT, entry.name, file) }))
+    .find((entry) => existsSync(entry.path));
+  if (otherCopy) {
+    for (const tag of removed) index[tag] = { ...index[tag], day: otherCopy.day };
+  } else {
+    for (const tag of removed) delete index[tag];
+  }
+  return { removed: removed.length, names: removed, reassigned: Boolean(otherCopy), otherCopy: otherCopy?.day || null };
+}
+
+function walkTrash(visit) {
+  ensureTrashRoot();
+  let files = 0; let bytes = 0; let batches = 0;
+  for (const entry of readdirSync(TRASH_ROOT, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    batches++;
+    visit(path.join(TRASH_ROOT, entry.name), (file, size) => { files++; bytes += size; });
+  }
+  return { files, bytes, batches };
+}
+
+function trashUsage() {
+  const { files, bytes, batches } = walkTrash((batchDir, onFile) => {
+    const stack = [batchDir];
+    while (stack.length) {
+      const dir = stack.pop();
+      for (const child of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, child.name);
+        if (child.isDirectory() && !child.isSymbolicLink()) stack.push(full);
+        else if (child.isFile() && child.name !== 'manifest.json') onFile(full, statSync(full).size);
+      }
+    }
+  });
+  return { files, bytes, batches, dir: TRASH_ROOT };
+}
+
+function emptyTrash() {
+  return walkTrash((batchDir, onFile) => {
+    const stack = [batchDir];
+    const dirs = [];
+    while (stack.length) {
+      const dir = stack.pop(); dirs.push(dir);
+      for (const child of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, child.name);
+        if (child.isDirectory() && !child.isSymbolicLink()) stack.push(full);
+        else {
+          if (child.isFile() && child.name !== 'manifest.json') onFile(full, statSync(full).size);
+          unlinkSync(full);
+        }
+      }
+    }
+    for (const dir of dirs.reverse()) rmdirSync(dir);
+  });
+}
+
+function auditLog(entry) {
+  try {
+    ensureTrashRoot();
+    appendFileSync(TRASH_AUDIT, `${JSON.stringify(entry)}\n`, 'utf8');
+  } catch (error) {
+    console.error(`[image-library] audit failed: ${error.message}`);
+  }
 }
 
 function validTags(input) {
@@ -584,6 +678,96 @@ async function handle(req, res) {
       });
     } catch (error) {
       return json(res, 500, { error: error.message || '批量审核失败' });
+    }
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/images/trash') {
+    try { return json(res, 200, trashUsage()); }
+    catch (error) { return json(res, 500, { error: error.message || '读取回收目录失败' }); }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/images/trash') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机管理页面删除图片' });
+    let body;
+    try { body = await readBody(req); }
+    catch (error) { return json(res, error.status || 400, { error: error.message }); }
+    if (body.confirm !== true) return json(res, 400, { error: '删除操作需要显式确认（confirm: true）' });
+    if (!Array.isArray(body.items) || body.items.length < 1) return json(res, 400, { error: '请选择要删除的图片' });
+    if (body.items.length > TRASH_BATCH_MAX) return json(res, 400, { error: `单次最多删除 ${TRASH_BATCH_MAX} 张，请分批操作` });
+    const seen = new Set();
+    const sources = [];
+    for (const item of body.items) {
+      if (typeof item?.day !== 'string' || typeof item?.file !== 'string') return json(res, 400, { error: '图片列表格式无效' });
+      const key = `${item.day}/${item.file}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let source = null;
+      try { source = trashSource(item.day, item.file); } catch { source = null; }
+      if (!source) return json(res, 400, { error: `图片不存在或不在图片库目录内：${item.file}` });
+      sources.push(source);
+    }
+    try {
+      return await serialMutation(() => {
+        ensureTrashRoot();
+        const at = new Date().toISOString();
+        const batch = `${at.replace(/[:.]/g, '-')}-${randomBytes(3).toString('hex')}`;
+        const batchDir = path.join(TRASH_ROOT, batch);
+        const filesDir = path.join(batchDir, 'files');
+        mkdirSync(filesDir, { recursive: true });
+        const index = readIndex();
+        const entries = [];
+        const moved = [];
+        const manifestPath = path.join(batchDir, 'manifest.json');
+        let bytes = 0; let removedAliases = 0; let reassignedAliases = 0;
+        try {
+          for (const source of sources) {
+            const dest = path.join(filesDir, source.day, source.file);
+            mkdirSync(path.dirname(dest), { recursive: true });
+            renameSync(source.target, dest);
+            moved.push({ source, dest });
+            const detached = detachAliases(index, source.day, source.file);
+            if (detached.reassigned) reassignedAliases += detached.removed; else removedAliases += detached.removed;
+            bytes += source.bytes;
+            entries.push({ day: source.day, file: source.file, originalPath: source.target, trashPath: dest,
+              bytes: source.bytes, aliasesDetached: detached.removed, aliases: detached.names,
+              reassignedTo: detached.otherCopy, at });
+          }
+          writeFileSync(manifestPath, JSON.stringify({ at, source: 'image-library',
+            endpoint: 'POST /api/images/trash', imageRoot: IMAGE_ROOT, batch, items: entries }, null, 2), 'utf8');
+          writeIndexAtomic(index);
+        } catch (error) {
+          for (const { source, dest } of moved.reverse()) {
+            try { renameSync(dest, source.target); } catch { /* 尽力回滚，失败时保留回收目录内的副本 */ }
+          }
+          throw error;
+        }
+        auditLog({ at, action: 'trash', endpoint: 'POST /api/images/trash', batch, files: entries.length,
+          bytes, removedAliases, reassignedAliases });
+        return json(res, 200, { ok: true, trashed: entries.length, bytes, batch,
+          removedAliases, reassignedAliases, manifestPath });
+      });
+    } catch (error) {
+      return json(res, 500, { error: error.message || '移入回收目录失败' });
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/images/trash/empty') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机管理页面清空回收目录' });
+    let body;
+    try { body = await readBody(req); }
+    catch (error) { return json(res, error.status || 400, { error: error.message }); }
+    if (body.confirm !== true || body.confirmEmpty !== true) {
+      return json(res, 400, { error: '清空回收目录需要 confirm: true 与 confirmEmpty: true' });
+    }
+    try {
+      return await serialMutation(() => {
+        const result = emptyTrash();
+        auditLog({ at: new Date().toISOString(), action: 'empty-trash',
+          endpoint: 'POST /api/images/trash/empty', files: result.files, bytes: result.bytes });
+        return json(res, 200, { ok: true, files: result.files, freedBytes: result.bytes });
+      });
+    } catch (error) {
+      return json(res, 500, { error: error.message || '清空回收目录失败' });
     }
   }
 

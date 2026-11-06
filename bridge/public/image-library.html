@@ -68,6 +68,15 @@
     .toolbar-meta { color:var(--muted); font:11px var(--mono); white-space:nowrap; margin-left:auto; }
     .select-page { display:flex; align-items:center; gap:8px; padding:0 5px; color:var(--muted); font-size:11px; white-space:nowrap; }
     .select-page input,.card-select { accent-color:#809e38; width:17px; height:17px; cursor:pointer; }
+    .select-page.is-disabled,.select-page.is-disabled input { color:#6d776a; cursor:not-allowed; }
+    .bulk-bar .bulk-delete { color:#ffc0b7; border-color:#75443e; }
+    .bulk-bar .bulk-delete:hover { background:#482a27; }
+    .bulk-bar button:disabled { opacity:.35; cursor:not-allowed; }
+    .trash-bar { display:flex; flex-wrap:wrap; align-items:center; gap:9px; margin:-6px 0 18px; padding:10px 13px; color:var(--muted); border:1px dashed var(--line); font-size:11px; }
+    .trash-bar .trash-note { margin-right:auto; }
+    .trash-bar button { min-height:32px; padding:0 11px; color:var(--paper); border:1px solid var(--line); background:transparent; font-size:11px; }
+    .trash-bar button:hover { color:var(--danger); border-color:#75443e; background:#482a27; }
+    .trash-bar button:disabled { opacity:.35; cursor:not-allowed; }
     .bulk-bar { display:flex; flex-wrap:wrap; align-items:center; gap:9px; margin:-5px 0 18px; padding:11px 13px; border:1px solid #68764f; background:#20281c; }
     .bulk-bar[hidden] { display:none; }
     .bulk-count { margin-right:auto; color:var(--paper); font-size:12px; }
@@ -177,10 +186,11 @@
       <select class="select" id="statusFilter" aria-label="按审核状态筛选"><option value="">全部状态</option><option value="pending">待审核</option><option value="approved">已启用</option><option value="rejected">已停用</option><option value="archive">仅归档</option></select>
       <select class="select" id="analysisFilter" aria-label="按 AI 识别结果筛选"><option value="">全部 AI 结果</option><option value="photo">照片</option><option value="nonphoto">非照片</option><option value="valuable">有收藏价值</option><option value="low-value">收藏价值低</option><option value="duplicate">重复</option><option value="unique">未发现重复</option></select>
       <select class="select" id="sortFilter" aria-label="排序方式"><option value="newest">最近存入</option><option value="largest">文件最大</option></select>
-      <label class="select-page"><input id="selectPage" type="checkbox" aria-label="选择本页所有表情图片">选择本页</label>
+      <label class="select-page"><input id="selectPage" type="checkbox" aria-label="选择本页所有图片">选择本页</label>
       <span class="toolbar-meta" id="resultCount">读取图片索引…</span>
     </section>
-    <div class="bulk-bar" id="bulkBar" hidden><span class="bulk-count" id="selectedCount">已选 0 张</span><button id="bulkApprove" type="button">审核通过</button><button class="bulk-reject" id="bulkReject" type="button">一键拉黑</button><button id="clearSelection" type="button">取消选择</button></div>
+    <div class="bulk-bar" id="bulkBar" hidden><span class="bulk-count" id="selectedCount">已选 0 张</span><button id="bulkApprove" type="button" title="只对已绑定表情关键词的图片生效">审核通过</button><button class="bulk-reject" id="bulkReject" type="button" title="只对已绑定表情关键词的图片生效">一键拉黑</button><button class="bulk-delete" id="bulkTrash" type="button" title="移入回收目录可恢复，清空回收后才真正释放磁盘">移入回收（删除）</button><button id="clearSelection" type="button">取消选择</button></div>
+    <div class="trash-bar" id="trashBar"><span class="trash-note" id="trashInfo">回收目录：读取中…</span><button id="emptyTrash" type="button" disabled>清空回收</button></div>
     <section class="gallery" id="gallery" aria-live="polite"><div class="loading">正在读取本机图片索引…</div></section>
     <nav class="pager" aria-label="图片分页"><button id="prevPage" type="button">← 上一页</button><span id="pageCount" class="page-count">—</span><button id="nextPage" type="button">下一页 →</button></nav>
   </main>
@@ -209,7 +219,7 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script>
     (() => {
-      const state = { page: 1, pages: 1, items: [], days: [], selected: null, selectedImages: new Set(), tags: [], timer: null, controller: null, autoSticker: null };
+      const state = { page: 1, pages: 1, items: [], days: [], selected: null, selectedImages: new Set(), selectedBound: new Set(), trash: null, tags: [], timer: null, controller: null, autoSticker: null };
       const $ = (id) => document.getElementById(id);
       const gallery = $('gallery');
       const dialog = $('editor');
@@ -273,13 +283,14 @@
         const line = document.createElement('div'); line.className = 'card-line';
         const date = document.createElement('span'); date.className = 'card-date'; date.textContent = item.day;
         const select = document.createElement('input'); select.type = 'checkbox'; select.className = 'card-select';
-        select.checked = state.selectedImages.has(imageKey(item)); select.disabled = !item.tags.length;
-        select.setAttribute('aria-label', item.tags.length ? `选择表情图片 ${item.file}` : '请先添加表情关键词再审核');
-        select.title = item.tags.length ? '加入批量审核' : '先整理关键词后再加入审核';
+        select.checked = state.selectedImages.has(imageKey(item));
+        select.setAttribute('aria-label', item.tags.length ? `选择表情图片 ${item.file}` : `选择图片 ${item.file}（未绑定关键词，只能批量删除）`);
+        select.title = item.tags.length ? '加入批量操作（可审核 / 可删除）' : '加入批量删除（未绑定关键词，不能审核）';
         select.addEventListener('change', () => {
           const key = imageKey(item);
-          if (select.checked && state.selectedImages.size >= 200) { select.checked = false; toast('一次最多选择 200 张', true); return; }
-          if (select.checked) state.selectedImages.add(key); else state.selectedImages.delete(key);
+          if (select.checked && state.selectedImages.size >= 200) { select.checked = false; toast('一次最多选择 200 张，请分批操作', true); return; }
+          if (select.checked) { state.selectedImages.add(key); if (item.tags.length) state.selectedBound.add(key); }
+          else { state.selectedImages.delete(key); state.selectedBound.delete(key); }
           updateBulkControls();
         });
         const order = document.createElement('span'); order.textContent = item.modified.slice(11, 16);
@@ -300,7 +311,7 @@
           else badge('重复待比对', 'tag');
         }
         if (item.tags.length) for (const text of item.tags.slice(0, 4)) { const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = text; tags.append(tag); }
-        else { const empty = document.createElement('span'); empty.className = 'no-tags'; empty.textContent = '尚未绑定表情关键词'; tags.append(empty); }
+        else { const empty = document.createElement('span'); empty.className = 'no-tags'; empty.textContent = '尚未绑定表情关键词（不能批量审核）'; tags.append(empty); }
         if (analysis?.tags?.length) for (const text of analysis.tags.filter((value) => !['照片', '非照片', '有收藏价值', '收藏价值低', '重复'].includes(value)).slice(0, 5)) { const tag = document.createElement('span'); tag.className = 'tag tag-ai'; tag.textContent = text; tags.append(tag); }
         if (item.semantics?.deepseek && item.semantics.confidence >= .65) { const theme = document.createElement('span'); theme.className = 'tag theme-tag'; theme.textContent = 'DeepSeek'; tags.prepend(theme); }
         if (item.semantics?.action) { const action = document.createElement('span'); action.className = 'tag'; action.textContent = `动作：${item.semantics.action}`; tags.append(action); }
@@ -314,7 +325,8 @@
       function render(data) {
         state.items = data.items; state.pages = data.pages; state.days = data.days;
         renderStats(data.stats); buildDays(data.days);
-        $('resultCount').textContent = `${data.total.toLocaleString('zh-CN')} 张匹配图片 · 待审核 ${data.moderation?.pending || 0}`;
+        const reviewableOnPage = data.items.filter((item) => item.tags.length).length;
+        $('resultCount').textContent = `${data.total.toLocaleString('zh-CN')} 张匹配图片 · 待审核 ${data.moderation?.pending || 0} · 本页 ${data.items.length} 张可删除（其中 ${reviewableOnPage} 张可审核）`;
         $('pageCount').textContent = `${data.page} / ${data.pages}`;
         $('prevPage').disabled = data.page <= 1; $('nextPage').disabled = data.page >= data.pages;
         gallery.replaceChildren();
@@ -329,20 +341,25 @@
       function imageKey(item) { return `${item.day}/${item.file}`; }
       function updateBulkControls() {
         const selectedCount = $('selectedCount');
-        selectedCount.textContent = `已选 ${state.selectedImages.size} 张`;
+        const boundSelected = [...state.selectedImages].filter((key) => state.selectedBound.has(key)).length;
+        selectedCount.textContent = `已选 ${state.selectedImages.size} 张 · 可审核 ${boundSelected} 张`;
         $('bulkBar').hidden = state.selectedImages.size === 0;
-        const selectable = state.items.filter((item) => item.tags.length);
+        $('bulkApprove').disabled = boundSelected === 0;
+        $('bulkReject').disabled = boundSelected === 0;
+        const selectable = state.items;
         const selectedOnPage = selectable.filter((item) => state.selectedImages.has(imageKey(item))).length;
         const selectPage = $('selectPage');
         selectPage.checked = selectable.length > 0 && selectedOnPage === selectable.length;
         selectPage.indeterminate = selectedOnPage > 0 && selectedOnPage < selectable.length;
         selectPage.disabled = selectable.length === 0;
+        selectPage.parentElement.classList.toggle('is-disabled', selectable.length === 0);
+        selectPage.parentElement.title = selectable.length ? '选择本页全部图片（可批量删除）' : '本页没有图片';
       }
       async function bulkReview(status) {
-        const selected = [...state.selectedImages].map((key) => {
+        const selected = [...state.selectedImages].filter((key) => state.selectedBound.has(key)).map((key) => {
           const [day, file] = key.split('/'); return { day, file };
         });
-        if (!selected.length) return;
+        if (!selected.length) { toast('所选图片都没有绑定表情关键词，不能审核；可以改用「移入回收（删除）」', true); return; }
         const buttons = [$('bulkApprove'), $('bulkReject'), $('clearSelection')];
         buttons.forEach((button) => { button.disabled = true; });
         try {
@@ -351,10 +368,61 @@
             body: JSON.stringify({ items: selected, status })
           });
           state.selectedImages.clear();
+          state.selectedBound.clear();
           toast(status === 'approved' ? `已通过 ${result.updated} 张图片` : `已拉黑 ${result.updated} 张图片`);
           await load();
         } catch (error) { toast(error.message, true); }
         finally { buttons.forEach((button) => { button.disabled = false; }); updateBulkControls(); }
+      }
+      async function trashSelected() {
+        const selected = [...state.selectedImages].map((key) => {
+          const [day, file] = key.split('/'); return { day, file };
+        });
+        if (!selected.length) return;
+        if (selected.length > 200) { toast('一次最多删除 200 张，请分批操作', true); return; }
+        if (!confirm(`确定把选中的 ${selected.length} 张图片移入回收目录吗？\n会同时解除这些图片与表情关键词的关联；磁盘空间要等「清空回收」后才真正释放。`)) return;
+        const button = $('bulkTrash'); button.disabled = true;
+        try {
+          const result = await api('/api/images/trash', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ items: selected, confirm: true })
+          });
+          state.selectedImages.clear();
+          state.selectedBound.clear();
+          toast(`已移入回收目录 ${result.trashed} 张（${bytes(result.bytes)}），清空回收后才释放磁盘空间`);
+          await load(); await loadTrash();
+        } catch (error) { toast(error.message, true); }
+        finally { button.disabled = false; updateBulkControls(); }
+      }
+      async function loadTrash() {
+        try {
+          const data = await api('/api/images/trash');
+          state.trash = data;
+          $('trashInfo').textContent = data.files
+            ? `回收目录：${data.files} 个文件 · 可释放约 ${bytes(data.bytes)}（清空后才释放磁盘；每批 manifest.json 记录了原路径，可手工恢复）`
+            : '回收目录为空';
+          $('trashInfo').title = data.files ? `回收目录：${data.dir}` : '';
+          $('emptyTrash').disabled = data.files === 0;
+        } catch (error) {
+          state.trash = null;
+          $('trashInfo').textContent = `回收目录读取失败：${error.message}`;
+          $('emptyTrash').disabled = true;
+        }
+      }
+      async function emptyTrashNow() {
+        const info = state.trash;
+        if (!info?.files) { toast('回收目录已经是空的'); return; }
+        if (!confirm(`将永久删除回收目录中的 ${info.files} 个文件，释放约 ${bytes(info.bytes)}。此操作不可恢复。`)) return;
+        if (!confirm('再次确认：永久删除后无法恢复，真的继续吗？')) return;
+        const button = $('emptyTrash'); button.disabled = true;
+        try {
+          const result = await api('/api/images/trash/empty', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ confirm: true, confirmEmpty: true })
+          });
+          toast(`已永久删除 ${result.files} 个文件，释放 ${bytes(result.freedBytes)}`);
+        } catch (error) { toast(error.message, true); }
+        finally { await loadTrash(); }
       }
       async function load() {
         state.controller?.abort(); state.controller = new AbortController();
@@ -409,18 +477,21 @@
         if (event.key === 'Enter' || event.key === ',') { event.preventDefault(); addTag(); }
       });
       $('selectPage').addEventListener('change', () => {
-        const items = state.items.filter((item) => item.tags.length);
+        const items = state.items;
         const nextSize = items.filter((item) => !state.selectedImages.has(imageKey(item))).length + state.selectedImages.size;
-        if ($('selectPage').checked && nextSize > 200) { $('selectPage').checked = false; toast('一次最多选择 200 张', true); return; }
+        if ($('selectPage').checked && nextSize > 200) { $('selectPage').checked = false; toast('一次最多选择 200 张，请分批操作', true); return; }
         for (const item of items) {
-          if ($('selectPage').checked) state.selectedImages.add(imageKey(item));
-          else state.selectedImages.delete(imageKey(item));
+          const key = imageKey(item);
+          if ($('selectPage').checked) { state.selectedImages.add(key); if (item.tags.length) state.selectedBound.add(key); }
+          else { state.selectedImages.delete(key); state.selectedBound.delete(key); }
         }
         updateBulkControls();
       });
       $('bulkApprove').addEventListener('click', () => bulkReview('approved'));
       $('bulkReject').addEventListener('click', () => bulkReview('rejected'));
-      $('clearSelection').addEventListener('click', () => { state.selectedImages.clear(); updateBulkControls(); load(); });
+      $('bulkTrash').addEventListener('click', trashSelected);
+      $('emptyTrash').addEventListener('click', emptyTrashNow);
+      $('clearSelection').addEventListener('click', () => { state.selectedImages.clear(); state.selectedBound.clear(); updateBulkControls(); load(); });
       $('autoStickerToggle').addEventListener('change', async () => {
         const toggle = $('autoStickerToggle'), requested = toggle.checked, previous = state.autoSticker;
         toggle.disabled = true; $('autoStickerState').textContent = '正在保存…';
@@ -474,6 +545,7 @@
       $('search').addEventListener('input', () => { clearTimeout(state.timer); state.timer = setTimeout(() => { state.page = 1; load(); }, 220); });
       loadAutoSticker();
       load();
+      loadTrash();
     })();
   </script>
 </body>
