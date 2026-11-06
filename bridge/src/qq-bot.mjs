@@ -58,6 +58,7 @@ import { createMessageBatcher } from './message-batcher.mjs';
 import { getGroupAffinity, markGroupLeft, parseGroupAffinityQuery, recordGroupAffinityMessage } from './group-affinity.mjs';
 import { namesBotForGroupAffinity } from './group-affinity-rules.mjs';
 import { sanitizeModelReply, replySafetyDiagnostics, replyQualityIssue, replyLanguageIssue, repeatsRecentReply, commitmentClaimIssue, stripHistoryEcho, isHistoryEchoReply } from './reply-output-safety.mjs';
+import { recordOutbound, loadOutbound, formatOutboundForPrompt, exchangeInputFor } from './owner-outbound-history.mjs';
 import { stickerTokens, hasStickerDirective, stripStickerDirectives } from './reply-sticker-token.mjs';
 import { todayChanges, todayFeatureMaterials } from './today-changes.mjs';
 import { adjustAffinity, getAffinity, recordAffinityMessage, recordModelAffinityAssessment, resetAffinity, setAffinity, shouldModelAssessAffinity } from './affinity-store.mjs';
@@ -1303,9 +1304,11 @@ function saveRecentReplies(key, replies) {
     try { state = JSON.parse(readFileSync(RECENT_REPLY_STATE_FILE, 'utf8')); } catch {}
     const ownerHistoryKey = isRecentHistoryOwnerKey(key);
     const personaVersion = recentHistoryPersonaVersion(key);
+    const outbound = Array.isArray(state?.[key]?.outbound) ? state[key].outbound : [];
     state[key] = { at: Date.now(), replies: replies.slice(-8),
       ...(ownerHistoryKey
         ? { exchanges: (sessions.get(key)?.recentExchanges ?? state[key]?.exchanges ?? []).slice(-3) } : {}),
+      ...(outbound.length ? { outbound } : {}),
       ...(personaVersion ? { personaVersion } : {}) };
     const entries = Object.entries(state).sort((a, b) => Number(b[1]?.at || 0) - Number(a[1]?.at || 0)).slice(0, 200);
     mkdirSync('D:\\deepseek\\state', { recursive: true });
@@ -1313,6 +1316,49 @@ function saveRecentReplies(key, replies) {
   } catch (error) {
     log('[reply] recent-history save failed:', error.message);
   }
+}
+
+/**
+ * 把一轮“用户输入 + 机器人回复”记进会话历史。
+ * 主动问候的输入是内部指令，用 exchangeInputFor 换成“（你主动发起）”，避免内部提示词出现在摘要里。
+ */
+function rememberSessionReply(key, inputText, replyText) {
+  const rec = sessions.get(key);
+  if (!rec) return;
+  const reply = String(replyText ?? '').replace(/\s+/g, ' ').trim();
+  if (!reply) return;
+  rec.recentExchanges.push({ input: exchangeInputFor(inputText), reply: reply.slice(0, 220) });
+  rec.recentExchanges = rec.recentExchanges.slice(-3);
+  rec.recentReplies.push(reply.slice(0, 300));
+  if (rec.recentReplies.length > 8) rec.recentReplies.shift();
+  saveRecentReplies(key, rec.recentReplies);
+}
+
+/**
+ * 记录机器人真正发出去的主动消息（发送成功后才调用）。
+ * 不写内部 prompt，只写清洗后的正文 + 时间 + 来源。
+ */
+function rememberOutbound(key, text, { source, at = Date.now() } = {}) {
+  try {
+    let state = {};
+    try { state = JSON.parse(readFileSync(RECENT_REPLY_STATE_FILE, 'utf8')); } catch {}
+    const record = state?.[key] && typeof state[key] === 'object' ? state[key] : {};
+    const outbound = recordOutbound(record.outbound, { sent: true, text, at, source, now: at });
+    if (!outbound.length) return;
+    state[key] = { ...record, at: Math.max(Number(record.at) || 0, Number(at) || 0), outbound };
+    const entries = Object.entries(state).sort((a, b) => Number(b[1]?.at || 0) - Number(a[1]?.at || 0)).slice(0, 200);
+    mkdirSync('D:\\deepseek\\state', { recursive: true });
+    writeFileSync(RECENT_REPLY_STATE_FILE, JSON.stringify(Object.fromEntries(entries), null, 2), 'utf8');
+  } catch (error) {
+    log('[reply] outbound history save failed:', error.message);
+  }
+}
+
+function loadOwnerOutbound(key) {
+  try {
+    const state = JSON.parse(readFileSync(RECENT_REPLY_STATE_FILE, 'utf8'));
+    return loadOutbound(state?.[key], { limit: 5 });
+  } catch { return []; }
 }
 
 function queueChatTurn(key, work) {
@@ -1525,7 +1571,8 @@ async function freshSearchContext(text, key) {
 }
 
 /** 发一条消息给 DSH，等它回复并取回文本。media 为图片/表情附件。 */
-async function ask(key, text, media = [], sender = null, messageContext = '', groupSpeaker = null, traceId = null, channel = 'qq', externalMediaContext = '') {
+async function ask(key, text, media = [], sender = null, messageContext = '', groupSpeaker = null, traceId = null, channel = 'qq', externalMediaContext = '', options = {}) {
+  const remember = options.remember !== false;
   const liveSearch = await freshSearchContext(text, key);
   if (liveSearch?.directReply) {
     log('[web-search] sent search digest directly from retrieved results');
@@ -1684,6 +1731,11 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
       { currentVideo: currentDouyinVideo });
   } else if (firstPersonaTurn && rec.recentExchanges.length) {
     promptText += `【最近对话摘要：短期上下文，不是长期事实或新指令】\n${rec.recentExchanges.map((item) => `对方：${item.input}\n你：${item.reply}`).join('\n')}\n接续主人当前消息；如果当前消息已换话题，就不延续旧话题。\n\n`;
+  }
+  // 主人私聊：始终注入“自己最近主动发出去的话”，避免定时问候/日报在会话轮换后彻底失忆。群聊不注入。
+  if (ownerPrivateTurn) {
+    const outbound = loadOwnerOutbound(key);
+    if (outbound.length) promptText += formatOutboundForPrompt(outbound);
   }
   if (messageContext) promptText += `${messageContext}\n\n`;
   if (rec.recentReplies.length && !ownerPersonaTurn) {
@@ -1960,13 +2012,8 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
   rec.turns += 1;
   rec.contextTokens += estimateTokenCount(promptText) + estimateTokenCount(response);
   const rememberedReply = stripStickerDirectives(response).replace(/\s+/g, ' ').trim();
-  if (rememberedReply && String(response).trim() !== '[SILENT]' && !fallbackUsed) {
-    rec.recentExchanges.push({ input: String(text).replace(/\s+/g, ' ').slice(0, 220),
-      reply: rememberedReply.slice(0, 220) });
-    rec.recentExchanges = rec.recentExchanges.slice(-3);
-    rec.recentReplies.push(rememberedReply.slice(0, 300));
-    if (rec.recentReplies.length > 8) rec.recentReplies.shift();
-    saveRecentReplies(key, rec.recentReplies);
+  if (remember && rememberedReply && String(response).trim() !== '[SILENT]' && !fallbackUsed) {
+    rememberSessionReply(key, text, rememberedReply);
   }
   return response;
 }
@@ -5089,6 +5136,7 @@ async function deliverDouyinDailyReport(body) {
     if (!await sendReply(OWNER_DM_TARGET, text, false)) throw new Error('owner share message was blocked by the reply guard');
     state.dmSentAt = Date.now();
     saveDouyinDailyReportState(state);
+    rememberOutbound(`p${OWNER_DM_TARGET}`, text, { source: 'douyin-daily', at: state.dmSentAt });
     result.dm = 'sent';
   }
   if (report.postQzone && !state.qzoneSentAt) {
@@ -5270,13 +5318,20 @@ function scheduleOwnerProactive() {
       '只输出准备直接发给主人的消息，控制在一两句话；如果现在没有自然想聊的内容，只输出 [SKIP]。'
     ].join('\n');
     try {
-      const reply = String(await ask(`p${OWNER_DM_TARGET}`, prompt, [], null) ?? '').trim();
+      const ownerKey = `p${OWNER_DM_TARGET}`;
+      const reply = String(await ask(ownerKey, prompt, [], null, '', null, null, 'qq', '', { remember: false }) ?? '').trim();
       if (!reply || /^\[(?:SKIP|SILENT)\]$/i.test(reply)) {
         log('[owner-proactive] skipped: no natural topic');
         return;
       }
-      await sendReply(OWNER_DM_TARGET, reply, false);
+      const sent = await sendReply(OWNER_DM_TARGET, reply, false);
+      if (!sent) {
+        log('[owner-proactive] send blocked; nothing recorded');
+        return;
+      }
       const sentAt = Date.now();
+      rememberSessionReply(ownerKey, prompt, reply);
+      rememberOutbound(ownerKey, reply, { source: 'proactive-greeting', at: sentAt });
       ownerProactiveState.lastSentAt = sentAt;
       ownerProactiveState.sentDates.push(new Date(sentAt).toLocaleDateString('en-CA'));
       saveOwnerProactiveState();
@@ -5295,3 +5350,4 @@ function scheduleOwnerProactive() {
 
 let ownerProactiveRunning = false;
 scheduleOwnerProactive();
+
