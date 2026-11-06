@@ -295,8 +295,14 @@ const imageAnimationRuntime = imageAnimationStatus(cfg.imageAnimation);
 if (imageAnimationRuntime.available) log('[image-animation] ready ffmpeg=' + imageAnimationRuntime.ffmpeg);
 else log('[image-animation] ffmpeg unavailable; animated stickers will fall back to text');
 
-async function sendSongChatter(target, chatKey, kind, isGroup) {
-  try { await sendText(target, songChatterLine(chatKey, kind), isGroup); }
+async function sendSongChatter(target, chatKey, kind, isGroup, title = '') {
+  try {
+    await sendText(target, songChatterLine(chatKey, kind), isGroup);
+    // 只记真正发成功的点歌通知；群聊主动发言不记。
+    if (!isGroup && chatKey === `p${OWNER_DM_TARGET}` && title) {
+      rememberOutbound(chatKey, `给爸唱了《${String(title).slice(0, 40)}》`, { source: 'song-notice' });
+    }
+  }
   catch (error) { log('[song-chatter] follow-up failed:', error?.message ?? error); }
 }
 const SETTINGS_HEARTBEAT = 'D:\\deepseek\\state\\settings-heartbeat.json';
@@ -2732,12 +2738,13 @@ async function handleCommand(text, sender, isGroup, target, senderName = '') {
     const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
     const existing = readDiaryEntries(DIARY.dir, dayKey).entries.map((item) => item.text);
     const issue = diaryEntryIssue(note, {
-      dayKey, existingEntries: existing, sourcePhrases: [], minChars: 4
+      dayKey, existingEntries: existing, sourcePhrases: [], minChars: 4,
+      allowWeather: true, allowLongNumbers: true
     });
     if (issue) {
       return issue === 'duplicate' ? '这条已经记过了。'
         : issue === 'day-full' ? `今天的日记已经写满了（最多 ${DIARY.maxEntriesPerDay} 条）。`
-          : '这句我记不进去：不能太长，也别带链接、@ 或内部标记。';
+          : '这句我记不进去：不能太长，也别带链接、@、内部标记或群聊内容。';
     }
     const result = appendDiaryEntry({ dir: DIARY.dir, dayKey, time, text: note, maxEntries: DIARY.maxEntriesPerDay });
     if (!result.written) {
@@ -3747,7 +3754,7 @@ async function processMessage(ev) {
           await sendSegments(target, [{ type: 'record', data: { file: `base64://${cachedSegment.audio.toString('base64')}` } }], isGroup);
           rememberSongOutput(sender, { ...cachedSegment, audio: cachedSegment.audio }, chatKey);
           log('[song-cache] reused continuation', cachedSegment.title, `start=${startSeconds}`, isGroup ? 'group' : 'private', target);
-          await sendSongChatter(target, chatKey, 'replay', isGroup);
+          await sendSongChatter(target, chatKey, 'replay', isGroup, cachedSegment.title);
         } catch (error) {
           log('[song-cache] send failed:', error?.message ?? error);
           songDeliveryJournal.record({ chatKey, title: cachedSegment.title, mode: cachedSegment.mode, status: songDeliveryFailureStatus(error), seconds: cachedSegment.seconds });
@@ -3784,7 +3791,7 @@ async function processMessage(ev) {
           await sendSegments(target, [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], isGroup);
           rememberSongOutput(sender, output, chatKey);
           log('[song-continue] sent', clip.title, `start=${clip.startSeconds}`, isGroup ? 'group' : 'private', target);
-          await sendSongChatter(target, chatKey, 'replay', isGroup);
+          await sendSongChatter(target, chatKey, 'replay', isGroup, clip.title);
         } catch (error) {
           log('[song-continue] failed:', error?.message ?? error);
             songDeliveryJournal.record({ chatKey, title: saved.title, mode: saved.mode, status: songDeliveryFailureStatus(error), seconds });
@@ -3804,7 +3811,7 @@ async function processMessage(ev) {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${saved.audio.toString('base64')}` } }], isGroup);
         rememberSongOutput(sender, { ...saved, audio: saved.audio }, chatKey);
         log('[song-replay] sent', saved.title, isGroup ? 'group' : 'private', target);
-        await sendSongChatter(target, chatKey, 'replay', isGroup);
+        await sendSongChatter(target, chatKey, 'replay', isGroup, saved.title);
       } catch (error) {
         log('[song-replay] failed:', error?.message ?? error);
         songDeliveryJournal.record({ chatKey, title: saved.title, mode: saved.mode, status: songDeliveryFailureStatus(error), seconds: saved.seconds });
@@ -3917,7 +3924,7 @@ async function processMessage(ev) {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${cachedSong.audio.toString('base64')}` } }], isGroup);
         rememberSongOutput(sender, { ...cachedSong, audio: cachedSong.audio }, chatKey);
         log('[song-cache] reused', coverRequest.mode, cachedSong.title, isGroup ? 'group' : 'private', target);
-        await sendSongChatter(target, chatKey, 'preview', isGroup);
+        await sendSongChatter(target, chatKey, 'preview', isGroup, cachedSong.title);
       } catch (error) {
         log('[song-cache] send failed:', error?.message ?? error);
         songDeliveryJournal.record({ chatKey, title: cachedSong.title, mode: cachedSong.mode, status: songDeliveryFailureStatus(error), seconds: cachedSong.seconds });
@@ -3962,7 +3969,7 @@ async function processMessage(ev) {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], isGroup);
         rememberSongOutput(sender, output, chatKey);
         log('[song-cover] sent', coverRequest.mode, clip.title, isGroup ? 'group' : 'private', target);
-        await sendSongChatter(target, chatKey, 'preview', isGroup);
+        await sendSongChatter(target, chatKey, 'preview', isGroup, clip.title);
       } catch (error) {
         log('[song-cover] failed:', error?.message ?? error);
           songDeliveryJournal.record({ chatKey, title: coverRequest.song, mode: coverRequest.mode, status: songDeliveryFailureStatus(error), seconds: requestedSeconds });
@@ -4005,7 +4012,7 @@ async function processMessage(ev) {
         await sendSegments(target, [{ type: 'record', data: { file: `base64://${cachedGenerated.audio.toString('base64')}` } }], isGroup);
         rememberSongOutput(sender, { ...cachedGenerated, audio: cachedGenerated.audio }, chatKey);
         log('[song-cache] reused generated song', cachedGenerated.title, isGroup ? 'group' : 'private', target);
-        await sendSongChatter(target, chatKey, 'generated', isGroup);
+        await sendSongChatter(target, chatKey, 'generated', isGroup, cachedGenerated.title);
       } catch (error) {
         log('[song-cache] generated send failed:', error?.message ?? error);
         songDeliveryJournal.record({ chatKey, title: cachedGenerated.title, mode: 'generated', status: songDeliveryFailureStatus(error), seconds: cachedGenerated.seconds });
@@ -4045,7 +4052,7 @@ async function processMessage(ev) {
           persistSongArtifact(output);
           await sendSegments(target, [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }], isGroup);
           rememberSongOutput(sender, output, chatKey);
-          await sendSongChatter(target, chatKey, 'generated', isGroup);
+          await sendSongChatter(target, chatKey, 'generated', isGroup, output.title);
         } catch (sendError) {
           log('[singing] QQ voice failed:', sendError?.message ?? sendError);
           songDeliveryJournal.record({ chatKey, title: `原创歌曲：${singTheme}`, mode: 'generated', status: songDeliveryFailureStatus(sendError) });

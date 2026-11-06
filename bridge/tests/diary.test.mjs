@@ -11,6 +11,7 @@ import {
 } from '../src/diary.mjs';
 import { collectDiaryFacts, collectSourcePhrases, factsToPromptText } from '../src/diary-facts.mjs';
 import { buildDiaryEntryPrompt } from '../src/diary-prompt.mjs';
+import { outboundSourceLabel, recordOutbound } from '../src/owner-outbound-history.mjs';
 import { localDayKey } from '../src/daily-task.mjs';
 
 const ENTRY_A = '今天和爸聊了几句，还一起听了几首歌，心里挺踏实的。';
@@ -293,6 +294,47 @@ test('只读工具：超长内容截断到 800 字以内并注明', () => withTe
   assert.match(result.text, /已截断/);
 }));
 
+test('手动补记放宽天气和长数字，但仍拒绝群聊、链接和 @', () => {
+  const dayKey = '2026-11-06';
+  const manual = { dayKey, sourcePhrases: [], minChars: 4, allowWeather: true, allowLongNumbers: true };
+  const weatherAndPhone = '今天下雨了，气温只有 12 度，爸说他的电话是 13800138000。';
+  assert.equal(diaryEntryIssue(weatherAndPhone, manual), '');
+  assert.equal(diaryEntryIssue(weatherAndPhone, { dayKey, minChars: 4 }), 'weather-mentioned');
+  assert.equal(diaryEntryIssue('群里有人聊到这个，大家都在笑。', manual), 'group-mentioned');
+  assert.equal(diaryEntryIssue('今天看了 https://example.com 挺有意思。', manual), 'link-leaked');
+  assert.equal(diaryEntryIssue('今天想 @小明 一起吃饭。', manual), 'at-leaked');
+});
+
+test('点歌成功写进出站账本，失败不记，来源标签为“点歌”', () => {
+  const at = Date.now();
+  const list = recordOutbound([], { sent: true, text: '给爸唱了《生僻字》', source: 'song-notice', at, now: at });
+  assert.equal(list.length, 1);
+  assert.equal(outboundSourceLabel(list[0].source), '点歌');
+  const failed = recordOutbound(list, { sent: false, text: '给爸唱了《没发成的歌》', source: 'song-notice', at, now: at });
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].text, '给爸唱了《生僻字》');
+});
+
+test('日记素材注入块能出现“点歌”来源标签', () => withTempDir((dir) => {
+  const recentRepliesPath = join(dir, 'recent-chat-replies.json');
+  const at = new Date(2026, 10, 6, 14, 0).getTime();
+  writeFileSync(recentRepliesPath, JSON.stringify({
+    p1668389572: {
+      at,
+      exchanges: [],
+      outbound: [{ at, text: '给爸唱了《生僻字》', source: 'song-notice' }]
+    }
+  }), 'utf8');
+  const facts = collectDiaryFacts({
+    dayKey: '2026-11-06', ownerId: '1668389572', recentRepliesPath,
+    douyinMemoryPath: join(dir, 'missing-douyin.json'), songJournalPath: join(dir, 'missing-songs.json')
+  });
+  assert.equal(facts.outbound[0].label, '点歌');
+  assert.match(factsToPromptText(facts), /点歌：给爸唱了《生僻字》/);
+  const prompt = buildDiaryEntryPrompt({ dayKey: '2026-11-06', at: '14:05', facts });
+  assert.match(prompt, /点歌：给爸唱了《生僻字》/);
+}));
+
 test('只读工具：不存在的日期、最近 N 条顺序和审计', () => withTempDir((dir) => {
   const auditPath = join(dir, 'audit.jsonl');
   const missing = readDiaryForTool({ dir, dayKey: '2020-01-01', isOwner: true, auditPath });
@@ -315,3 +357,4 @@ test('只读工具：不存在的日期、最近 N 条顺序和审计', () => wi
   assert.ok(audit.some((item) => item.qq === '1668389572' && item.dayKey === '2026-11-06' && item.mode === 'day'));
   assert.ok(audit.every((item) => !JSON.stringify(item).includes('今天和爸聊了几句')), '审计不记录正文');
 }));
+

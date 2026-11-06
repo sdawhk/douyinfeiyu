@@ -130,9 +130,12 @@ export function isDiaryDuplicate(text, existingTexts = []) {
  * @param {string[]} options.sourcePhrases 当天聊天原句，用于拒绝逐句复述
  * @param {string[]} options.existingEntries 当天已写条目
  * @param {number} options.minChars 最小字数（手动补记可放宽）
+ * @param {boolean} options.allowWeather 手动补记允许写天气
+ * @param {boolean} options.allowLongNumbers 手动补记允许写长数字
  */
 export function diaryEntryIssue(text, {
-  dayKey, sourcePhrases = [], existingEntries = [], minChars = DIARY_ENTRY_MIN_CHARS
+  dayKey, sourcePhrases = [], existingEntries = [], minChars = DIARY_ENTRY_MIN_CHARS,
+  allowWeather = false, allowLongNumbers = false
 } = {}) {
   const body = String(text ?? '').replace(/\r\n/g, '\n').trim();
   if (!body) return 'empty';
@@ -140,13 +143,13 @@ export function diaryEntryIssue(text, {
   if (chars < minChars) return 'too-short';
   if (chars > DIARY_ENTRY_MAX_CHARS) return 'too-long';
   if (/^#{1,6}\s/m.test(body)) return 'has-heading';
-  if (WEATHER_RE.test(body)) return 'weather-mentioned';
+  if (!allowWeather && WEATHER_RE.test(body)) return 'weather-mentioned';
   if (GROUP_RE.test(body)) return 'group-mentioned';
   if (/https?:\/\/|www\./i.test(body)) return 'link-leaked';
   AT_RE.lastIndex = 0;
   if (AT_RE.test(body)) return 'at-leaked';
   AT_RE.lastIndex = 0;
-  if (/\d{5,}/.test(body)) return 'long-number-leaked';
+  if (!allowLongNumbers && /\d{5,}/.test(body)) return 'long-number-leaked';
   if (CONTROL_RE.test(body)) return 'control-marker';
   if (!isDiaryDayKey(dayKey)) return 'bad-day';
   const normalized = body.replace(/\s+/g, '');
