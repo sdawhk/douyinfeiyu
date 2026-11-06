@@ -188,7 +188,7 @@ async function douyinShareApi(init = {}) {
   return body;
 }
 
-async function douyinBrowseApi(minutes) {
+async function douyinBrowseApi(minutes, topic = '') {
   const consoleToken = readConsoleToken();
   if (!consoleToken) throw new Error('本地控制台令牌不可用');
   let res;
@@ -196,7 +196,7 @@ async function douyinBrowseApi(minutes) {
     res = await fetch('http://127.0.0.1:3101/douyin/browse', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-console-token': consoleToken },
-      body: JSON.stringify({ minutes }),
+      body: JSON.stringify(topic ? { minutes, topic } : { minutes }),
       signal: AbortSignal.timeout(20_000)
     });
   } catch (error) {
@@ -276,13 +276,13 @@ const server = new McpServer({ name: 'snowluma-safe', version: '0.1.0' });
 
 server.tool(
   'douyin_browse_recommendations',
-  '仅主人 QQ 私聊可用。启动一项后台抖音浏览任务：在普通“推荐”流只读浏览 1–5 分钟并记录实际播放的视频，不点赞、评论、关注或发送消息。此工具快速返回 jobId；必须接着用 douyin_browse_status 查询，status=running 时稍等后继续查询，直到 completed 或 failed。不要把任务已启动说成已浏览完成。',
-  { key: z.string(), token: z.string(), minutes: z.number().int().min(1).max(5) },
-  async ({ key, token, minutes }) => {
+  '仅主人 QQ 私聊可用。启动一项后台抖音浏览任务：默认在普通“推荐”流只读浏览 1–5 分钟并记录实际播放的视频。若主人本轮原话里明确指定了想看的主题（如“去刷点游戏视频”“看看猫”），必须传入 topic：1–20 字，只能取主人原话里的词或同义压缩，不许自己发明主题；带 topic 时会先搜索该主题并从结果里选视频（最多 3 分钟），搜索失败会自动改刷推荐流，结果里会写明。主人没提主题就不要传 topic。不点赞、评论、关注或发送消息。此工具快速返回 jobId；必须接着用 douyin_browse_status 查询，status=running 时稍等后继续查询，直到 completed 或 failed。不要把任务已启动说成已浏览完成。',
+  { key: z.string(), token: z.string(), minutes: z.number().int().min(1).max(5), topic: z.string().min(1).max(20).optional() },
+  async ({ key, token, minutes, topic }) => {
     try {
       if (!isOwnerPrivateSession(key)) throw new Error('抖音浏览仅允许主人 QQ 私聊调用');
       await authorizeRead(key, token);
-      const result = await douyinBrowseApi(minutes);
+      const result = await douyinBrowseApi(minutes, typeof topic === 'string' ? topic : '');
       return { content: [{ type: 'text', text: JSON.stringify({ ...result, next: 'Use douyin_browse_status with this jobId until status is completed or failed.' }, null, 2) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `抖音浏览失败：${error?.message ?? error}` }], isError: true };

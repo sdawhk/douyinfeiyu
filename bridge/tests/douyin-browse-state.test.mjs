@@ -51,6 +51,28 @@ test('jobs survive a bridge restart because they are written to disk', () => {
   });
 });
 
+test('browse jobs keep the owner topic across a restart and expose it in status', () => {
+  withTempDir((dir) => {
+    const path = join(dir, 'jobs.json');
+    const now = Date.now();
+    saveBrowseJobs(path, {
+      [JOB_ID]: {
+        jobId: JOB_ID, status: 'completed', startedAt: now, minutes: 3,
+        topic: '游戏', topicSource: 'owner', result: '本次主题：游戏'
+      }
+    });
+    const job = loadBrowseJobs(path)[JOB_ID];
+    assert.equal(job.topic, '游戏');
+    assert.equal(job.topicSource, 'owner');
+    const view = jobView(job, now);
+    assert.equal(view.topic, '游戏');
+    assert.equal(view.topicSource, 'owner');
+    const legacy = jobView({ jobId: JOB_ID, status: 'running', startedAt: now }, now);
+    assert.equal(legacy.topic, '');
+    assert.equal(legacy.topicSource, 'none');
+  });
+});
+
 test('saveBrowseJobs accepts the in-memory Map used by the bridge', () => {
   withTempDir((dir) => {
     const path = join(dir, 'jobs.json');

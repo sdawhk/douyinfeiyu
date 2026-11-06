@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 import tempfile
 import unittest
 import urllib.error
@@ -52,6 +53,26 @@ from douyin_share import (
     cleanup_browse_queue,
     write_listener_heartbeat,
     LISTENER_HEARTBEAT_PATH,
+    format_comment_reference,
+    browse_feed,
+    validate_browse_topic,
+)
+from douyin_comments import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    clean_comment_text,
+    collect_video_comments,
+    parse_comment_nodes,
+    parse_like_count,
+)
+from douyin_search import (
+    MAX_LIMIT as SEARCH_MAX_LIMIT,
+    collect_search_videos,
+    mark_topic_searched,
+    normalize_topic,
+    parse_search_cards,
+    search_url_for,
+    topic_recently_searched,
 )
 
 
@@ -431,6 +452,36 @@ class ShareLogicTests(unittest.TestCase):
         self.assertIn("标签：园艺、月季", rendered)
         self.assertIn("视频页：https://www.douyin.com/video/9", rendered)
 
+    def test_browse_review_bounds_comment_reference_and_forbids_copying(self):
+        items = [{
+            "author": "用户", "text": "字" * 100, "likes": 5,
+            "isAuthor": False, "hasImage": True,
+        } for _ in range(12)]
+        rendered = format_browse_review([{
+            "url": "https://www.douyin.com/video/9", "title": "园艺视频", "author": "小园丁",
+            "watched_seconds": 12, "tags": [],
+            "comments": {"items": items, "partial": True},
+        }])
+        self.assertIn("不要照抄原文", rendered)
+        self.assertIn("不要复述评论内容", rendered)
+        self.assertEqual(len(re.findall(r"^    \d+\. ", rendered, re.M)), 10)
+        self.assertIn("字" * 60, rendered)
+        self.assertNotIn("字" * 61, rendered)
+        self.assertIn("评论区未加载完", rendered)
+
+    def test_browse_review_reports_empty_comment_reason(self):
+        rendered = format_browse_review([{
+            "url": "https://www.douyin.com/video/9", "title": "图文", "watched_seconds": 12,
+            "comments": {"items": [], "reason": "no-comments"},
+        }])
+        self.assertIn("没有可读评论", rendered)
+
+    def test_comment_reference_absent_when_collection_was_not_attempted(self):
+        rendered = format_browse_review([{
+            "url": "https://www.douyin.com/video/9", "title": "园艺视频", "watched_seconds": 12,
+        }])
+        self.assertNotIn("评论参考", rendered)
+
     def test_browse_launch_failure_says_no_video_was_watched(self):
         error = RuntimeError("Target page, context or browser has been closed")
         message = browse_launch_failure_message(error)
@@ -452,6 +503,7 @@ class ShareLogicTests(unittest.TestCase):
             editor = Mock()
             with patch("douyin_share.BROWSE_REQUEST_PATH", request_path), \
                     patch("douyin_share.BROWSE_ACTIVE_PATH", active_path), \
+                    patch("douyin_share.LISTENER_HEARTBEAT_PATH", root / "listener-heartbeat.json"), \
                     patch("douyin_share.ROOT", root), \
                     patch("douyin_share.browse_feed", return_value=[{"title": "测试视频"}]) as browse, \
                     patch("douyin_share.format_browse_review", return_value="视频：测试视频"), \
@@ -459,7 +511,7 @@ class ShareLogicTests(unittest.TestCase):
                     patch("douyin_share.arm_inbox_mutation_observer") as arm:
                 result = service_browse_request(page, {"test": True}, {"message_selector": ".message"})
             self.assertEqual(result, (editor, page.url))
-            browse.assert_called_once_with(page, 2)
+            browse.assert_called_once_with(page, 2, comment_options={})
             restore.assert_called_once_with(page, {"test": True})
             arm.assert_called_once_with(page, ".message")
             response = json.loads(response_path.read_text(encoding="utf-8"))
@@ -715,6 +767,459 @@ class BrowseQueueTests(unittest.TestCase):
                 self.assertTrue(payload["busy"])
                 self.assertIsInstance(payload["at"], int)
                 self.assertGreater(payload["at"], 0)
+
+
+class CommentParsingTests(unittest.TestCase):
+    def test_ten_comment_items_are_parsed_with_structured_fields(self):
+        fixtures = [
+            _comment_item("小园丁", "月季要[玫瑰]这样剪\u200b，别剪太多", "1.2万",
+                          badge=True, image=True),
+            _comment_item("阿珍", "这个方法我试过，确实有用", "386", style="class"),
+            _comment_item("阿强", "哈哈哈太真实了", "2.3w", style="fallback"),
+        ]
+        fixtures += [_comment_item(f"用户{i}", f"第{i}条评论内容", "12") for i in range(4, 11)]
+        items = parse_comment_nodes(fixtures, limit=10)
+        self.assertEqual(len(items), 10)
+        first = items[0]
+        self.assertEqual(first["author"], "小园丁")
+        self.assertEqual(first["text"], "月季要这样剪，别剪太多")
+        self.assertEqual(first["likes"], 12000)
+        self.assertTrue(first["isAuthor"])
+        self.assertTrue(first["hasImage"])
+        self.assertEqual(items[1]["author"], "阿珍")
+        self.assertEqual(items[1]["likes"], 386)
+        self.assertFalse(items[1]["isAuthor"])
+        self.assertEqual(items[2]["author"], "阿强")
+        self.assertEqual(items[2]["text"], "哈哈哈太真实了")
+
+    def test_fewer_comments_than_requested_returns_all(self):
+        fixtures = [_comment_item("甲", "第一条"), _comment_item("乙", "第二条"),
+                    _comment_item("丙", "第三条")]
+        self.assertEqual(len(parse_comment_nodes(fixtures, limit=10)), 3)
+
+    def test_empty_comment_list_returns_empty(self):
+        self.assertEqual(parse_comment_nodes([], limit=10), [])
+
+    def test_broken_item_is_skipped_without_failing_the_batch(self):
+        fixtures = [
+            _comment_item("正常", "这条能解析"),
+            None,
+            123,
+            "",
+            '<div data-e2e="comment-item"><span></span></div>',
+        ]
+        items = parse_comment_nodes(fixtures, limit=10)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["author"], "正常")
+
+    def test_limit_is_hard_capped_at_thirty(self):
+        fixtures = [_comment_item(f"用户{i}", f"内容{i}") for i in range(40)]
+        self.assertEqual(len(parse_comment_nodes(fixtures, limit=100)), MAX_LIMIT)
+
+    def test_clean_text_removes_emoji_codes_zero_width_and_whitespace(self):
+        self.assertEqual(clean_comment_text(" 好看\u200b[笑哭]真的\n\n  "), "好看真的")
+        self.assertEqual(len(clean_comment_text("字" * 300)), 200)
+
+    def test_parse_like_count_handles_douyin_units(self):
+        self.assertEqual(parse_like_count("1.2万"), 12000)
+        self.assertEqual(parse_like_count("3.4w"), 34000)
+        self.assertEqual(parse_like_count("1,234"), 1234)
+        self.assertEqual(parse_like_count("赞"), 0)
+        self.assertEqual(parse_like_count(""), 0)
+
+    def test_text_emoji_code_is_marked_as_image_placeholder(self):
+        items = parse_comment_nodes([_comment_item("甲", "好笑[笑哭]")], limit=10)
+        self.assertEqual(items[0]["text"], "好笑")
+        self.assertTrue(items[0]["hasImage"])
+
+    def test_collection_stops_at_limit_without_scrolling(self):
+        nodes = [_comment_item(f"用户{i}", f"内容{i}") for i in range(12)]
+        with patch("douyin_comments.ensure_comment_panel", return_value=True), \
+                patch("douyin_comments.extract_comment_nodes", return_value={
+                    "strategy": "s", "panel": True, "nodes": nodes,
+                }), \
+                patch("douyin_comments.scroll_comment_list") as scroll:
+            result = collect_video_comments(Mock(), limit=10, timeout_seconds=20)
+        self.assertEqual(result["count"], 10)
+        self.assertEqual(result["reason"], "ok")
+        self.assertFalse(result["partial"])
+        scroll.assert_not_called()
+
+    def test_collection_returns_all_when_list_is_exhausted(self):
+        nodes = [_comment_item("甲", "一"), _comment_item("乙", "二"), _comment_item("丙", "三")]
+        with patch("douyin_comments.ensure_comment_panel", return_value=True), \
+                patch("douyin_comments.extract_comment_nodes", return_value={
+                    "strategy": "s", "panel": True, "nodes": nodes,
+                }), \
+                patch("douyin_comments.scroll_comment_list", return_value=True), \
+                patch("douyin_comments.time_module.sleep"):
+            result = collect_video_comments(Mock(), limit=10, timeout_seconds=20)
+        self.assertEqual(result["count"], 3)
+        self.assertEqual(result["reason"], "exhausted")
+        self.assertFalse(result["partial"])
+
+    def test_collection_times_out_with_partial_results(self):
+        nodes = [_comment_item("甲", "一"), _comment_item("乙", "二"), _comment_item("丙", "三")]
+        with patch("douyin_comments.ensure_comment_panel", return_value=True), \
+                patch("douyin_comments.extract_comment_nodes", return_value={
+                    "strategy": '[data-e2e="comment-item"]', "panel": True, "nodes": nodes,
+                }), \
+                patch("douyin_comments.scroll_comment_list", return_value=True), \
+                patch("douyin_comments.time_module.monotonic",
+                      side_effect=[0.0, 25.0, 25.0]):
+            result = collect_video_comments(Mock(), limit=10, timeout_seconds=20)
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["reason"], "timeout")
+        self.assertEqual(result["count"], 3)
+
+    def test_no_comment_panel_returns_reason_without_exception(self):
+        with patch("douyin_comments.ensure_comment_panel", return_value=False):
+            result = collect_video_comments(Mock(), limit=10, timeout_seconds=5)
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["reason"], "no-comment-panel")
+        self.assertFalse(result["partial"])
+
+    def test_empty_comment_panel_returns_no_comments_reason(self):
+        with patch("douyin_comments.ensure_comment_panel", return_value=True), \
+                patch("douyin_comments.extract_comment_nodes", return_value={
+                    "strategy": "", "panel": True, "nodes": [],
+                }), \
+                patch("douyin_comments.time_module.sleep"):
+            result = collect_video_comments(Mock(), limit=10, timeout_seconds=20)
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["reason"], "no-comments")
+        self.assertFalse(result["partial"])
+
+    def test_page_failure_returns_error_reason_without_raising(self):
+        with patch("douyin_comments.ensure_comment_panel", return_value=True), \
+                patch("douyin_comments.extract_comment_nodes",
+                      side_effect=RuntimeError("boom")):
+            result = collect_video_comments(Mock(), limit=10, timeout_seconds=5)
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["reason"], "error:RuntimeError")
+
+
+class BrowseTopicTests(unittest.TestCase):
+    def test_topic_validation_accepts_clean_topics_and_blank_means_none(self):
+        self.assertEqual(normalize_topic(" 猫 "), ("猫", ""))
+        self.assertEqual(normalize_topic("游戏 视频"), ("游戏 视频", ""))
+        self.assertEqual(normalize_topic(""), ("", ""))
+        self.assertEqual(normalize_topic(None), ("", ""))
+
+    def test_topic_validation_rejects_bad_input(self):
+        self.assertIn("最多 20", normalize_topic("字" * 21)[1])
+        self.assertIn("换行", normalize_topic("猫\n狗")[1])
+        self.assertIn("CQ", normalize_topic("CQ:at,qq=1")[1])
+        self.assertIn("方括号", normalize_topic("[猫]")[1])
+        self.assertIn("链接", normalize_topic("https://www.douyin.com/video/1")[1])
+        self.assertIn("黑名单", normalize_topic("游戏 赌博", blacklist=["赌博"])[1])
+        self.assertEqual(normalize_topic("游戏", blacklist=["赌博"]), ("游戏", ""))
+
+    def test_validate_browse_topic_uses_the_configured_blacklist(self):
+        cfg = {"browse_topics": {"blacklist": ["赌博"]}}
+        with self.assertRaisesRegex(RuntimeError, "黑名单"):
+            validate_browse_topic("想刷赌博", cfg)
+        self.assertEqual(validate_browse_topic("游戏", cfg), "游戏")
+        self.assertEqual(validate_browse_topic("", {"test": True}), "")
+
+    def test_search_url_encodes_the_topic(self):
+        self.assertEqual(
+            search_url_for("猫 狗"),
+            "https://www.douyin.com/search/%E7%8C%AB%20%E7%8B%97?type=video",
+        )
+
+    def test_search_cards_parse_three_dom_shapes(self):
+        items = parse_search_cards([
+            _search_card("e2e", "111", "@园艺师", "月季修剪技巧"),
+            _search_card("class", "222", "阿猫", "猫咪日常"),
+            _search_card("link", "333", "@旅行者", "雪山公路"),
+            {"not": "html"},
+            "<div></div>",
+        ], limit=12)
+        self.assertEqual([item["url"] for item in items], [
+            "https://www.douyin.com/video/111",
+            "https://www.douyin.com/video/222",
+            "https://www.douyin.com/video/333",
+        ])
+        self.assertEqual(items[0]["title"], "月季修剪技巧")
+        self.assertEqual(items[0]["author"], "园艺师")
+        self.assertEqual(items[1]["title"], "猫咪日常")
+        self.assertEqual(items[1]["author"], "阿猫")
+        self.assertEqual(items[2]["title"], "雪山公路")
+        self.assertEqual(items[2]["author"], "旅行者")
+
+    def test_search_cards_are_deduplicated_and_capped(self):
+        fixtures = [_search_card("e2e", "111", "@甲", "标题") for _ in range(3)]
+        fixtures += [_search_card("e2e", str(200 + i), f"@用户{i}", f"标题{i}") for i in range(20)]
+        items = parse_search_cards(fixtures, limit=100)
+        self.assertEqual(len(items), SEARCH_MAX_LIMIT)
+        self.assertEqual(len({item["url"] for item in items}), len(items))
+
+    def test_search_collection_returns_strategy_and_items(self):
+        page = Mock()
+        page.url = "https://www.douyin.com/search/x?type=video"
+        with patch("douyin_search.extract_search_cards", return_value={
+                "strategy": '[data-e2e="search-result-card"]',
+                "nodes": [_search_card("e2e", "111", "@园艺师", "月季修剪技巧")],
+                "blocked": False, "noResults": False,
+        }), patch("douyin_search.ensure_video_tab", return_value=True), \
+                patch("douyin_search.scroll_search_results", return_value=True):
+            result = collect_search_videos(page, "园艺", limit=12, timeout_seconds=10)
+        self.assertEqual(result["reason"], "ok")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["strategy"], '[data-e2e="search-result-card"]')
+        self.assertTrue(result["videoTab"])
+        self.assertEqual(result["items"][0]["url"], "https://www.douyin.com/video/111")
+
+    def test_search_blocked_page_returns_reason_without_items(self):
+        page = Mock()
+        page.url = "https://www.douyin.com/search/x?type=video"
+        with patch("douyin_search.extract_search_cards", return_value={
+                "strategy": "", "nodes": [], "blocked": True, "noResults": False,
+        }):
+            result = collect_search_videos(page, "园艺", timeout_seconds=10)
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["reason"], "blocked")
+
+    def test_search_page_open_failure_returns_search_unavailable(self):
+        page = Mock()
+        page.goto.side_effect = RuntimeError("net::ERR_TIMED_OUT")
+        result = collect_search_videos(page, "园艺", timeout_seconds=10)
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["reason"], "search-unavailable")
+
+    def test_search_failure_falls_back_to_the_recommendation_feed(self):
+        meta = {}
+        with patch("douyin_share.collect_search_videos", return_value={
+                "items": [], "reason": "blocked", "strategy": "", "searchUrl": "u", "videoTab": False,
+        }), patch("douyin_share.topic_recently_searched", return_value=False), \
+                patch("douyin_share.mark_topic_searched") as mark, \
+                patch("douyin_share.collect_feed", return_value=[]) as feed:
+            rows = browse_feed(Mock(), 2, topic="园艺", topic_meta=meta)
+        self.assertEqual(rows, [])
+        feed.assert_called_once()
+        mark.assert_not_called()
+        self.assertTrue(meta["topicFallback"])
+        self.assertEqual(meta["topicFallbackReason"], "blocked")
+        self.assertEqual(meta["topicSource"], "owner")
+
+    def test_search_success_uses_search_candidates_and_marks_topic(self):
+        meta = {}
+        with patch("douyin_share.collect_search_videos", return_value={
+                "items": [{"url": "https://www.douyin.com/video/111", "title": "月季", "author": "园艺师"}],
+                "reason": "ok", "strategy": "s", "searchUrl": "u", "videoTab": True,
+        }), patch("douyin_share.topic_recently_searched", return_value=False), \
+                patch("douyin_share.mark_topic_searched") as mark, \
+                patch("douyin_share.collect_feed") as feed:
+            # minutes=0 让播放循环立即结束，这里只验证候选来源与 meta。
+            rows = browse_feed(Mock(), 0, topic="园艺", topic_meta=meta)
+        self.assertEqual(rows, [])
+        feed.assert_not_called()
+        mark.assert_called_once_with("园艺")
+        self.assertFalse(meta["topicFallback"])
+        self.assertEqual(meta["searchSelector"], "s")
+
+    def test_recent_topic_is_not_searched_again_within_24_hours(self):
+        meta = {}
+        with patch("douyin_share.topic_recently_searched", return_value=True), \
+                patch("douyin_share.collect_search_videos") as search, \
+                patch("douyin_share.collect_feed", return_value=[]) as feed:
+            browse_feed(Mock(), 5, topic="园艺", topic_meta=meta)
+        search.assert_not_called()
+        feed.assert_called_once()
+        self.assertTrue(meta["topicFallback"])
+        self.assertEqual(meta["topicFallbackReason"], "topic-cooldown")
+
+    def test_no_topic_keeps_the_original_recommendation_flow(self):
+        with patch("douyin_share.collect_feed", return_value=[]) as feed, \
+                patch("douyin_share.collect_search_videos") as search:
+            rows = browse_feed(Mock(), 2)
+        self.assertEqual(rows, [])
+        feed.assert_called_once()
+        search.assert_not_called()
+
+    def test_topic_search_state_is_deduplicated_for_24_hours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "topic-search-state.json"
+            now = 1_000_000.0
+            mark_topic_searched("园艺", path, now=now)
+            self.assertTrue(topic_recently_searched("园艺", path, now=now + 60))
+            self.assertFalse(topic_recently_searched("园艺", path, now=now + 24 * 3600 + 1))
+            self.assertFalse(topic_recently_searched("猫咪", path, now=now))
+
+    def test_topic_search_state_keeps_only_the_newest_thirty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "topic-search-state.json"
+            for index in range(35):
+                mark_topic_searched(f"主题{index}", path, now=1_000_000.0 + index)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload["topics"]), 30)
+            self.assertIn("主题34", payload["topics"])
+            self.assertNotIn("主题0", payload["topics"])
+
+    def test_topic_review_says_search_result_or_fallback_honestly(self):
+        searched = format_browse_review(
+            [{"title": "月季", "url": "u", "watched_seconds": 10}],
+            {"topic": "园艺", "topicSource": "owner", "topicFallback": False},
+        )
+        self.assertIn("本次主题：园艺", searched)
+        self.assertIn("按你的要求从搜索页刷的", searched)
+        fallback = format_browse_review(
+            [], {"topic": "园艺", "topicFallback": True, "topicFallbackReason": "no-results"},
+        )
+        self.assertIn("没有搜到结果", fallback)
+        self.assertIn("改刷推荐流", fallback)
+        self.assertIn("没有确认到持续播放", fallback)
+        # 不带主题时不增加任何主题说明，保持原输出。
+        self.assertNotIn("本次主题", format_browse_review(
+            [{"title": "月季", "url": "u", "watched_seconds": 10}],
+        ))
+
+    def test_queue_records_topic_and_caps_minutes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "browse-request.json"
+            with patch("douyin_share.BROWSE_REQUEST_PATH", request_path), \
+                    patch("douyin_share.BROWSE_ACTIVE_PATH", Path(tmp) / "active.json"), \
+                    patch("douyin_share.ROOT", Path(tmp)), \
+                    patch("douyin_share.cleanup_browse_queue"):
+                with self.assertRaisesRegex(RuntimeError, "超时"):
+                    request_browse_from_listener(5, topic="园艺", timeout_seconds=0)
+            payload = json.loads(request_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["topic"], "园艺")
+            self.assertEqual(payload["topic_source"], "owner")
+            self.assertEqual(payload["minutes"], 3)
+
+    def test_queue_without_topic_keeps_old_shape_compatible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "browse-request.json"
+            with patch("douyin_share.BROWSE_REQUEST_PATH", request_path), \
+                    patch("douyin_share.BROWSE_ACTIVE_PATH", Path(tmp) / "active.json"), \
+                    patch("douyin_share.ROOT", Path(tmp)), \
+                    patch("douyin_share.cleanup_browse_queue"):
+                with self.assertRaisesRegex(RuntimeError, "超时"):
+                    request_browse_from_listener(2, timeout_seconds=0)
+            payload = json.loads(request_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["topic"], "")
+            self.assertEqual(payload["topic_source"], "none")
+            self.assertEqual(payload["minutes"], 2)
+
+    def test_listener_runs_topic_browse_and_labels_the_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request_path = root / "browse-request.json"
+            active_path = root / "browse-request-active.json"
+            response_path = root / "browse-response-0123456789abcdef0123456789abcdef.json"
+            request_path.write_text(json.dumps({
+                "id": "0123456789abcdef0123456789abcdef", "minutes": 5,
+                "topic": "园艺", "topic_source": "owner",
+            }), encoding="utf-8")
+            page = Mock()
+            page.url = "https://www.douyin.com/user/example"
+            editor = Mock()
+            with patch("douyin_share.BROWSE_REQUEST_PATH", request_path), \
+                    patch("douyin_share.BROWSE_ACTIVE_PATH", active_path), \
+                    patch("douyin_share.LISTENER_HEARTBEAT_PATH", root / "listener-heartbeat.json"), \
+                    patch("douyin_share.ROOT", root), \
+                    patch("douyin_share.browse_feed", return_value=[{"title": "月季"}]) as browse, \
+                    patch("douyin_share.format_browse_review", return_value="本次主题：园艺"), \
+                    patch("douyin_share.open_recipient_chat", return_value=editor), \
+                    patch("douyin_share.arm_inbox_mutation_observer"):
+                result = service_browse_request(
+                    page, {"browse_topics": {"blacklist": []}}, {"message_selector": ".message"})
+            self.assertEqual(result, (editor, page.url))
+            self.assertEqual(browse.call_args.args[1], 3)
+            self.assertEqual(browse.call_args.kwargs["topic"], "园艺")
+            response = json.loads(response_path.read_text(encoding="utf-8"))
+            self.assertEqual(response["topic"], "园艺")
+            self.assertEqual(response["topicSource"], "owner")
+
+    def test_listener_rejects_blacklisted_topic_without_browsing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request_path = root / "browse-request.json"
+            active_path = root / "browse-request-active.json"
+            response_path = root / "browse-response-0123456789abcdef0123456789abcdef.json"
+            request_path.write_text(json.dumps({
+                "id": "0123456789abcdef0123456789abcdef", "minutes": 2, "topic": "赌博",
+            }), encoding="utf-8")
+            page = Mock()
+            page.url = "https://www.douyin.com/user/example"
+            with patch("douyin_share.BROWSE_REQUEST_PATH", request_path), \
+                    patch("douyin_share.BROWSE_ACTIVE_PATH", active_path), \
+                    patch("douyin_share.LISTENER_HEARTBEAT_PATH", root / "listener-heartbeat.json"), \
+                    patch("douyin_share.ROOT", root), \
+                    patch("douyin_share.browse_feed") as browse, \
+                    patch("douyin_share.open_recipient_chat", return_value=Mock()), \
+                    patch("douyin_share.arm_inbox_mutation_observer"):
+                service_browse_request(
+                    page, {"browse_topics": {"blacklist": ["赌博"]}}, {"message_selector": ".message"})
+            browse.assert_not_called()
+            response = json.loads(response_path.read_text(encoding="utf-8"))
+            self.assertFalse(response["ok"])
+            self.assertIn("黑名单", response["error"])
+
+
+def _search_card(style, video_id, author, title):
+    """Sanitized search-result card fixtures in three common DOM shapes."""
+    if style == "e2e":
+        return (
+            '<div data-e2e="search-result-card" class="search-result-card">'
+            f'<a href="/video/{video_id}"><img src="https://p3.douyinpic.com/cover.jpeg"></a>'
+            f'<div class="video-title">{title}</div>'
+            f'<a href="/user/MS4wLjABAAAAfixture">{author}</a>'
+            '</div>'
+        )
+    if style == "class":
+        return (
+            '<div class="searchResultCard">'
+            f'<a href="https://www.douyin.com/video/{video_id}">'
+            f'<span class="videoTitle">{title}</span>'
+            f'<span class="userName">{author}</span></a>'
+            '</div>'
+        )
+    return (
+        '<li class="search-result-item">'
+        f'<a href="/video/{video_id}">{title}</a>'
+        f'<span>{author}</span>'
+        '<span>1.2万</span>'
+        '</li>'
+    )
+
+
+def _comment_item(author, text, likes="", badge=False, style="e2e", image=False):
+    """Sanitized comment-item HTML fixtures in three common DOM shapes."""
+    badge_html = '<span class="author-tag">作者</span>' if badge else ''
+    image_html = '<img class="emoji" src="https://p3.douyinpic.com/emoji/abc.png">' if image else ''
+    if style == "e2e":
+        return (
+            '<div data-e2e="comment-item" class="comment-item">'
+            '<a href="/user/MS4wLjABAAAAfixture">'
+            '<img class="avatar" src="https://p3.douyinpic.com/aweme/100x100/a.jpeg"></a>'
+            '<div class="comment-item-content">'
+            f'<div class="comment-item-user"><a href="/user/MS4wLjABAAAAfixture">{author}</a>'
+            f'{badge_html}</div>'
+            f'<div data-e2e="comment-item-text">{text}{image_html}</div>'
+            '<div class="comment-item-footer"><span>3天前</span>'
+            f'<span data-e2e="comment-item-like-count">{likes}</span></div>'
+            '</div></div>'
+        )
+    if style == "class":
+        return (
+            '<div class="commentItem">'
+            f'<span class="userName">{author}</span>'
+            f'<div class="commentContent">{text}{image_html}</div>'
+            f'<span class="likeCount">{likes}</span>'
+            '</div>'
+        )
+    return (
+        '<div data-e2e="comment-item">'
+        f'<div>{author}</div>'
+        f'<div>{text}{image_html}</div>'
+        '<div>2小时前</div>'
+        f'<div>{likes or "86"}</div>'
+        '<div>回复</div>'
+        '</div>'
+    )
 
 
 if __name__ == "__main__":

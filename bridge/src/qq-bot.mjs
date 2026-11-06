@@ -25,6 +25,7 @@ import { makePaidSongPreview, makePaidFullSong } from './paid-song-producer.mjs'
 import { loadRolePersona, personaStyleNote } from './role-card.mjs';
 import { douyinOwnerTurnPrompt, qqOwnerDouyinToolPrompt } from './douyin-owner-prompt.mjs';
 import { jobView, loadBrowseJobs, readListenerHeartbeat, saveBrowseJobs, settleExpiredJobs } from './douyin-browse-state.mjs';
+import { normalizeBrowseTopic, readBrowseTopicBlacklist } from './douyin-topic.mjs';
 import {
   saveSticker, getStickerPath, listStickers, listAllStickerKeys, listStickerRecords, deleteSticker, deleteStickersByRef, findSticker, findStickerByRef
 } from './sticker-store.mjs';
@@ -2325,6 +2326,7 @@ function startQzoneToolServer() {
   // job 必须跨 bridge 重启保留，否则重启后 status 只能 404，模型就只能报“状态未知”。
   const douyinBrowseJobsPath = fileURLToPath(new URL('../state/douyin-browse-jobs.json', import.meta.url));
   const douyinListenerHeartbeatPath = fileURLToPath(new URL('../../douyin_personal_share/listener-heartbeat.json', import.meta.url));
+  const douyinConfigPath = fileURLToPath(new URL('../../douyin_personal_share/config.json', import.meta.url));
   const douyinBrowseJobs = new Map(Object.entries(loadBrowseJobs(douyinBrowseJobsPath)));
   const douyinOwnerId = String(cfg.douyinOwnerQQ ?? '').trim();
   const douyinReplyGate = OWNERS.has(douyinOwnerId) && douyinOwnerId !== BOT_SELF
@@ -2383,6 +2385,12 @@ function startQzoneToolServer() {
         if (!douyinReplyGate) return reply(503, { ok: false, error: 'Douyin owner integration is not configured' });
         const minutes = Number(body?.minutes);
         if (!Number.isInteger(minutes) || minutes < 1 || minutes > 5) throw new Error('浏览时长须为 1 到 5 分钟');
+        const { topic, error: topicError } = normalizeBrowseTopic(body?.topic, {
+          blacklist: readBrowseTopicBlacklist(douyinConfigPath)
+        });
+        if (topicError) return reply(400, { ok: false, error: topicError });
+        // 搜索模式更容易触发风控，时长收紧到 3 分钟；不带主题时完全保持原来的 1–5 分钟。
+        const effectiveMinutes = topic ? Math.min(minutes, 3) : minutes;
         const heartbeat = readListenerHeartbeat(douyinListenerHeartbeatPath);
         // 心跳缺失（尚未升级的旧监听器）按未知处理，不误拦；明确过期才拒绝排队。
         if (heartbeat.online === false) {
@@ -2391,12 +2399,18 @@ function startQzoneToolServer() {
         const python = fileURLToPath(new URL('../../douyin_personal_share/.venv/Scripts/python.exe', import.meta.url));
         const script = fileURLToPath(new URL('../../douyin_personal_share/douyin_share.py', import.meta.url));
         const cwd = fileURLToPath(new URL('../../douyin_personal_share/', import.meta.url));
-        const child = spawn(python, [script, '--request-browse', '--minutes', String(minutes)], { windowsHide: true, cwd });
+        const args = [script, '--request-browse', '--minutes', String(effectiveMinutes)];
+        if (topic) args.push('--topic', topic);
+        const child = spawn(python, args, { windowsHide: true, cwd });
         const jobId = randomUUID();
-        const job = { jobId, status: 'running', startedAt: Date.now(), minutes, stdout: '', stderr: '', result: '', error: '' };
+        const job = {
+          jobId, status: 'running', startedAt: Date.now(), minutes: effectiveMinutes,
+          topic, topicSource: topic ? 'owner' : 'none',
+          stdout: '', stderr: '', result: '', error: ''
+        };
         douyinBrowseJobs.set(jobId, job);
         saveBrowseJobs(douyinBrowseJobsPath, douyinBrowseJobs);
-        log(`[douyin-browse] job started id=${jobId} minutes=${minutes}`);
+        log(`[douyin-browse] job started id=${jobId} minutes=${effectiveMinutes} topic=${topic || '-'} source=${job.topicSource}`);
         let stdout = '';
         let stderr = '';
         child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout = (stdout + chunk).slice(-24000); });
@@ -2421,7 +2435,7 @@ function startQzoneToolServer() {
           persistJob();
           log(`[douyin-browse] job ${job.status} id=${jobId} exit=${code}`);
         });
-        return reply(202, { ok: true, status: 'running', jobId });
+        return reply(202, { ok: true, status: 'running', jobId, minutes: effectiveMinutes, topic, topicSource: job.topicSource });
       }
       if (req.url === '/douyin/browse-status') {
         const jobId = String(body?.jobId ?? '').trim();

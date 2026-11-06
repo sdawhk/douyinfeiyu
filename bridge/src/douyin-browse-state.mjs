@@ -31,6 +31,8 @@ export function loadBrowseJobs(path) {
         status: VALID_STATUS.has(job.status) ? job.status : 'failed',
         startedAt: Number(job.startedAt) || 0,
         minutes: Number(job.minutes) || 0,
+        topic: bounded(job.topic, 40),
+        topicSource: job.topicSource === 'owner' ? 'owner' : 'none',
         result: bounded(job.result, 24_000),
         error: bounded(job.error, 4_000)
       };
@@ -50,6 +52,8 @@ export function saveBrowseJobs(path, jobs, now = Date.now()) {
       status: VALID_STATUS.has(job.status) ? job.status : 'failed',
       startedAt: Number(job.startedAt) || 0,
       minutes: Number(job.minutes) || 0,
+      topic: bounded(job.topic, 40),
+      topicSource: job.topicSource === 'owner' ? 'owner' : 'none',
       result: bounded(job.result, 24_000),
       error: bounded(job.error, 4_000)
     }]);
@@ -62,20 +66,26 @@ export function saveBrowseJobs(path, jobs, now = Date.now()) {
 /** 对外可见的 job 状态；running 超过 timeoutMs 直接判为失败终态。 */
 export function jobView(job, now = Date.now(), { timeoutMs = BROWSE_JOB_TIMEOUT_MS } = {}) {
   if (!job) return null;
+  const topicInfo = {
+    topic: bounded(job.topic, 40),
+    topicSource: job.topicSource === 'owner' ? 'owner' : 'none'
+  };
   if (job.status === 'running' && now - (Number(job.startedAt) || 0) > timeoutMs) {
     return {
       jobId: job.jobId,
       status: 'failed',
       ok: false,
+      ...topicInfo,
       result: '',
       error: '抖音浏览超时：超过 14 分钟没有拿到结果，按失败处理。'
     };
   }
-  if (job.status === 'running') return { ok: true, status: 'running', jobId: job.jobId };
+  if (job.status === 'running') return { ok: true, status: 'running', jobId: job.jobId, ...topicInfo };
   return {
     ok: job.status === 'completed',
     status: job.status,
     jobId: job.jobId,
+    ...topicInfo,
     result: job.result || '',
     error: job.error || ''
   };

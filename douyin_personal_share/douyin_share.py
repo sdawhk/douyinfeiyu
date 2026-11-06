@@ -23,6 +23,22 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 
+from douyin_comments import (
+    DEFAULT_LIMIT as COMMENT_DEFAULT_LIMIT,
+    MAX_LIMIT as COMMENT_MAX_LIMIT,
+    PROMPT_AUTHOR_CHARS,
+    PROMPT_MAX_COMMENTS,
+    PROMPT_TEXT_CHARS,
+    collect_video_comments,
+)
+from douyin_search import (
+    MAX_LIMIT as SEARCH_MAX_LIMIT,
+    collect_search_videos,
+    mark_topic_searched,
+    normalize_topic as normalize_browse_topic,
+    topic_recently_searched,
+)
+
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8")
@@ -465,7 +481,37 @@ def load_config() -> dict:
     endpoint = urlparse(str(daily["report_url"]))
     if endpoint.scheme != "http" or endpoint.hostname not in {"127.0.0.1", "localhost"}:
         raise RuntimeError("daily_browse.report_url must use loopback HTTP")
+    comments = cfg.setdefault("browse_comments", {})
+    comments.setdefault("enabled", True)
+    comments.setdefault("limit", COMMENT_DEFAULT_LIMIT)
+    comments.setdefault("max_videos", 3)
+    if not isinstance(comments["enabled"], bool):
+        raise RuntimeError("browse_comments.enabled must be true or false")
+    if not isinstance(comments["limit"], int) or not 1 <= comments["limit"] <= COMMENT_MAX_LIMIT:
+        raise RuntimeError(f"browse_comments.limit must be between 1 and {COMMENT_MAX_LIMIT}")
+    if not isinstance(comments["max_videos"], int) or not 0 <= comments["max_videos"] <= 10:
+        raise RuntimeError("browse_comments.max_videos must be between 0 and 10")
+    topics = cfg.setdefault("browse_topics", {})
+    topics.setdefault("pool", [])
+    topics.setdefault("blacklist", [])
+    for key in ("pool", "blacklist"):
+        if not isinstance(topics[key], list):
+            raise RuntimeError(f"browse_topics.{key} must be a list of strings")
+        topics[key] = [str(value).strip() for value in topics[key] if str(value).strip()]
     return cfg
+
+
+def validate_browse_topic(value, cfg: dict) -> str:
+    """Validate one owner topic against the configured blacklist.
+
+    Returns an empty string when no topic was supplied. Raises RuntimeError for
+    malformed or blacklisted topics so both CLI and listener can fail loudly.
+    """
+    blacklist = (cfg.get("browse_topics") or {}).get("blacklist") or []
+    topic, error = normalize_browse_topic(value, blacklist=blacklist)
+    if error:
+        raise RuntimeError(error)
+    return topic
 
 
 INTERNAL_MARKER_RE = re.compile(
@@ -1166,9 +1212,68 @@ def deliver_selected(page, cfg: dict, videos: list[Video], state: dict, today: s
     return selected
 
 
-def browse_feed(page, minutes: int, history_path: Path = SHARED_INTEREST_PATH) -> list[dict]:
-    """Browse normal recommendations via canonical public video pages and record actual playback only."""
-    videos = collect_feed(page)
+def browse_feed(page, minutes: int, history_path: Path = SHARED_INTEREST_PATH,
+                comment_options: dict | None = None, topic: str = "",
+                topic_meta: dict | None = None) -> list[dict]:
+    """Browse normal recommendations via canonical public video pages and record actual playback only.
+
+    When ``topic`` is supplied, video candidates come from the search page first
+    and fall back to the recommendation feed on any search failure. For the
+    first few watched videos it also reads the first N comments (read-only) as
+    topic/mood reference for later comment drafts.
+    """
+    meta = topic_meta if isinstance(topic_meta, dict) else None
+    comment_cfg = comment_options if isinstance(comment_options, dict) else {}
+    comments_enabled = comment_cfg.get("enabled", True) is not False
+    try:
+        comment_limit = int(comment_cfg.get("limit", COMMENT_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        comment_limit = COMMENT_DEFAULT_LIMIT
+    comment_limit = max(1, min(COMMENT_MAX_LIMIT, comment_limit))
+    try:
+        comment_max_videos = int(comment_cfg.get("max_videos", 3))
+    except (TypeError, ValueError):
+        comment_max_videos = 3
+    comment_max_videos = max(0, min(10, comment_max_videos))
+    comment_slots = comment_max_videos if comments_enabled else 0
+    if topic:
+        minutes = min(minutes, 3)
+        videos = []
+        if topic_recently_searched(topic):
+            if meta is not None:
+                meta.update({
+                    "topic": topic, "topicSource": "owner", "topicFallback": True,
+                    "topicFallbackReason": "topic-cooldown", "searchSelector": "",
+                    "searchUrl": "", "videoTab": False,
+                })
+            print(f"主题搜索跳过：{topic} 在 24 小时内已经搜过；改用推荐流。")
+            videos = collect_feed(page)
+        else:
+            search = collect_search_videos(
+                page, topic, limit=SEARCH_MAX_LIMIT,
+                timeout_seconds=min(40, max(10, minutes * 60)),
+            )
+            if meta is not None:
+                meta.update({
+                    "topic": topic, "topicSource": "owner",
+                    "topicFallback": not bool(search.get("items")),
+                    "topicFallbackReason": "" if search.get("items") else str(search.get("reason") or "no-results"),
+                    "searchSelector": str(search.get("strategy") or ""),
+                    "searchUrl": str(search.get("searchUrl") or ""),
+                    "videoTab": bool(search.get("videoTab")),
+                })
+            if search.get("items"):
+                mark_topic_searched(topic)
+                videos = [Video(item["url"], item.get("title", ""), item.get("author", ""))
+                          for item in search["items"]]
+                print(f"主题搜索：{topic} 找到 {len(videos)} 条候选（选择器 "
+                      f"{search.get('strategy') or '-'}；{search.get('searchUrl') or '-'}）。")
+            else:
+                reason = str(search.get("reason") or "no-results")
+                print(f"主题搜索未命中（{reason}）：{topic}；改用推荐流。")
+                videos = collect_feed(page)
+    else:
+        videos = collect_feed(page)
     deadline = datetime.now().timestamp() + minutes * 60
     watched: list[dict] = []
     for video in videos:
@@ -1215,6 +1320,16 @@ def browse_feed(page, minutes: int, history_path: Path = SHARED_INTEREST_PATH) -
                 "observed_at": datetime.now(SINGAPORE).isoformat(timespec="minutes"),
             }
             audio_wav = finish_video_audio_capture(page) if capture_started else ""
+            if comment_slots > 0:
+                remaining = deadline - datetime.now().timestamp()
+                if remaining > 3:
+                    row["comments"] = collect_video_comments(
+                        page, limit=comment_limit, timeout_seconds=min(20, remaining),
+                    )
+                    comment_slots -= 1
+                    print(f"  评论参考：读取到 {row['comments'].get('count', 0)} 条"
+                          f"（{row['comments'].get('reason', '')}；选择器 "
+                          f"{row['comments'].get('strategy') or '-'}）。")
             analysis = analyze_video_content(frames, audio_wav)
             row.update({
                 "content_summary": analysis.get("summary", ""),
@@ -1412,8 +1527,10 @@ def analyze_shared_video(page, event: dict) -> dict:
         return result
 
 
-def browse_session(minutes: int, wait_seconds: int = 0) -> list[dict]:
-    """Run one read-only recommendation session and return the videos actually watched."""
+def browse_session(minutes: int, wait_seconds: int = 0,
+                   comment_options: dict | None = None, topic: str = "",
+                   topic_meta: dict | None = None) -> list[dict]:
+    """Run one read-only browse session and return the videos actually watched."""
     if sync_playwright is None:
         raise RuntimeError("Playwright is missing. Install the dependencies from requirements.txt.")
     prepare_browser_temp()
@@ -1430,7 +1547,8 @@ def browse_session(minutes: int, wait_seconds: int = 0) -> list[dict]:
             raise
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            return browse_feed(page, minutes)
+            return browse_feed(page, minutes, comment_options=comment_options,
+                               topic=topic, topic_meta=topic_meta)
         finally:
             context.close()
 
@@ -1453,8 +1571,86 @@ def browse_launch_failure_message(exc: Exception) -> str:
     )
 
 
-def format_browse_review(rows: list[dict]) -> str:
+def format_comment_reference(sample) -> list[str]:
+    """Render read-only comment samples as mood/topic reference for the model.
+
+    The header tells the model explicitly not to quote or paraphrase comments;
+    each item is trimmed to 60 characters and at most 10 items are shown.
+    """
+    if not isinstance(sample, dict):
+        return []
+    items = sample.get("items")
+    if not isinstance(items, list) or not items:
+        reason = str(sample.get("reason") or "")
+        detail = {
+            "no-comment-panel": "评论区没有打开",
+            "no-comments": "没有可读评论（可能是图文或未展示评论）",
+            "exhausted": "评论区没有更多可读内容",
+            "timeout": "读取超时",
+        }.get(reason)
+        if not detail:
+            detail = (f"读取失败（{reason.split(':', 1)[1]}）" if reason.startswith("error:")
+                      else "没有读取到评论")
+        return [f"  评论参考：本次没有读取到（{detail}）。"]
+    lines = ["  评论参考（只用来把握语气和话题点；不要照抄原文，不要复述评论内容）："]
+    shown = 0
+    for item in items[:PROMPT_MAX_COMMENTS]:
+        if not isinstance(item, dict):
+            continue
+        text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()[:PROMPT_TEXT_CHARS]
+        if not text:
+            continue
+        author = re.sub(r"\s+", " ", str(item.get("author") or "")).strip()[:PROMPT_AUTHOR_CHARS] or "匿名"
+        notes = []
+        if item.get("isAuthor"):
+            notes.append("作者本人")
+        if item.get("hasImage"):
+            notes.append("含图片/表情")
+        try:
+            likes = int(item.get("likes") or 0)
+        except (TypeError, ValueError):
+            likes = 0
+        notes.append(f"赞{likes}")
+        shown += 1
+        lines.append(f"    {shown}. {author}：{text}（{'，'.join(notes)}）")
+    if not shown:
+        return []
+    if sample.get("partial"):
+        lines.append("    （评论区未加载完，只取到以上部分）")
+    return lines
+
+
+_TOPIC_FALLBACK_REASONS = {
+    "topic-cooldown": "这个主题 24 小时内已经搜过",
+    "blocked": "搜索页被验证拦截",
+    "search-unavailable": "搜索页打不开",
+    "no-results": "没有搜到结果",
+    "invalid-topic": "主题不合规",
+    "timeout": "搜索超时",
+}
+
+
+def _topic_fallback_detail(reason: str) -> str:
+    if reason in _TOPIC_FALLBACK_REASONS:
+        return _TOPIC_FALLBACK_REASONS[reason]
+    if reason.startswith("error:"):
+        return f"搜索出错（{reason.split(':', 1)[1]}）"
+    return "没有搜到"
+
+
+def format_browse_review(rows: list[dict], topic_meta: dict | None = None) -> str:
     lines: list[str] = []
+    meta = topic_meta if isinstance(topic_meta, dict) else {}
+    topic = str(meta.get("topic") or "")
+    if topic:
+        if meta.get("topicFallback"):
+            detail = _topic_fallback_detail(str(meta.get("topicFallbackReason") or ""))
+            lines.append(f"本次主题：{topic}（{detail}，改刷推荐流）。")
+        else:
+            lines.append(f"本次主题：{topic}（按你的要求从搜索页刷的）。")
+    if topic and not rows:
+        lines.append("本次没有确认到持续播放的视频；未保存观看记录。")
+        return "\n".join(lines)
     for row in rows:
         lines.append(f"- 视频：{row['title']} | 作者：{row.get('author') or '未知作者'} | 实际播放：{int(row.get('watched_seconds', 0))} 秒")
         if row.get("content_summary"):
@@ -1463,16 +1659,22 @@ def format_browse_review(rows: list[dict]) -> str:
             lines.append(f"  语音转写：{row['transcript'][:240]}")
         if row.get("tags"):
             lines.append(f"  标签：{'、'.join(row['tags'][:5])}")
+        lines.extend(format_comment_reference(row.get("comments")))
         lines.append(f"  视频页：{row['url']}")
     return "\n".join(lines)
 
 
-def run_browse(minutes: int) -> int:
-    rows = browse_session(minutes)
-    review = format_browse_review(rows)
+def run_browse(minutes: int, topic: str = "") -> int:
+    cfg = load_config()
+    topic = validate_browse_topic(topic, cfg)
+    comment_options = cfg.get("browse_comments") or {}
+    topic_meta = {}
+    rows = browse_session(minutes, comment_options=comment_options,
+                          topic=topic, topic_meta=topic_meta)
+    review = format_browse_review(rows, topic_meta)
     if review:
         print(review)
-    if not rows:
+    if not rows and not topic:
         print("没有确认到持续播放的视频；未保存观看记录。")
     return 0
 
@@ -1505,17 +1707,26 @@ def discard_stale_browse_queue() -> None:
         cleanup_browse_queue(str(payload.get("id") or ""))
 
 
-def request_browse_from_listener(minutes: int, timeout_seconds: int | None = None) -> str:
+def request_browse_from_listener(minutes: int, topic: str = "",
+                                 timeout_seconds: int | None = None) -> str:
     """Ask the persistent inbox listener to browse using its already-open profile."""
     if not 1 <= minutes <= 5:
         raise RuntimeError("浏览时长须为 1 到 5 分钟")
+    if topic:
+        minutes = min(minutes, 3)
     discard_stale_browse_queue()
     if BROWSE_REQUEST_PATH.exists() or BROWSE_ACTIVE_PATH.exists():
         raise RuntimeError("已有一项抖音浏览请求正在等待或执行；请稍后再试。")
     request_id = uuid.uuid4().hex
     request_path = BROWSE_REQUEST_PATH.with_suffix(f".{request_id}.tmp")
     request_path.write_text(
-        json.dumps({"id": request_id, "minutes": minutes, "created_at": time_module.time()}),
+        json.dumps({
+            "id": request_id,
+            "minutes": minutes,
+            "topic": topic,
+            "topic_source": "owner" if topic else "none",
+            "created_at": time_module.time(),
+        }),
         encoding="utf-8",
     )
     try:
@@ -1542,8 +1753,10 @@ def request_browse_from_listener(minutes: int, timeout_seconds: int | None = Non
         cleanup_browse_queue(request_id)
 
 
-def run_browse_request(minutes: int) -> int:
-    result = request_browse_from_listener(minutes)
+def run_browse_request(minutes: int, topic: str = "") -> int:
+    cfg = load_config()
+    topic = validate_browse_topic(topic, cfg)
+    result = request_browse_from_listener(minutes, topic=topic)
     if result:
         print(result)
     return 0
@@ -1756,7 +1969,8 @@ def run_daily_browse(cfg: dict, state: dict, now: datetime | None = None) -> int
     now = now or datetime.now(SINGAPORE)
     today = now.date().isoformat()
     try:
-        rows = browse_session(int(daily["minutes"]), wait_seconds=300)
+        rows = browse_session(int(daily["minutes"]), wait_seconds=300,
+                              comment_options=cfg.get("browse_comments") or {})
     except RuntimeError as exc:
         if "already in use" in str(exc):
             print("Daily browse deferred: browser profile is busy; retrying on the next scheduled check.",
@@ -1963,9 +2177,26 @@ def service_browse_request(page, cfg: dict, selectors: dict):
         minutes = int(request.get("minutes", 0))
         if not 1 <= minutes <= 5:
             raise RuntimeError("浏览时长须为 1 到 5 分钟")
-        rows = browse_feed(page, minutes)
-        result = format_browse_review(rows) or "没有确认到持续播放的视频；未保存观看记录。"
-        response = {"ok": True, "result": result}
+        # 不信任上游：bridge 校验过的 topic 在这里再校验一次（含黑名单）。
+        topic = validate_browse_topic(request.get("topic", ""), cfg)
+        if topic:
+            minutes = min(minutes, 3)
+            topic_meta = {}
+            rows = browse_feed(page, minutes, comment_options=cfg.get("browse_comments") or {},
+                               topic=topic, topic_meta=topic_meta)
+            result = (format_browse_review(rows, topic_meta)
+                      or "没有确认到持续播放的视频；未保存观看记录。")
+            response = {
+                "ok": True, "result": result, "topic": topic, "topicSource": "owner",
+                "topicFallback": bool(topic_meta.get("topicFallback")),
+                "topicFallbackReason": str(topic_meta.get("topicFallbackReason") or ""),
+                "searchSelector": str(topic_meta.get("searchSelector") or ""),
+                "searchUrl": str(topic_meta.get("searchUrl") or ""),
+            }
+        else:
+            rows = browse_feed(page, minutes, comment_options=cfg.get("browse_comments") or {})
+            result = format_browse_review(rows) or "没有确认到持续播放的视频；未保存观看记录。"
+            response = {"ok": True, "result": result}
     except Exception as exc:
         response = {"ok": False, "error": str(exc) or exc.__class__.__name__}
     finally:
@@ -2116,6 +2347,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Inspect controls without liking or publishing a comment")
     parser.add_argument("--share-latest", action="store_true", help="Share the newest eligible watched video to the verified recipient")
     parser.add_argument("--minutes", type=int, default=10, help="Duration for --browse (1-15 minutes; default: 10)")
+    parser.add_argument("--topic", default="", help="Owner-specified browse topic (1-20 chars); requires --browse/--request-browse")
     parser.add_argument("--send", action="store_true", help="Enable sending; without it this is a dry run")
     parser.add_argument("--scheduled", action="store_true", help="Process at most one due Singapore-time daily slot")
     parser.add_argument("--max-items", type=int)
@@ -2130,6 +2362,8 @@ def main() -> int:
         parser.error("--browse/--request-browse is a separate read-only browser mode")
     if args.minutes != 10 and not (args.browse or args.request_browse):
         parser.error("--minutes can only be used with --browse/--request-browse")
+    if args.topic and not (args.browse or args.request_browse):
+        parser.error("--topic requires --browse/--request-browse")
     if args.login and (args.send or args.verify_recipient or args.scheduled):
         parser.error("--login cannot be combined with send or recipient verification")
     if args.verify_recipient and (args.send or args.scheduled):
@@ -2161,9 +2395,9 @@ def main() -> int:
         if args.listen_inbox:
             return run_inbox_listener()
         if args.request_browse:
-            return run_browse_request(args.minutes)
+            return run_browse_request(args.minutes, args.topic)
         if args.browse:
-            return run_browse(args.minutes)
+            return run_browse(args.minutes, args.topic)
         if args.interact:
             result = interact_with_video(args.interact, args.video_url, args.comment_text, args.dry_run)
             print(json.dumps(result, ensure_ascii=False, indent=2))

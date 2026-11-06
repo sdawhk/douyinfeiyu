@@ -33,6 +33,12 @@ test('QQ owner private turn keeps the original four Douyin tool rules verbatim',
   assert.equal(qqOwnerDouyinToolPrompt({ ownerPrivateTurn: false, hasToolSession: true }), '');
 });
 
+test('QQ owner prompt explains topic usage and honest fallback wording', () => {
+  for (const phrase of ['【抖音浏览主题】', '必须带 topic', '不许自己发明主题', '改刷推荐流', '按你的要求从搜索页刷的']) {
+    assert.ok(QQ_OWNER_DOUYIN_TOOL_RULES.includes(phrase), `missing ${phrase}`);
+  }
+});
+
 test('qq-bot wiring injects the douyin rule outside the QQ tools gate and keeps the QQ call unchanged', () => {
   assert.ok(qqBotSource.includes('if (douyinOwnerTurn) {'), 'douyin rule must be injected outside if (toolsBefore)');
   assert.ok(qqBotSource.includes('douyinOwnerTurnPrompt({ channel, isDouyinOwnerTurn: douyinOwnerTurn })'));
