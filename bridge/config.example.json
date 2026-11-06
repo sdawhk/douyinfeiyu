@@ -115,6 +115,15 @@
     "startHour": 9,
     "endHour": 22
   },
+  "diary": {
+    "enabled": true,
+    "tailTime": "23:30",
+    "dir": "D:\\deepseek\\diary",
+    "maxEntriesPerDay": 8,
+    "maxAutoEntries": 6,
+    "minEntriesGapMinutes": 90,
+    "maxInputTokensPerDay": 250000
+  },
   "groupReplyCooldownMs": 20000,
   "replyControl": { "privateEnabled": true, "groupEnabled": true, "disabledPrivate": [], "disabledGroups": [] },
   "messageBatch": { "enabled": true, "idleMs": 5000, "maxMs": 15000 },

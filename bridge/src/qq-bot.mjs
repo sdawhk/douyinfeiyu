@@ -76,6 +76,14 @@ import { resolveWatchedVideo } from './douyin-watch-memory.mjs';
 import { formatDouyinRecentHistory, isOwnerHistoryKey } from './recent-owner-history.mjs';
 import { estimateTokenCount } from '../../deploy/windows/token-usage.mjs';
 import { isDailyTaskDue, localDayKey } from './daily-task.mjs';
+import {
+  DEFAULT_DIARY_DIR, DIARY_AUTO_MAX_ENTRIES, DIARY_ENTRY_MAX_CHARS, DIARY_MAX_ENTRIES_PER_DAY,
+  DIARY_MAX_INPUT_TOKENS_PER_DAY, DIARY_MIN_GAP_MS, appendDiaryEntry, diaryCommandDenial,
+  diaryEntryIssue, diaryInjectionText, diaryTailDue, formatDiaryReply, normalizeDiaryState,
+  parseDiaryCommand, readDiaryEntries, redactDiaryText, scoreDiaryMaterial
+} from './diary.mjs';
+import { collectDiaryFacts, collectSourcePhrases } from './diary-facts.mjs';
+import { buildDiaryEntryPrompt } from './diary-prompt.mjs';
 import { groupAddressGuardReply, guardGroupAddressChange } from './group-address-guard.mjs';
 import { synthesizeAzureSpeech, wantsVoiceReply } from './azure-tts.mjs';
 import { synthesizeXfyunSpeech } from './xfyun-tts.mjs';
@@ -95,6 +103,25 @@ import { getVerifiedCreditBalance, getVerifiedSongPreview, hasRedPacketMarker, l
 
 const CFG_PATH = new URL('../config.json', import.meta.url);
 const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
+// 日记（v2）：想到就记一笔，60s tick 扫描事件；23:30 只在当天 0 条时兜底收尾。
+function diaryNumber(value, min, max, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : fallback;
+}
+const DIARY = {
+  enabled: cfg.diary?.enabled !== false,
+  tailTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(cfg.diary?.tailTime ?? '')) ? String(cfg.diary.tailTime) : '23:30',
+  dir: String(cfg.diary?.dir || DEFAULT_DIARY_DIR),
+  maxEntriesPerDay: diaryNumber(cfg.diary?.maxEntriesPerDay, 1, 12, DIARY_MAX_ENTRIES_PER_DAY),
+  maxAutoEntries: diaryNumber(cfg.diary?.maxAutoEntries, 0, 12, DIARY_AUTO_MAX_ENTRIES),
+  minGapMinutes: diaryNumber(cfg.diary?.minEntriesGapMinutes, 0, 720, Math.round(DIARY_MIN_GAP_MS / 60_000)),
+  maxInputTokensPerDay: diaryNumber(cfg.diary?.maxInputTokensPerDay, 0, 5_000_000, DIARY_MAX_INPUT_TOKENS_PER_DAY)
+};
+const DIARY_STATE_PATH = new URL('../state/diary-state.json', import.meta.url);
+const DIARY_STATE_DIR = new URL('../state/', import.meta.url);
+const DIARY_IDLE_MS = 3 * 60_000;
+const DIARY_SCAN_INTERVAL_MS = 60 * 60_000;
+const DIARY_FAILURE_RETRY_MS = 30 * 60_000;
 const TOOL_API = `http://127.0.0.1:${Number(cfg.consolePort) || 3100}`;
 async function toolSession(chatKey) {
   const match = /^([gp])(\d+)$/.exec(chatKey);
@@ -392,6 +419,24 @@ function saveOwnerProactiveState() {
 function markOwnerActivity() {
   ownerProactiveState.lastOwnerActivityAt = Date.now();
   saveOwnerProactiveState();
+}
+
+function loadDiaryState() {
+  try {
+    return normalizeDiaryState(JSON.parse(readFileSync(DIARY_STATE_PATH, 'utf8')));
+  } catch {
+    return normalizeDiaryState({});
+  }
+}
+
+const diaryState = loadDiaryState();
+function saveDiaryState() {
+  try {
+    mkdirSync(DIARY_STATE_DIR, { recursive: true });
+    writeFileSync(DIARY_STATE_PATH, JSON.stringify(diaryState, null, 2));
+  } catch (error) {
+    log('[diary] state save failed:', error.message);
+  }
 }
 
 const QZONE_LIKE_STATE_PATH = new URL('../state/qzone-like-replies.json', import.meta.url);
@@ -1332,6 +1377,11 @@ function rememberSessionReply(key, inputText, replyText) {
   rec.recentReplies.push(reply.slice(0, 300));
   if (rec.recentReplies.length > 8) rec.recentReplies.shift();
   saveRecentReplies(key, rec.recentReplies);
+  // 连续聊够 6 轮才够“值得记”的分；recent-chat-replies 只保留 3 轮，所以单独累计。
+  if (key === `p${OWNER_DM_TARGET}`) {
+    diaryState.chatTurns = Math.max(0, Number(diaryState.chatTurns) || 0) + 1;
+    saveDiaryState();
+  }
 }
 
 /**
@@ -1736,6 +1786,14 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
   if (ownerPrivateTurn) {
     const outbound = loadOwnerOutbound(key);
     if (outbound.length) promptText += formatOutboundForPrompt(outbound);
+    // 日记只注入“今天最近 2 条 + 昨天最后 1 条”，总量 ≤450 字，不注入全文。
+    if (DIARY.enabled) {
+      try {
+        promptText += `${diaryInjectionText({ dir: DIARY.dir })}\n\n`;
+      } catch (error) {
+        log('[diary] prompt injection skipped:', error?.message ?? error);
+      }
+    }
   }
   if (messageContext) promptText += `${messageContext}\n\n`;
   if (rec.recentReplies.length && !ownerPersonaTurn) {
@@ -2586,12 +2644,13 @@ async function handleCommand(text, sender, isGroup, target, senderName = '') {
   const selfSignature = t.match(/^设置机器人签名\s+([\s\S]+)$/);
   const affinityCommand = parseAffinityCommand(t);
   const tokenUsageDate = parseTokenUsageRequest(t);
+  const diaryCommand = parseDiaryCommand(t);
   // 认定为命令的三种情形：
   //   1) 以 / 开头（/表情 /存表情 ...）
   //   2) 无斜杠的中文短命令（发动态、表情、状态 ...）
   //   3) 中文命令 + 参数（发动态 xxx、/表情 xxx）
   const bareCmd = /^(?:发动态|发说说|说说|我的动态|列我的动态|发表情|表情|状态|群列表|帮助|存表情|表情包列表|删表情|图库|今天加了什么功能|今天更新了什么|今天改了什么|今日更新|好感度)(?:\s+(\S+))?$/;
-  if (!t.startsWith('/') && !bareCmd.test(t) && !qzoneDetailCommand && !qzoneReplyCommand && !affinityCommand && !tokenUsageDate && naturalQzone === null && !missedPrivateReply && !['ability', 'list'].includes(ownQzoneRead?.kind)
+  if (!t.startsWith('/') && !bareCmd.test(t) && !qzoneDetailCommand && !qzoneReplyCommand && !affinityCommand && !tokenUsageDate && !diaryCommand && naturalQzone === null && !missedPrivateReply && !['ability', 'list'].includes(ownQzoneRead?.kind)
       && !selfAccessListCommand && !selfAccessGrant && !selfAccessRevoke && !selfNickname && !selfSignature) {
     return null; // 不是命令
   }
@@ -2658,6 +2717,51 @@ async function handleCommand(text, sender, isGroup, target, senderName = '') {
   // 命令只认主人（Komorebi 大号 + 机器人号），其他人发 /qzone 之类不会执行
   if (!isOwner(sender)) {
     return '这个命令只有主人能用。';
+  }
+
+  if (diaryCommand?.kind === 'write') {
+    const denial = diaryCommandDenial({ isGroup, isOwner: true });
+    if (denial) return denial;
+    const note = redactDiaryText(diaryCommand.note);
+    if (!note) {
+      diaryForceRequestedAt = Date.now();
+      return '好，我记一下。';
+    }
+    const now = new Date();
+    const dayKey = localDayKey(now);
+    const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const existing = readDiaryEntries(DIARY.dir, dayKey).entries.map((item) => item.text);
+    const issue = diaryEntryIssue(note, {
+      dayKey, existingEntries: existing, sourcePhrases: [], minChars: 4
+    });
+    if (issue) {
+      return issue === 'duplicate' ? '这条已经记过了。'
+        : issue === 'day-full' ? `今天的日记已经写满了（最多 ${DIARY.maxEntriesPerDay} 条）。`
+          : '这句我记不进去：不能太长，也别带链接、@ 或内部标记。';
+    }
+    const result = appendDiaryEntry({ dir: DIARY.dir, dayKey, time, text: note, maxEntries: DIARY.maxEntriesPerDay });
+    if (!result.written) {
+      return result.reason === 'duplicate' ? '这条已经记过了。'
+        : result.reason === 'day-full' ? `今天的日记已经写满了（最多 ${DIARY.maxEntriesPerDay} 条）。`
+          : '这条没写进去，换个说法再试试。';
+    }
+    diaryState.lastEntryAt = now.getTime();
+    diaryState.entries = [...diaryState.entries, { time, chars: [...note].length }].slice(-20);
+    diaryState.lastFile = result.file;
+    saveDiaryState();
+    log(`[diary] manual entry ${dayKey} ${time} chars=${[...note].length}`);
+    return `记下了（${dayKey} ${time}）。`;
+  }
+
+  if (diaryCommand) {
+    const denial = diaryCommandDenial({ isGroup, isOwner: true });
+    if (denial) return denial;
+    try {
+      return formatDiaryReply(diaryCommand, { dir: DIARY.dir });
+    } catch (error) {
+      log('[diary] read failed:', error?.message ?? error);
+      return '这次日记没读出来，文件可能暂时不可用。';
+    }
   }
 
   if (selfAccessListCommand) {
@@ -4891,7 +4995,7 @@ async function collectQzoneLines() {
     return [...buildDigest(sources), ...todayFeatureMaterials()];
 }
 
-async function generateScratchText(prompt, { maxChars = 500, validate = null } = {}) {
+async function generateScratchText(prompt, { maxChars = 500, validate = null, preserveLines = false, timeoutMs = 90_000 } = {}) {
     // 用独立的 DSH 会话改写，避免污染聊天会话的人设上下文
     const scratchCwd = mkdtempSync(join(tmpdir(), 'qqbridge-scratch-'));
     try {
@@ -4904,12 +5008,13 @@ async function generateScratchText(prompt, { maxChars = 500, validate = null } =
           content: [{ type: 'text', text: `【用量场景:task】\n${prompt}` }]
         }
       });
-      const raw = await waitForCompleteReply(rec.sessionId, 0);
+      const raw = await waitForCompleteReply(rec.sessionId, 0, timeoutMs);
       const safe = sanitizeModelReply(raw);
       const trimmed = String(safe.text ?? '').trim();
       if (safe.blocked || !trimmed) throw new Error('generated text was empty, blocked, or contained a control marker');
       if ([...trimmed].length > maxChars) throw new Error(`generated text exceeded the ${maxChars}-character limit; rejected without truncating`);
-      const text = tidy(trimmed);
+      // 日记需要保留 Markdown 换行，不能走 tidy 的单行压缩。
+      const text = preserveLines ? trimmed.replace(/\r\n/g, '\n') : tidy(trimmed);
       if (!text || (validate && !validate(text))) throw new Error('generated text was empty or contained an unsupported marker');
       return text;
     } finally {
@@ -5351,3 +5456,207 @@ function scheduleOwnerProactive() {
 let ownerProactiveRunning = false;
 scheduleOwnerProactive();
 
+let diaryRunning = false;
+let diaryForceRequestedAt = 0;
+const DIARY_GENERATION_BUDGET_MS = 150_000;
+
+/** 给独立会话生成加硬预算：DSH 卡住时也不能把日记任务挂死。 */
+async function generateScratchTextWithBudget(prompt, options, budgetMs = DIARY_GENERATION_BUDGET_MS) {
+  return Promise.race([
+    generateScratchText(prompt, options),
+    sleep(budgetMs).then(() => { throw new Error(`scratch generation timed out after ${budgetMs}ms`); })
+  ]);
+}
+
+function diaryClock(now) {
+  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+}
+
+function diaryTimeMs(dayKey, time) {
+  const [year, month, day] = dayKey.split('-').map(Number);
+  const [hour, minute] = time.split(':').map(Number);
+  return new Date(year, month - 1, day, hour, minute).getTime();
+}
+
+function resetDiaryDay(now) {
+  diaryState.dayKey = localDayKey(now);
+  diaryState.entries = [];
+  diaryState.lastEntryAt = 0;
+  diaryState.autoCount = 0;
+  diaryState.chatTurns = 0;
+  diaryState.lastScanAt = 0;
+  diaryState.lastAttemptAt = 0;
+  diaryState.lastError = '';
+  diaryState.inputTokensToday = 0;
+  diaryState.tokenBudgetDate = diaryState.dayKey;
+  diaryState.skipped = 0;
+  diaryState.used = { douyinAt: 0, songAt: 0, chatAt: 0 };
+  diaryState.affinityBaseline = OWNER_DM_TARGET ? getAffinity(OWNER_DM_TARGET).score : null;
+  saveDiaryState();
+}
+
+/** 文件是当天日记的事实来源：把条目和最后写入时间同步回状态。 */
+function syncDiaryDay(dayKey) {
+  const day = readDiaryEntries(DIARY.dir, dayKey);
+  diaryState.entries = day.entries.slice(-20).map((item) => ({ time: item.time, chars: item.chars }));
+  for (const entry of day.entries) {
+    diaryState.lastEntryAt = Math.max(diaryState.lastEntryAt, diaryTimeMs(dayKey, entry.time));
+  }
+  return day;
+}
+
+/** 一次调用完成判断 + 写作；模型说“这次不记”就跳过，不落代码兜底长文。 */
+async function attemptDiaryEntry({ dayKey, now, facts, manual = false, tail = false }) {
+  const time = diaryClock(now);
+  const existing = readDiaryEntries(DIARY.dir, dayKey).entries.map((item) => item.text);
+  const prompt = buildDiaryEntryPrompt({ dayKey, at: time, facts, existingEntries: existing, tail });
+  diaryState.lastAttemptAt = now.getTime();
+  saveDiaryState();
+  let body = '';
+  try {
+    body = String(await generateScratchTextWithBudget(prompt, {
+      maxChars: DIARY_ENTRY_MAX_CHARS * 2,
+      preserveLines: true,
+      timeoutMs: DIARY_GENERATION_BUDGET_MS - 10_000
+    }) ?? '').trim();
+  } catch (error) {
+    diaryState.lastError = String(error?.message ?? error).slice(0, 200);
+    log('[diary] generation failed:', diaryState.lastError);
+    return { written: false, reason: 'generation-failed' };
+  } finally {
+    diaryState.inputTokensToday += estimateTokenCount(prompt);
+  }
+  if (!body || /^这次不记[。.!！]?$/.test(body)) {
+    diaryState.skipped += 1;
+    diaryState.lastError = '';
+    log('[diary] skipped: nothing worth recording');
+    return { skipped: true };
+  }
+  const issue = diaryEntryIssue(body, { dayKey, sourcePhrases: collectSourcePhrases(facts), existingEntries: existing });
+  if (issue) {
+    diaryState.lastError = `invalid-entry:${issue}`;
+    log('[diary] entry rejected:', issue);
+    return { written: false, reason: issue };
+  }
+  const result = appendDiaryEntry({ dir: DIARY.dir, dayKey, time, text: body, maxEntries: DIARY.maxEntriesPerDay });
+  if (!result.written) {
+    diaryState.lastError = `append:${result.reason}`;
+    log('[diary] append rejected:', result.reason);
+    return result;
+  }
+  diaryState.lastEntryAt = now.getTime();
+  diaryState.entries = [...diaryState.entries, { time, chars: [...body].length }].slice(-20);
+  diaryState.lastFile = result.file;
+  diaryState.chatTurns = 0;
+  diaryState.lastError = '';
+  if (!manual) diaryState.autoCount += 1;
+  log(`[diary] ${dayKey} ${time} written chars=${[...body].length}${manual ? ' manual' : ''}`);
+  return result;
+}
+
+/** 60s tick：事件触发为主 + 60 分钟兜底扫描 + 主人手动“记一下”；23:30 只补 0 条。 */
+function scheduleDiary() {
+  if (!DIARY.enabled) {
+    log('[diary] disabled by config');
+    return;
+  }
+  const tick = async () => {
+    if (diaryRunning) return;
+    const now = new Date();
+    const dayKey = localDayKey(now);
+    if (diaryState.dayKey !== dayKey) resetDiaryDay(now);
+    const day = syncDiaryDay(dayKey);
+    const total = day.entries.length;
+    const affinityNow = OWNER_DM_TARGET ? getAffinity(OWNER_DM_TARGET).score : null;
+    const affinityChanged = diaryState.affinityBaseline != null && affinityNow != null
+      && affinityNow !== diaryState.affinityBaseline;
+    const budgetLeft = diaryState.inputTokensToday < DIARY.maxInputTokensPerDay;
+
+    // 23:30 兜底：只处理当天 0 条，且当天只尝试一次。
+    if (total === 0 && budgetLeft
+      && diaryTailDue({ tailTime: DIARY.tailTime, now, dayKey, entryCount: total, tailDoneDate: diaryState.tailDoneDate })) {
+      diaryRunning = true;
+      try {
+        const facts = collectDiaryFacts({ dayKey, ownerId: OWNER_DM_TARGET });
+        const result = await attemptDiaryEntry({ dayKey, now, facts, tail: true });
+        diaryState.tailDoneDate = dayKey;
+        diaryState.affinityBaseline = affinityNow;
+        diaryState.lastScanAt = Date.now();
+        diaryState.used = {
+          douyinAt: facts.douyinLastAt,
+          songAt: facts.songLastAt,
+          chatAt: Math.max(facts.chat.updatedAt, facts.outboundLastAt)
+        };
+        log(`[diary] tail ${dayKey} ${result.written ? 'written' : result.skipped ? 'skipped' : result.reason}`);
+      } catch (error) {
+        diaryState.lastError = String(error?.message ?? error).slice(0, 200);
+        log('[diary] tail failed:', diaryState.lastError);
+      } finally {
+        diaryRunning = false;
+        saveDiaryState();
+      }
+      return;
+    }
+
+    if (total >= DIARY.maxEntriesPerDay || !budgetLeft) return;
+    const manual = diaryForceRequestedAt > 0 && Date.now() - diaryForceRequestedAt < 10 * 60_000;
+    if (!manual && diaryState.lastError
+      && /timed out|generation failed|blocked|empty/i.test(diaryState.lastError)
+      && Date.now() - diaryState.lastAttemptAt < DIARY_FAILURE_RETRY_MS) return;
+    if (!manual) {
+      if (diaryState.autoCount >= DIARY.maxAutoEntries) return;
+      const gapMs = diaryState.lastEntryAt > 0 ? Date.now() - diaryState.lastEntryAt : Number.POSITIVE_INFINITY;
+      if (gapMs < DIARY.minGapMinutes * 60_000) return;
+      // 只用主人自己的活跃时间判断“没在聊”：群友聊天不阻塞日记，主人 3 分钟没说话即可。
+      const quietSince = ownerProactiveState.lastOwnerActivityAt;
+      if (quietSince > 0 && Date.now() - quietSince < DIARY_IDLE_MS) return;
+    }
+
+    const facts = collectDiaryFacts({ dayKey, ownerId: OWNER_DM_TARGET, sinceAt: manual ? 0 : diaryState.lastEntryAt });
+    if (!facts.hasFacts && !manual) return;
+    const chatMark = Math.max(facts.chat.updatedAt, facts.outboundLastAt);
+    if (!manual
+      && facts.douyinLastAt <= diaryState.used.douyinAt
+      && facts.songLastAt <= diaryState.used.songAt
+      && chatMark <= diaryState.used.chatAt) {
+      // 兜底扫描：没有新素材时，只在晚上且当天不足 2 条时再给一次机会。
+      const scanDue = Date.now() - diaryState.lastScanAt >= DIARY_SCAN_INTERVAL_MS;
+      const late = now.getHours() * 60 + now.getMinutes() >= 22 * 60 + 30 && total < 2;
+      if (!scanDue || !late) return;
+      diaryState.lastScanAt = Date.now();
+    }
+
+    const scored = scoreDiaryMaterial({
+      facts, now, lastEntryAt: diaryState.lastEntryAt, todayEntries: total,
+      affinityChanged, chatTurns: diaryState.chatTurns
+    });
+    if (!manual && !scored.qualified) return;
+
+    diaryRunning = true;
+    try {
+      const result = await attemptDiaryEntry({ dayKey, now, facts, manual });
+      if (result.reason !== 'generation-failed') {
+        diaryState.used = {
+          douyinAt: Math.max(diaryState.used.douyinAt, facts.douyinLastAt),
+          songAt: Math.max(diaryState.used.songAt, facts.songLastAt),
+          chatAt: Math.max(diaryState.used.chatAt, chatMark)
+        };
+      }
+      diaryState.affinityBaseline = affinityNow;
+      diaryState.lastScanAt = Date.now();
+      if (manual) diaryForceRequestedAt = 0;
+      log(`[diary] tick score=${scored.score} reasons=${scored.reasons.join(',') || '-'} result=${result.written ? 'written' : result.skipped ? 'skipped' : result.reason}`);
+    } catch (error) {
+      diaryState.lastError = String(error?.message ?? error).slice(0, 200);
+      log('[diary] write failed:', diaryState.lastError);
+    } finally {
+      diaryRunning = false;
+      saveDiaryState();
+    }
+  };
+  setInterval(() => { void tick(); }, 60_000).unref?.();
+  setTimeout(() => { void tick(); }, 20_000).unref?.();
+  log(`[diary] armed: on-event + ${Math.round(DIARY_SCAN_INTERVAL_MS / 60_000)}min fallback, tail=${DIARY.tailTime}, dir=${DIARY.dir}`);
+}
+
+scheduleDiary();

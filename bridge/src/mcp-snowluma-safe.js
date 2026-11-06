@@ -23,6 +23,7 @@ import {
   previewAvatar
 } from './avatar-image.mjs';
 import { resolveFfmpegPath } from './animated-image.mjs';
+import { readDiaryForTool } from './diary.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -429,6 +430,32 @@ server.tool(
       return { content: [{ type: 'text', text: removed ? `已从主人私聊记忆删除：${clean}` : '没有找到完全匹配的主人私聊记忆，未删除其他内容。' }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `主人私聊记忆删除失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_diary_read',
+  '只读查看你自己写的日记（每天一个文件，按 HH:MM 分段）。日记是你自己写的，可以引用；不要把私密内容转发到群聊。仅主人私聊可用。date 用 YYYY-MM-DD，默认今天；mode=day 看某天分段，full 看某天全文，recent 看最近 N 条。单次最多返回 800 字，超出会注明截断；不要一次索要整月，按日期分段看。',
+  {
+    key: z.string().describe('当前主人私聊会话 key，格式 private:QQ号'),
+    token: z.string().describe('当前会话令牌'),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('日期 YYYY-MM-DD，默认今天'),
+    mode: z.enum(['day', 'full', 'recent']).optional().describe('day=某天分段（默认），full=某天全文，recent=最近 N 条'),
+    count: z.number().int().min(1).max(10).optional().describe('mode=recent 时返回的条数，默认 5，最多 10')
+  },
+  async ({ key, token, date, mode = 'day', count = 5 }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('日记只允许主人私聊查看');
+      await authorizeRead(key, token);
+      const result = readDiaryForTool({
+        dayKey: date, mode, count, isOwner: true, isGroup: false, channel: 'qq',
+        qq: String(key).replace(/^private:/, '')
+      });
+      if (!result.ok) return { content: [{ type: 'text', text: result.error }], isError: true };
+      return { content: [{ type: 'text', text: result.text }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `日记读取失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );
