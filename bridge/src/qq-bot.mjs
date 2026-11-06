@@ -83,6 +83,7 @@ import { MAX_SPEECH_BYTES, transcribeLocalSpeech } from './local-stt.mjs';
 import { directOwnerIdentityReply, enforceOwnerBoundary, isOwnerTopic, isVerifiedDouyinOwnerTurn, ownerBoundaryPrompt } from './owner-boundary.mjs';
 import { parseSingCommand, generateSong, downloadSong } from './singing.mjs';
 import { parseExistingSongCommand, parseFullSongIntentQuery, parseRecentSongReplayRequest, searchExistingSongs, makeExistingSongClip, isExactSongMatch } from './song-cover.mjs';
+import { planSongIntake, parseNamedSongCommand, resolveSongIntent, buildSongCommand, formatSongNotFoundReply, formatSongFoundReply, isVagueSongName } from './song-intent.mjs';
 import { loadAutoSongOutput, loadExistingSongOutput, loadSongOutput, saveSongOutput } from './song-output-cache.mjs';
 import { songDeliveryJournal } from './song-delivery-journal.mjs';
 import { applyLiuyingSpeech, applyLiuyingVoiceDetailed, LIUYING_SINGING_VOCAL_PROFILE, LIUYING_SINGING_VOCAL_VARIANT } from './rvc-singing.mjs';
@@ -2943,6 +2944,39 @@ function allowed(isGroup, id, sender) {
   return set.has(String(id));
 }
 
+// 模糊点歌的意图判定模型：只在「确实像点歌」的消息上调用，明确命令和纯闲聊都不走这里。
+// 用本机模型池（18901）的文本模型；失败或超时就返回 null，由原确定性逻辑回落。
+const SONG_INTENT_MODELS = (process.env.SONG_INTENT_MODELS
+  ? process.env.SONG_INTENT_MODELS.split(',')
+  : ['cohere/north-mini-code:free', 'buddy/mimo-v2.6-pro', 'buddy/deepseek-v4.1-flash']).map((item) => item.trim()).filter(Boolean);
+const SONG_INTENT_BASE_URL = String(process.env.SONG_INTENT_BASE_URL
+  || cfg.songIntentBaseUrl || 'http://127.0.0.1:18901/v1').replace(/\/+$/, '');
+async function callSongIntentModel({ system, user }) {
+  const deadline = Date.now() + 15000;
+  let lastError = '';
+  for (const model of SONG_INTENT_MODELS) {
+    const remaining = deadline - Date.now();
+    if (remaining < 800) break;
+    try {
+      const response = await fetch(`${SONG_INTENT_BASE_URL}/chat/completions`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        // 模型池里的模型会先花几百个 token 推理，上限给小了会只返回空 content。
+        body: JSON.stringify({ model, temperature: 0, max_tokens: 800, stream: false,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+        signal: AbortSignal.timeout(Math.min(9000, remaining))
+      });
+      if (!response.ok) { lastError = `${model}: HTTP ${response.status}`; continue; }
+      const data = await response.json().catch(() => null);
+      const content = data?.choices?.[0]?.message?.content;
+      const text = Array.isArray(content) ? content.map((part) => part?.text || '').join('') : String(content ?? '');
+      if (text.trim()) return text;
+      lastError = `${model}: empty reply`;
+    } catch (error) { lastError = `${model}: ${String(error?.message ?? error).slice(0, 120)}`; }
+  }
+  if (lastError) log('[song-intent] model unavailable:', lastError);
+  return null;
+}
+
 async function processMessage(ev) {
   const isGroup = ev.message_type === 'group';
   const target = isGroup ? ev.group_id : ev.user_id;
@@ -3100,7 +3134,7 @@ async function processMessage(ev) {
       ))
     : false; // 私聊天然就是对我说的
 
-  const t0 = normalizeSongCommandText(normalizeBotCommandText(text, messageReferences), {
+  let t0 = normalizeSongCommandText(normalizeBotCommandText(text, messageReferences), {
     selfNickname: botNickname, selfQQ: BOT_SELF, hasBotMention: messageReferences.hasBotMention
   });
   if (isGroup && /^#s[1l]$/i.test(t0)) return;
@@ -3264,6 +3298,42 @@ async function processMessage(ev) {
     if (quotedSong) {
       // 引用内容原本只有「[非文本消息]」，补上歌名，避免模型把「唱完整首」当成新点歌。
       messageReferences.context = `${messageReferences.context ?? ''}\n【引用的机器人语音是歌曲：《${quotedSong.title || quotedSong.query}》】`.trim();
+    }
+  }
+  // ---- 点歌入口分流：确定性命令直接执行；模糊口语交给意图模型判定后再转成命令 ----
+  let songIntentAck = '';
+  {
+    const parsedCoverNow = parseNamedSongCommand(t0) || parseExistingSongCommand(text, {
+      botNickname, botSelf: currentBotQQ, hasBotMention: messageReferences.hasBotMention
+    });
+    const lastSong = recentChatSongOutput(chatKey) ?? recentSongOutput(sender);
+    const intake = planSongIntake(t0, { parsedCover: parsedCoverNow, hasLastSong: Boolean(lastSong) });
+    // 群里没被点名的模糊点歌不处理，保持原来不主动发歌的行为。
+    if (intake.path === 'model' && (!isGroup || groupSpeaker?.directed)) {
+      const intentStartedAt = Date.now();
+      const intent = await resolveSongIntent({
+        text: t0,
+        lastSong,
+        recentExchanges: sessions.get(chatKey)?.recentExchanges ?? [],
+        callModel: callSongIntentModel
+      });
+      if (intent?.intent === 'song_request') {
+        const command = buildSongCommand(intent);
+        if (command) {
+          songIntentAck = intent.ack;
+          text = command;
+          t0 = normalizeSongCommandText(normalizeBotCommandText(text, messageReferences), {
+            selfNickname: botNickname, selfQQ: BOT_SELF, hasBotMention: messageReferences.hasBotMention
+          });
+          log(`[song-intent] action=${intent.action} song=${intent.songName.slice(0, 40)} ms=${Date.now() - intentStartedAt} target=${target}`);
+        } else {
+          log(`[song-intent] clarify action=${intent.action} target=${target}`);
+          await sendText(target, '想听哪首？说个歌名就行，比如“唱 夜曲”。', isGroup);
+          return;
+        }
+      } else if (intent?.intent === 'not_song') {
+        log(`[song-intent] not_song target=${target}`);
+      }
     }
   }
   const fullFollowup = /^(?:发整首|唱整首|唱完整首|唱完整首歌|唱完整版|整首|来整首|续唱整首|续唱完整首|续唱完整版|接着唱整首|继续唱整首|续上整首|把整首唱完)(?:吧|呗|呀|啊|嘛|哦|呢)?$/u.test(t0);
@@ -3583,10 +3653,13 @@ async function processMessage(ev) {
     }
   }
 
-  const coverRequest = parseExistingSongCommand(text, {
+  // 「点歌 歌名」是新的确定性别名；群里未点名的情况由下面的 directed 检查拦下。
+  const coverRequest = parseNamedSongCommand(t0) || parseExistingSongCommand(text, {
     botNickname, botSelf: currentBotQQ, hasBotMention: messageReferences.hasBotMention
   }) || (replayRequest?.song ? { mode: 'ai', song: replayRequest.song, candidate: 1 } : null);
   if (coverRequest) {
+    // 模糊口语命中时，用意图模型给的自然回应代替模板开场白。
+    if (songIntentAck) coverRequest.ack = songIntentAck;
     if (isGroup && explicitGroupReplyDecision({
       botSelf: currentBotQQ, text, references: messageReferences,
       isOwner: isOwner(sender), keywords: MUST_REPLY_WORDS
@@ -3607,6 +3680,11 @@ async function processMessage(ev) {
     }
     if (!coverRequest.song) {
       await sendText(target, '告诉我歌名吧，例如“唱歌 夜曲”；也可以用“原唱 夜曲”听原唱片段。', isGroup);
+      return;
+    }
+    // 意图模型没接上时，别把“抒情的/那首”这类词当歌名硬搜，先问清歌名。
+    if (isVagueSongName(coverRequest.song) && !coverRequest.ack) {
+      await sendText(target, '想听哪首？说个歌名就行，比如“唱 夜曲”。', isGroup);
       return;
     }
     if (coverRequest.mode === 'search') {
@@ -3684,7 +3762,7 @@ async function processMessage(ev) {
     }
     if (singingBusy) { await sendText(target, '我正在做上一首歌，完成后再点歌吧。', isGroup); return; }
     singingBusy = true;
-    try { await sendText(target, `正在查找《${coverRequest.song.slice(0, 24)}》的有人声版本，请稍等。`, isGroup); }
+    try { await sendText(target, coverRequest.ack || `好，我去找《${coverRequest.song.slice(0, 24)}》的人声版，稍等一下。`, isGroup); }
     catch (error) { singingBusy = false; throw error; }
     void (async () => {
       try {
@@ -3694,11 +3772,12 @@ async function processMessage(ev) {
         const picked = results[coverRequest.candidate - 1];
         if (!picked) throw new Error('没有该序号的歌曲候选，请先用“搜歌 歌名”查看');
         if (!coverRequest.candidateExplicit && !isExactSongMatch(coverRequest.song, picked.title)) {
-          await sendText(target, `没有找到歌名完全匹配《${coverRequest.song.slice(0, 24)}》的录音。相近候选：\n${results.map((item, index) => `${index + 1}. ${item.title}`).join('\n')}\n请用“翻唱 ${coverRequest.song.slice(0, 24)} #序号”确认，或给我完整歌名。`, isGroup);
+          await sendText(target, formatSongNotFoundReply(coverRequest.song, results), isGroup);
           return;
         }
         log('[song-cover] selected', picked.title);
-        await sendText(target, `找到《${picked.title.slice(0, 80)}》，这次先做 ${requestedSeconds} 秒${coverRequest.mode === 'ai' ? '试听' : '原唱片段'}，不是整首${coverRequest.mode === 'ai' ? `；要整首说“唱完整首 ${coverRequest.song.slice(0, 24)}”` : ''}。`, isGroup);
+        await sendText(target, formatSongFoundReply({ title: picked.title, seconds: requestedSeconds,
+          mode: coverRequest.mode, query: coverRequest.song }), isGroup);
         const clip = await makeExistingSongClip(coverRequest.song, {
           candidate: coverRequest.candidate, searchImpl: async () => results,
           ...(coverRequest.seconds ? { seconds: coverRequest.seconds } : {})
