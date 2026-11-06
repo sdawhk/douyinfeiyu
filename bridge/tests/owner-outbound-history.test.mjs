@@ -75,7 +75,8 @@ test('injects at most 5 entries with local HH:MM and Chinese source labels', () 
 test('labels unknown sources conservatively', () => {
   assert.equal(outboundSourceLabel('proactive-greeting'), '主动问候');
   assert.equal(outboundSourceLabel('douyin-daily'), '抖音日报');
-  assert.equal(outboundSourceLabel('song-notice'), '主动消息');
+  assert.equal(outboundSourceLabel('song-notice'), '点歌');
+  assert.equal(outboundSourceLabel('unknown-source'), '主动消息');
 });
 
 test('stores no internal proactive prompt as the other party utterance', () => {
