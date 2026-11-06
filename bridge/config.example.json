@@ -118,6 +118,7 @@
   "diary": {
     "enabled": true,
     "tailTime": "23:30",
+    "pushTime": "23:00",
     "dir": "D:\\deepseek\\diary",
     "maxEntriesPerDay": 8,
     "maxAutoEntries": 6,

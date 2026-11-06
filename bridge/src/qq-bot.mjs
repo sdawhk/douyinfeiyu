@@ -84,6 +84,7 @@ import {
 } from './diary.mjs';
 import { collectDiaryFacts, collectSourcePhrases } from './diary-facts.mjs';
 import { buildDiaryEntryPrompt } from './diary-prompt.mjs';
+import { DIARY_PUSH_MAX_ATTEMPTS, DIARY_PUSH_RETRY_MS, pushDiaryRepo } from './diary-git.mjs';
 import { groupAddressGuardReply, guardGroupAddressChange } from './group-address-guard.mjs';
 import { synthesizeAzureSpeech, wantsVoiceReply } from './azure-tts.mjs';
 import { synthesizeXfyunSpeech } from './xfyun-tts.mjs';
@@ -111,6 +112,7 @@ function diaryNumber(value, min, max, fallback) {
 const DIARY = {
   enabled: cfg.diary?.enabled !== false,
   tailTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(cfg.diary?.tailTime ?? '')) ? String(cfg.diary.tailTime) : '23:30',
+  pushTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(cfg.diary?.pushTime ?? '')) ? String(cfg.diary.pushTime) : '23:00',
   dir: String(cfg.diary?.dir || DEFAULT_DIARY_DIR),
   maxEntriesPerDay: diaryNumber(cfg.diary?.maxEntriesPerDay, 1, 12, DIARY_MAX_ENTRIES_PER_DAY),
   maxAutoEntries: diaryNumber(cfg.diary?.maxAutoEntries, 0, 12, DIARY_AUTO_MAX_ENTRIES),
@@ -5561,6 +5563,52 @@ async function attemptDiaryEntry({ dayKey, now, facts, manual = false, tail = fa
   return result;
 }
 
+let diaryPushRunning = false;
+
+function diaryPushDue(now, dayKey) {
+  const [hour, minute] = DIARY.pushTime.split(':').map(Number);
+  if (now.getHours() * 60 + now.getMinutes() < hour * 60 + minute) return false;
+  if (diaryState.lastPushDate === dayKey) return false;
+  const attemptDay = diaryState.lastPushAttemptAt > 0 ? localDayKey(new Date(diaryState.lastPushAttemptAt)) : '';
+  const attempts = attemptDay === dayKey ? diaryState.pushAttempts : 0;
+  if (attempts >= DIARY_PUSH_MAX_ATTEMPTS) return false;
+  if (attempts > 0 && Date.now() - diaryState.lastPushAttemptAt < DIARY_PUSH_RETRY_MS) return false;
+  return true;
+}
+
+/**
+ * 每天 23:00 把当天日记推到独立仓库：失败退避 30 分钟重试，最多 3 次，之后等次日。
+ * 全程静默，只写日志，不发 QQ 消息。
+ */
+async function maybePushDiary(now) {
+  if (!DIARY.enabled || diaryPushRunning) return;
+  const dayKey = localDayKey(now);
+  if (!diaryPushDue(now, dayKey)) return;
+  diaryPushRunning = true;
+  const started = Date.now();
+  const attemptDay = diaryState.lastPushAttemptAt > 0 ? localDayKey(new Date(diaryState.lastPushAttemptAt)) : '';
+  const attempts = (attemptDay === dayKey ? diaryState.pushAttempts : 0) + 1;
+  try {
+    const result = await pushDiaryRepo({ dir: DIARY.dir, dayKey, log });
+    diaryState.lastPushAttemptAt = Date.now();
+    if (result.ok) {
+      diaryState.lastPushDate = dayKey;
+      diaryState.pushAttempts = 0;
+      log(`[diary-git] ${dayKey} ${result.skipped ? 'no changes' : `pushed${result.viaBypass ? ' (proxy bypass)' : ''}`} in ${Date.now() - started}ms`);
+    } else {
+      diaryState.pushAttempts = attempts;
+      log(`[diary-git] ${dayKey} failed(${attempts}/${DIARY_PUSH_MAX_ATTEMPTS}) ${result.reason}: ${String(result.detail ?? '').slice(0, 200)}`);
+    }
+  } catch (error) {
+    diaryState.lastPushAttemptAt = Date.now();
+    diaryState.pushAttempts = attempts;
+    log(`[diary-git] ${dayKey} failed(${attempts}/${DIARY_PUSH_MAX_ATTEMPTS}):`, String(error?.message ?? error).slice(0, 200));
+  } finally {
+    diaryPushRunning = false;
+    saveDiaryState();
+  }
+}
+
 /** 60s tick：事件触发为主 + 60 分钟兜底扫描 + 主人手动“记一下”；23:30 只补 0 条。 */
 function scheduleDiary() {
   if (!DIARY.enabled) {
@@ -5572,6 +5620,7 @@ function scheduleDiary() {
     const now = new Date();
     const dayKey = localDayKey(now);
     if (diaryState.dayKey !== dayKey) resetDiaryDay(now);
+    void maybePushDiary(now);
     const day = syncDiaryDay(dayKey);
     const total = day.entries.length;
     const affinityNow = OWNER_DM_TARGET ? getAffinity(OWNER_DM_TARGET).score : null;
@@ -5586,6 +5635,11 @@ function scheduleDiary() {
       try {
         const facts = collectDiaryFacts({ dayKey, ownerId: OWNER_DM_TARGET });
         const result = await attemptDiaryEntry({ dayKey, now, facts, tail: true });
+        if (result.written && diaryState.lastPushDate === dayKey) {
+          // 23:00 已经推过当天：清掉标记，让下一次 tick 把这条兜底补推一次（推完会重新记日期）。
+          diaryState.lastPushDate = '';
+          diaryState.pushAttempts = 0;
+        }
         diaryState.tailDoneDate = dayKey;
         diaryState.affinityBaseline = affinityNow;
         diaryState.lastScanAt = Date.now();
@@ -5663,7 +5717,7 @@ function scheduleDiary() {
   };
   setInterval(() => { void tick(); }, 60_000).unref?.();
   setTimeout(() => { void tick(); }, 20_000).unref?.();
-  log(`[diary] armed: on-event + ${Math.round(DIARY_SCAN_INTERVAL_MS / 60_000)}min fallback, tail=${DIARY.tailTime}, dir=${DIARY.dir}`);
+  log(`[diary] armed: on-event + ${Math.round(DIARY_SCAN_INTERVAL_MS / 60_000)}min fallback, tail=${DIARY.tailTime}, push=${DIARY.pushTime}, dir=${DIARY.dir}`);
 }
 
 scheduleDiary();

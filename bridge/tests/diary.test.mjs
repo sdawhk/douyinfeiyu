@@ -11,6 +11,7 @@ import {
 } from '../src/diary.mjs';
 import { collectDiaryFacts, collectSourcePhrases, factsToPromptText } from '../src/diary-facts.mjs';
 import { buildDiaryEntryPrompt } from '../src/diary-prompt.mjs';
+import { pushDiaryRepo } from '../src/diary-git.mjs';
 import { outboundSourceLabel, recordOutbound } from '../src/owner-outbound-history.mjs';
 import { localDayKey } from '../src/daily-task.mjs';
 
@@ -358,3 +359,78 @@ test('只读工具：不存在的日期、最近 N 条顺序和审计', () => wi
   assert.ok(audit.every((item) => !JSON.stringify(item).includes('今天和爸聊了几句')), '审计不记录正文');
 }));
 
+function fakeGit({ changes = false, ahead = 0, pushFails = 0 } = {}) {
+  const calls = [];
+  let pushes = 0;
+  const run = async (dir, args) => {
+    calls.push(args.join(' '));
+    if (args[0] === 'rev-parse') return { ok: true, code: 0, stdout: 'true', stderr: '' };
+    if (args[0] === 'add') return { ok: true, code: 0, stdout: '', stderr: '' };
+    if (args[0] === 'diff') return { ok: !changes, code: changes ? 1 : 0, stdout: '', stderr: '' };
+    if (args[0] === 'commit') return { ok: true, code: 0, stdout: '[main abc1234] diary', stderr: '' };
+    if (args[0] === 'rev-list') return { ok: true, code: 0, stdout: String(ahead), stderr: '' };
+    if (args.includes('push')) {
+      if (pushes < pushFails) {
+        pushes += 1;
+        return { ok: false, code: 128, stdout: '', stderr: 'proxy refused' };
+      }
+      pushes += 1;
+      return { ok: true, code: 0, stdout: '', stderr: 'To https://gitee.com/suyangkun/fishys-diary.git' };
+    }
+    return { ok: false, code: 1, stdout: '', stderr: `unexpected: ${args.join(' ')}` };
+  };
+  return { run, calls };
+}
+
+test('日记推送：没有变更就不提交也不推送', async () => {
+  const { run, calls } = fakeGit({ changes: false, ahead: 0 });
+  const result = await pushDiaryRepo({ dir: 'D:/deepseek/diary', dayKey: '2026-11-06', run });
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+  assert.equal(calls.some((line) => line.startsWith('commit')), false);
+  assert.equal(calls.some((line) => line.startsWith('push')), false);
+});
+
+test('日记推送：有变更时提交当天日记并常规推送成功', async () => {
+  const { run, calls } = fakeGit({ changes: true, pushFails: 0 });
+  const result = await pushDiaryRepo({ dir: 'D:/deepseek/diary', dayKey: '2026-11-06', run });
+  assert.equal(result.ok, true);
+  assert.equal(result.viaBypass, false);
+  assert.ok(calls.includes('add --all -- .'));
+  assert.ok(calls.includes('commit -m diary: 2026-11-06'));
+  assert.ok(calls.includes('push origin HEAD'));
+  assert.equal(calls.some((line) => line.includes('http.proxy=')), false);
+});
+
+test('日记推送：常规推送失败后清空代理重试成功', async () => {
+  const { run, calls } = fakeGit({ changes: true, pushFails: 1 });
+  const result = await pushDiaryRepo({ dir: 'D:/deepseek/diary', dayKey: '2026-11-06', run });
+  assert.equal(result.ok, true);
+  assert.equal(result.viaBypass, true);
+  assert.ok(calls.includes('-c http.proxy= -c https.proxy= push origin HEAD'));
+});
+
+test('日记推送：两次推送都失败时报错且不吞掉原因', async () => {
+  const { run } = fakeGit({ changes: true, pushFails: 9 });
+  const result = await pushDiaryRepo({ dir: 'D:/deepseek/diary', dayKey: '2026-11-06', run });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'push-failed');
+  assert.match(result.detail, /proxy refused/);
+});
+
+test('日记推送：没有新改动但昨天还有未推送提交时照样推', async () => {
+  const { run, calls } = fakeGit({ changes: false, ahead: 1 });
+  const result = await pushDiaryRepo({ dir: 'D:/deepseek/diary', dayKey: '2026-11-06', run });
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, undefined);
+  assert.ok(calls.includes('push origin HEAD'));
+});
+
+test('日记状态保留每日推送字段，默认从空开始', () => {
+  const now = new Date(2026, 10, 6, 12, 0);
+  const state = normalizeDiaryState({ lastPushDate: '2026-11-06', pushAttempts: 2, lastPushAttemptAt: 123 }, now);
+  assert.equal(state.lastPushDate, '2026-11-06');
+  assert.equal(state.pushAttempts, 2);
+  assert.equal(state.lastPushAttemptAt, 123);
+  assert.equal(normalizeDiaryState({}, now).lastPushDate, '');
+});
