@@ -112,6 +112,77 @@ export function isVagueSongName(song) {
   return /^(?:抒情|欢快|伤感|温柔|轻快|慢歌|快歌|摇滚|民谣|流行|情歌|儿歌|古风|国风|dj)/iu.test(name);
 }
 
+// ---- 泛指唱歌：「唱首歌 / 来一首 / 唱一个」这类没给歌名的请求 ----
+// 整句完全匹配才算命中，所以「唱 夜曲」「点歌 夜曲」「来一首夜曲」不会被抢走。
+const VAGUE_PREFIX_RE = /^(?:(?:麻烦|请|帮我|帮忙|给我|你|再|快|赶紧|现在|马上|立刻|就|随便|随意)\s*)+/u;
+const VAGUE_TAIL_RE = /(?:(?:听听看|听听|听一下|来听|听|一下|吧|呗|呀|啊|嘛|哦|呢|哈|喽|咯|就行|就成|即可|好了)\s*)+$/u;
+const VAGUE_VERB_RE = /^(?:唱|来|整|放|哼|吼)([\s\S]*)$/u;
+// 「一首 / 两段 / 几句 / 点」这类量词，和「歌 / 什么 / 啥」这类宾语，至少要有一个。
+const VAGUE_MEASURE_RE = /^(?:一|两|几|三)?(?:首|个|段|曲|句|点|些)/u;
+const VAGUE_NOUN_RE = /^(?:歌曲|曲子|小曲|歌儿|歌|什么|啥|点什么|点啥|哪些|哪个)/u;
+
+/** 是否是「没给歌名的泛指唱歌请求」。返回 true 时调用方直接从已有成品里挑一首发。 */
+export function parseVagueSingRequest(text) {
+  let value = String(text ?? '').normalize('NFKC').trim();
+  if (!value || value.length > 24) return false;
+  value = value.replace(/^[@/／]+\s*/u, '').replace(/[。！？!?~～…、,，.\s]+$/u, '');
+  if (!value) return false;
+  // 「整首 / 完整版」是上一首的续唱指令，交给原来的整首分支。
+  if (/^(?:整首|整首版|完整版|完整首|全曲)$/u.test(value)) return false;
+  value = value.replace(VAGUE_PREFIX_RE, '').replace(VAGUE_TAIL_RE, '');
+  if (!value) return false;
+  const matched = value.match(VAGUE_VERB_RE);
+  if (!matched || !matched[1]) return false;
+  let rest = matched[1];
+  const measure = rest.match(VAGUE_MEASURE_RE);
+  if (measure) rest = rest.slice(measure[0].length);
+  const noun = rest.match(VAGUE_NOUN_RE);
+  if (noun) rest = rest.slice(noun[0].length);
+  if (!measure && !noun) return false;
+  return rest === '';
+}
+
+/**
+ * 从歌单里随机挑一首，尽量避开最近发过的。
+ * 最近几首都发过时不硬凑，退回全量并标记 collapsed，由回复文案说实话。
+ */
+export function pickVagueSong(songs, recentIds = [], random = Math.random) {
+  const list = (Array.isArray(songs) ? songs : []).filter((song) => song && typeof song.id === 'string' && song.id);
+  if (!list.length) return { song: null, collapsed: false, poolSize: 0 };
+  const recent = new Set((Array.isArray(recentIds) ? recentIds : []).map(String));
+  const fresh = list.filter((song) => !recent.has(String(song.id)));
+  const pool = fresh.length ? fresh : list;
+  const roll = Math.min(0.999999, Math.max(0, Number(random()) || 0));
+  return { song: pool[Math.floor(roll * pool.length)], collapsed: fresh.length === 0, poolSize: pool.length };
+}
+
+const VAGUE_REPLY_LINES = [
+  (name) => `正好有现成的《${name}》，先放这段给你听。`,
+  (name) => `那就《${name}》吧，之前唱好的，不折腾。`,
+  (name) => `《${name}》手边就有，这就放。`,
+];
+const VAGUE_SMALL_LIBRARY_LINES = [
+  (name) => `现成的就这几首，先给你《${name}》；想听别的就点歌名。`,
+  (name) => `歌单里目前没几首成品，《${name}》先听着，想换就说个歌名。`,
+];
+const VAGUE_REPEAT_LINES = [
+  (name) => `能发的成品不多，还是《${name}》；想听别的就点个歌名。`,
+  (name) => `转一圈又回到《${name}》了，最近发的就这几首。`,
+];
+
+/** 泛指唱歌命中时的一句短话；repeats=最近都发过，smallLibrary=歌单只有一两首。 */
+export function formatVagueSongReply({ title, repeats = false, smallLibrary = false, random = Math.random } = {}) {
+  const name = String(title ?? '').slice(0, 40) || '这首';
+  const pool = repeats ? VAGUE_REPEAT_LINES : smallLibrary ? VAGUE_SMALL_LIBRARY_LINES : VAGUE_REPLY_LINES;
+  const roll = Math.min(0.999999, Math.max(0, Number(random()) || 0));
+  return pool[Math.floor(roll * pool.length)](name);
+}
+
+/** 成品目录为空或文件不可用时的兜底，不硬发、不现场生成。 */
+export function formatVagueSongEmpty() {
+  return '现成的歌还没做好呢，先不硬放了；你点一首吧，比如“唱 夜曲”。';
+}
+
 /** 这句话是否值得交给意图模型（只有真正的点歌语气、且不是确定性命令时才为 true）。 */
 export function shouldResolveSongIntent(text, { hasLastSong = false } = {}) {
   const value = String(text ?? '').trim();
@@ -126,12 +197,14 @@ export function shouldResolveSongIntent(text, { hasLastSong = false } = {}) {
 /**
  * 入口决策：
  * fast  = 现有确定性链路，直接执行
+ * vague = 没给歌名的泛指唱歌请求，直接从已有成品里随机发
  * model = 交给意图模型做判定和抽取
  * none  = 普通聊天，继续走原来的模型对话
  */
 export function planSongIntake(text, { parsedCover = null, hasLastSong = false } = {}) {
   const value = String(text ?? '').trim();
   if (LIBRARY_COMMAND_RE.test(value)) return { path: 'none' };
+  if (parseVagueSingRequest(value)) return { path: 'vague' };
   if (isExplicitSongCommand(value)) return { path: 'fast' };
   if (parsedCover) {
     if (!parsedCover.song) return { path: 'fast' };

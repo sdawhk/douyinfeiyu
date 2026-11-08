@@ -233,7 +233,8 @@ test('clip chain downloads, cuts, returns audio and removes temporary files', as
   assert.equal(calls.length, 2);
   assert.equal(calls[0].at(-1), 'https://www.youtube.com/watch?v=abc123');
   assert.equal(clip.duration, 180);
-  assert.equal(clip.startSeconds, 30);
+  assert.equal(clip.startSeconds, 0);
+  assert.equal(calls[1][calls[1].indexOf('-ss') + 1], '0');
   assert.equal(existsSync(work), false);
   await assert.rejects(makeExistingSongClip('夜曲', { runImpl, ffmpeg: process.execPath, ytdlp: process.execPath, ytdlpArgs: [], searchImpl: async () => [
     { title: 'bad', url: 'https://example.com/song.mp3' }

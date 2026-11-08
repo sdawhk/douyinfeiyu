@@ -35,7 +35,7 @@ test('current song policy lists and sends cached songs, while keeping previews a
   const temp = mkdtempSync(path.join(os.tmpdir(), 'song-current-policy-test-'));
   const cacheRoot = path.join(temp, 'song-cache');
   const cached = saveSongOutput({ query: '测试歌', title: '测试歌', mode: 'ai', candidate: 1,
-    startSeconds: 30, seconds: 60, voiceVariant: 'rvc:0:clear-v4' }, Buffer.alloc(2048, 4), { root: cacheRoot });
+    startSeconds: 0, seconds: 60, voiceVariant: 'rvc:0:clear-v4' }, Buffer.alloc(2048, 4), { root: cacheRoot });
   let testNow = Date.now();
   t.mock.method(Date, 'now', () => testNow);
   process.env.DSH_SONG_LIBRARY_DB = path.join(temp, 'library.sqlite');

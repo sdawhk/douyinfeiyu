@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planSongIntake, shouldResolveSongIntent, parseNamedSongCommand, parseSongIntentReply, resolveSongIntent, buildSongCommand, formatSongNotFoundReply, formatSongFoundReply, isVagueSongName, isExplicitSongCommand } from '../src/song-intent.mjs';
+import { planSongIntake, shouldResolveSongIntent, parseNamedSongCommand, parseSongIntentReply, resolveSongIntent, buildSongCommand, formatSongNotFoundReply, formatSongFoundReply, isVagueSongName, isExplicitSongCommand, parseVagueSingRequest, pickVagueSong, formatVagueSongReply, formatVagueSongEmpty } from '../src/song-intent.mjs';
 import { parseExistingSongCommand } from '../src/song-cover.mjs';
 
 const cover = (text) => parseExistingSongCommand(text);
@@ -131,4 +131,47 @@ test('歌名指代/风格描述不会被当成确定歌名', () => {
   assert.equal(isVagueSongName('那首'), true);
   assert.equal(isVagueSongName('刚才的'), true);
   assert.equal(isVagueSongName('夜曲'), false);
+});
+
+test('泛指唱歌请求：没给歌名才命中，不进模型也不重新生成', () => {
+  const vague = ['唱首歌', '来一首', '唱一个', '唱一个听听', '随便唱点什么', '给我唱首歌',
+    '唱一首歌', '来首歌听听', '唱首歌来听听', '唱两句', '再来一个', '帮我放首', '唱首歌吧', '来点歌'];
+  for (const text of vague) {
+    assert.equal(parseVagueSingRequest(text), true, text);
+    assert.equal(planSongIntake(text, { parsedCover: cover(text), hasLastSong: false }).path, 'vague', text);
+  }
+  // 指定歌名 / 歌单命令 / 续唱指令 / 纯闲聊都不许被这条抢走。
+  const others = ['唱 夜曲', '点歌 夜曲', '来一首夜曲', '唱一首夜曲', '点歌1', '歌单',
+    '唱完整首 雨爱', '整首', '这首歌真好听', '我会唱歌', '你唱歌真好听', '来首抒情的'];
+  for (const text of others) {
+    assert.equal(parseVagueSingRequest(text), false, text);
+  }
+  for (const text of ['唱 夜曲', '点歌 夜曲', '来一首夜曲']) {
+    assert.notEqual(planSongIntake(text, { parsedCover: cover(text) }).path, 'vague', text);
+  }
+});
+
+test('泛指唱歌随机挑成品：避开最近 3 首，放完记下来', () => {
+  const songs = [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }, { id: 'c', title: 'C' }, { id: 'd', title: 'D' }];
+  const picked = pickVagueSong(songs, ['a', 'b'], () => 0);
+  assert.equal(picked.song.id, 'c');
+  assert.equal(picked.collapsed, false);
+  assert.equal(picked.poolSize, 2);
+  // 随机到池子末尾也不越界。
+  assert.equal(pickVagueSong(songs, [], () => 1).song.id, 'd');
+  // 最近几首都发过：允许重复，但标记 collapsed 让回复说实话。
+  const repeated = pickVagueSong(songs, ['a', 'b', 'c', 'd'], () => 0);
+  assert.equal(repeated.collapsed, true);
+  assert.equal(repeated.song.id, 'a');
+  assert.deepEqual(pickVagueSong([], ['a']), { song: null, collapsed: false, poolSize: 0 });
+  // 歌单只有一首时照发。
+  assert.equal(pickVagueSong([{ id: 'only' }], ['only'], () => 0).song.id, 'only');
+});
+
+test('泛指唱歌的说明与兜底文案', () => {
+  assert.match(formatVagueSongReply({ title: '夜曲', random: () => 0 }), /《夜曲》/);
+  assert.match(formatVagueSongReply({ title: '夜曲', repeats: true, random: () => 0 }), /成品不多/);
+  assert.match(formatVagueSongReply({ title: '夜曲', smallLibrary: true, random: () => 0 }), /就这几首/);
+  assert.match(formatVagueSongReply({ title: '', random: () => 0 }), /《这首》/);
+  assert.match(formatVagueSongEmpty(), /点一首/);
 });

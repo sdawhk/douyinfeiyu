@@ -250,7 +250,7 @@ export async function searchExistingSongs(query, { fetchImpl = fetch, runImpl = 
   throw new Error(`没有找到歌名匹配、含人声的歌曲录音${errors.length ? `（${errors.join('；')}）` : ''}`);
 }
 
-export async function makeExistingSongClip(query, { seconds = 60, startSeconds = 30, candidate = 1,
+export async function makeExistingSongClip(query, { seconds = 60, startSeconds = 0, candidate = 1,
   fetchImpl = fetch, runImpl = run, searchImpl = searchExistingSongs,
   requireExact = false, ffmpeg = FFMPEG, ytdlp = YTDLP, ytdlpArgs = YTDLP_ARGS } = {}) {
   if (!Number.isInteger(seconds) || seconds < 5 || seconds > 240) throw new Error('片段长度须在 5–240 秒之间');

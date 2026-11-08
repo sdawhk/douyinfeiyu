@@ -63,6 +63,7 @@ export function listCachedSongPlaylist({ root = CACHE_ROOT } = {}) {
       if (meta.id !== name.slice(0, -5) || meta.mode !== 'ai'
           || (meta.segmentIndex != null && meta.segmentIndex !== 0) || !meta.query || !meta.title
           || !Number.isFinite(meta.seconds) || meta.seconds <= 30
+          || Number(meta.startSeconds) > 0
           || !/^[a-f0-9]{64}$/.test(String(meta.audioSha256 ?? ''))) continue;
       candidates.push(meta);
     } catch { /* 跳过损坏的缓存元数据。 */ }

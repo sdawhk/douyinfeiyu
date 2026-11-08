@@ -47,7 +47,7 @@ test('playlist exposes verified long cached songs and ignores old previews or da
   const root = await mkdtemp(path.join(os.tmpdir(), 'song-playlist-cache-'));
   try {
     const base = { query: '雨爱（司凤版）', title: '司凤版雨爱', mode: 'ai', candidate: 1,
-      startSeconds: 30, voiceVariant: 'rvc:0:clear-v4' };
+      startSeconds: 0, voiceVariant: 'rvc:0:clear-v4' };
     saveSongOutput({ ...base, seconds: 30 }, Buffer.alloc(2048, 1), { root });
     const long = saveSongOutput({ ...base, seconds: 60 }, Buffer.alloc(2048, 2), { root });
     saveSongOutput({ ...base, query: '原唱样本', mode: 'original', seconds: 60 }, Buffer.alloc(2048, 3), { root });
@@ -55,10 +55,14 @@ test('playlist exposes verified long cached songs and ignores old previews or da
       sourceIdentity: 'source:full', segmentIndex: 0 }, Buffer.alloc(2048, 4), { root });
     saveSongOutput({ ...base, query: '好日子', title: '好日子', startSeconds: 60, seconds: 60,
       sourceIdentity: 'source:full', segmentIndex: 1 }, Buffer.alloc(2048, 5), { root });
+    // 旧版从 30 秒才切的中段成品会吞掉前奏，不能再进歌单。
+    saveSongOutput({ ...base, query: '雨爱中段旧缓存', title: '司凤版雨爱', startSeconds: 30, seconds: 60 },
+      Buffer.alloc(2048, 7), { root });
     const damaged = saveSongOutput({ ...base, query: '损坏歌曲', title: '损坏歌曲', seconds: 60 }, Buffer.alloc(2048, 6), { root });
     await writeFile(path.join(root, `${damaged.id}.mp3`), Buffer.alloc(2048, 9));
     const songs = listCachedSongPlaylist({ root });
     assert.deepEqual(songs.map((song) => song.query).sort(), ['好日子', '雨爱（司凤版）']);
+    assert.equal(findCachedSongInPlaylist('雨爱中段旧缓存', { root }), null, '非 0 起点的旧成品不能进歌单');
     assert.equal(findCachedSongInPlaylist('雨爱司风版', { root })?.id, long.id);
     assert.equal(loadSongOutputById(full.id, { root })?.audio[0], 4);
     assert.equal(loadSongOutputById(damaged.id, { root }), null);
