@@ -37,7 +37,11 @@ test('Qzone tools are available to the model and reject a caller without an owne
     assert.equal(deniedDouyinBrowse.isError, true);
     const douyinInteract = tools.tools.find((tool) => tool.name === 'douyin_interact_with_video');
     assert.ok(douyinInteract, 'Douyin interaction tool missing');
-    assert.deepEqual(new Set(douyinInteract.inputSchema.required), new Set(['key', 'token', 'action', 'videoUrl', 'dryRun']));
+    // videoUrl 与 videoTitle 二选一、由运行时校验互斥，两者都不能进 required，
+    // 否则会堵死按标题点赞/评论这条路。required 只保留每次都必填的四个字段。
+    assert.deepEqual(new Set(douyinInteract.inputSchema.required), new Set(['key', 'token', 'action', 'dryRun']));
+    assert.ok(douyinInteract.inputSchema.properties?.videoUrl, 'videoUrl 应作为可选参数暴露');
+    assert.ok(douyinInteract.inputSchema.properties?.videoTitle, 'videoTitle 应作为可选参数暴露');
     const deniedDouyinInteract = await client.callTool({
       name: 'douyin_interact_with_video',
       arguments: {
