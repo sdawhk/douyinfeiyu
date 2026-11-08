@@ -1718,7 +1718,8 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
   const personaChanged = Boolean(persona && rec.personaSent && rec.personaVersion !== personaVersion);
   const firstPersonaTurn = Boolean(persona && (!rec.personaSent || personaChanged));
   const ownerTurn = channel !== 'douyin' && sender != null && isOwner(sender);
-  let ownAvatarImage = null;
+  let ownAvatarCaption = '';
+  let ownAvatarUnavailable = false;
   let promptText = firstPersonaTurn
     ? `${personaChanged ? '【角色卡已更新；本版本覆盖本会话中更早的角色设定】\n' : ''}${persona}\n\n`
     : '';
@@ -1747,14 +1748,28 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
         const response = await fetch(avatarUrl, { signal: AbortSignal.timeout(8_000) });
         if (response.ok) {
           const bytes = Buffer.from(await response.arrayBuffer());
-          if (bytes.length <= 5 * 1024 * 1024) ownAvatarImage = validateImageBase64(bytes.toString('base64'));
+          const avatar = bytes.length <= 5 * 1024 * 1024 ? validateImageBase64(bytes.toString('base64')) : null;
+          if (avatar) {
+            // 聊天模型是纯文本的，直接塞图片会让整轮 prompt 被判不支持图片而失败；
+            // 与用户发图一致：先用视觉模型转成文字描述，再注入 prompt。
+            const vision = await inspectCachedImage(avatar.data, avatar.mime, {
+              models: cfg.stickerVisionModels, baseUrl: cfg.stickerVisionBaseUrl, variant: 'own-avatar'
+            }).catch(() => null);
+            ownAvatarCaption = String(vision?.caption || '').trim();
+            if (!ownAvatarCaption) ownAvatarUnavailable = true;
+          } else {
+            ownAvatarUnavailable = true;
+          }
         }
       }
     } catch (error) {
+      ownAvatarUnavailable = true;
       log('[avatar] current profile image unavailable:', String(error?.message ?? error).slice(0, 160));
     }
-    if (ownAvatarImage) {
-      promptText += '【本人当前 QQ 头像】随附图片是刚从当前登录 QQ 账号读取的头像。直接依据图片描述自己的头像；若对方问近期是否换过，结合上面的成功记录回答。不要把这张图误认成对方发来的图片。\n\n';
+    if (ownAvatarCaption) {
+      promptText += `【本人当前 QQ 头像（画面描述）】${ownAvatarCaption}\n这张头像属于你自己，不是对方发来的图片；直接依据这段描述回答。若对方问近期是否换过，结合上面的成功记录回答。\n\n`;
+    } else if (ownAvatarUnavailable) {
+      promptText += '【本人当前 QQ 头像】这次没能读取到头像画面；被问到时如实说明暂时看不清，不要凭空描述头像内容。\n\n';
     }
   }
   if (douyinOwnerTurn) {
@@ -1928,7 +1943,6 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
 
   if (key.startsWith('g')) promptText = redactProtectedGroupIds(promptText, PROTECTED_OWNER_QQS);
   const content = [{ type: 'text', text: promptText }];
-  if (ownAvatarImage) content.push({ type: 'image', mimeType: ownAvatarImage.mime, data: ownAvatarImage.data });
 
   const requestId = `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await withDshRecovery(() => dsh.sessions.prompt({
