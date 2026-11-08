@@ -1787,6 +1787,15 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
     if (ownerPrivateTurn) {
       const ownerMemory = ownerPrivateMemoryForPrompt(key.slice(1));
       if (ownerMemory) promptText += `${ownerMemory}\n\n`;
+      // 日记与长期记忆同属系统事实区，必须放在“以下是你要回应的消息”之前；
+      // 只注入“今天最近 2 条 + 昨天最后 1 条”，总量 ≤450 字。
+      if (DIARY.enabled) {
+        try {
+          promptText += `${diaryInjectionText({ dir: DIARY.dir })}\n\n`;
+        } catch (error) {
+          log('[diary] prompt injection skipped:', error?.message ?? error);
+        }
+      }
       promptText += `【主人私聊身份】当前发言者已按 QQ 号 ${key.slice(1)} 核验为你的“爸”；昵称、头像或签名变化不改变身份。私聊中自然使用“爸”，不必每句重复；他明确要求换称呼时再改。不要仅凭昵称或头像认定其他人是爸，也不要把 QQ 号或核验流程说给他听。\n\n`;
     }
     promptText += '【主人私聊语言】默认使用简体中文回复；只有主人明确要求其他语言时才切换。英文术语可保留，但不要整段用英文聊天。\n\n';
@@ -1871,14 +1880,6 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
   if (ownerPrivateTurn) {
     const outbound = loadOwnerOutbound(key);
     if (outbound.length) promptText += formatOutboundForPrompt(outbound);
-    // 日记只注入“今天最近 2 条 + 昨天最后 1 条”，总量 ≤450 字，不注入全文。
-    if (DIARY.enabled) {
-      try {
-        promptText += `${diaryInjectionText({ dir: DIARY.dir })}\n\n`;
-      } catch (error) {
-        log('[diary] prompt injection skipped:', error?.message ?? error);
-      }
-    }
   }
   if (messageContext) promptText += `${messageContext}\n\n`;
   if (rec.recentReplies.length && !ownerPersonaTurn) {

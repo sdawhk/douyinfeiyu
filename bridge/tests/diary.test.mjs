@@ -143,22 +143,36 @@ test('摘要提取标题、心情和正文', () => {
   assert.ok([...summary.excerpt].length <= 10);
 });
 
-test('日记注入块不超过 450 字，只带今天最近 2 条和昨天最后 1 条', () => withTempDir((dir) => {
+test('日记注入块不超过 450 字，块首写明日期与条数，只带今天最近 2 条和昨天最后 1 条', () => withTempDir((dir) => {
   for (const [day, time] of [['2026-11-05', '21:00'], ['2026-11-06', '09:00'], ['2026-11-06', '14:05'], ['2026-11-06', '18:30']]) {
     appendDiaryEntry({ dir, dayKey: day, time, text: `${ENTRY_A}${'还想到一些零碎的小事。'.repeat(3)}` });
   }
   const block = diaryInjectionText({ dir, now: new Date(2026, 10, 6, 22, 0) });
   assert.ok([...block].length <= 450, `注入块过长：${[...block].length}`);
   assert.match(block, /【我的日记】/);
-  assert.match(block, /今天已经记过/);
+  assert.match(block, /今天是 2026-11-06 星期五，今天已经记过 3 条/);
+  assert.match(block, /今天已经记过：/);
   assert.match(block, /昨天最后一笔/);
+  assert.match(block, /不许说没写\/还没写\/等晚上再写/);
+  assert.match(block, /不用为此调用 qq_diary_read/);
   assert.doesNotMatch(block, /## 18:30/, '不应注入 Markdown 小节');
 }));
 
-test('没有日记时注入块告知“还没记”，不编造', () => withTempDir((dir) => {
+test('没有日记时注入块告知“还没记”，仍保留日期与硬规则但不许说没写', () => withTempDir((dir) => {
   const block = diaryInjectionText({ dir, now: new Date(2026, 10, 6, 12, 0) });
-  assert.match(block, /今天还没记/);
-  assert.match(block, /不要编/);
+  assert.match(block, /今天是 2026-11-06 星期五/);
+  assert.match(block, /今天还没记。/);
+  assert.match(block, /只有明确写“今天还没记”时才可以说没写/);
+}));
+
+test('摘录按句号边界截断并补“…”，不出现半句', () => withTempDir((dir) => {
+  const text = `今天和爸聊了几句，还一起听了几首歌。${'后面还有很多零碎的细节'.repeat(10)}`;
+  appendDiaryEntry({ dir, dayKey: '2026-11-06', time: '14:05', text });
+  const block = diaryInjectionText({ dir, now: new Date(2026, 10, 6, 22, 0) });
+  assert.match(block, /今天和爸聊了几句，还一起听了几首歌。…/);
+  assert.doesNotMatch(block, /零碎/);
+  const summary = summarizeDiaryText(text, { excerptChars: 18 });
+  assert.equal(summary.excerpt, '今天和爸聊了几句，还一起听了几首歌。…');
 }));
 
 test('素材打分：点歌、抖音、连聊、亲密度、间隔和深夜加分', () => {
@@ -338,13 +352,17 @@ test('日记素材注入块能出现“点歌”来源标签', () => withTempDir
 
 test('只读工具：不存在的日期、最近 N 条顺序和审计', () => withTempDir((dir) => {
   const auditPath = join(dir, 'audit.jsonl');
-  const missing = readDiaryForTool({ dir, dayKey: '2020-01-01', isOwner: true, auditPath });
+  const missing = readDiaryForTool({ dir, dayKey: '2020-01-01', isOwner: true, auditPath, now: new Date(2026, 10, 6, 15, 0) });
   assert.equal(missing.ok, true);
   assert.match(missing.text, /没有日记/);
+  assert.doesNotMatch(missing.text, /可用 mode=day/, '今天 0 条时不补提示');
 
   appendDiaryEntry({ dir, dayKey: '2026-11-05', time: '22:10', text: ENTRY_B });
   appendDiaryEntry({ dir, dayKey: '2026-11-06', time: '09:00', text: ENTRY_A });
   appendDiaryEntry({ dir, dayKey: '2026-11-06', time: '14:05', text: '下午又想到一点小事，顺手记下来，留着以后看。' });
+  const missingWithToday = readDiaryForTool({ dir, dayKey: '2020-01-01', isOwner: true, auditPath, now: new Date(2026, 10, 6, 15, 0) });
+  assert.match(missingWithToday.text, /2020-01-01 那天没有日记。/);
+  assert.match(missingWithToday.text, /今天（2026-11-06）有 2 条，可用 mode=day 查看/);
   const recent = readDiaryForTool({ dir, mode: 'recent', count: 2, isOwner: true, qq: '1668389572', auditPath });
   assert.equal(recent.ok, true);
   const lines = recent.text.split('\n').filter((line) => line.startsWith('- '));

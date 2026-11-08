@@ -277,6 +277,26 @@ export function listDiaryDayKeys(dir, { limit = 0 } = {}) {
   return limit > 0 ? keys.slice(0, limit) : keys;
 }
 
+/**
+ * 按句号/换行边界截断摘录，避免出现半句；确有截断时补“…”。
+ * 前 chars 字内找不到句末标点时才硬切（正文整体没有标点的极端情况）。
+ */
+function clipExcerpt(text, chars) {
+  const body = String(text ?? '');
+  if (chars <= 0) return '';
+  const all = [...body];
+  if (all.length <= chars) return body.trim();
+  const head = all.slice(0, chars).join('');
+  const boundary = Math.max(
+    head.lastIndexOf('。'), head.lastIndexOf('！'), head.lastIndexOf('？'),
+    head.lastIndexOf('!'), head.lastIndexOf('?'), head.lastIndexOf('…'),
+    head.lastIndexOf('\n')
+  );
+  const cut = (boundary >= 0 ? head.slice(0, boundary + 1) : head).trim();
+  if (!cut) return `${head.trim()}…`;
+  return cut.endsWith('…') ? cut : `${cut}…`;
+}
+
 /** 提取标题、心情、正文摘要，供旧版文档和列表命令使用。 */
 export function summarizeDiaryText(text, { excerptChars = 120 } = {}) {
   const raw = String(text ?? '');
@@ -288,13 +308,13 @@ export function summarizeDiaryText(text, { excerptChars = 120 } = {}) {
     .join('\n')
     .replace(/\s+/g, ' ')
     .trim();
-  const excerpt = excerptChars > 0 ? [...body].slice(0, excerptChars).join('') : '';
+  const excerpt = excerptChars > 0 ? clipExcerpt(body, excerptChars) : '';
   return { title, mood, excerpt };
 }
 
 function entryExcerpt(entry, chars) {
   const body = entry.text.replace(/^心情[：:][^\n]*\n?/, '').replace(/\s+/g, ' ').trim();
-  return chars > 0 ? [...body].slice(0, chars).join('') : '';
+  return clipExcerpt(body, chars);
 }
 
 /**
@@ -306,8 +326,6 @@ export function diaryInjectionText({ dir = DEFAULT_DIARY_DIR, now = new Date() }
   const yesterday = localDayKey(new Date(now.getTime() - 24 * 60 * 60_000));
   const todayEntries = readDiaryEntries(dir, today);
   const yesterdayEntries = readDiaryEntries(dir, yesterday);
-  const intro = `【我的日记】我习惯想到就记一笔，日记存在 ${dir}，不发给别人，只有我自己和爸能看。`;
-  const tail = '这是我自己写的日记，聊到日记时可以据此回答；没写过就说没写，不要编。要看更多或全文时，由命令层读取文件回答。';
 
   let todayList = todayEntries.entries.slice(-2);
   if (!todayList.length && todayEntries.legacy) {
@@ -319,6 +337,13 @@ export function diaryInjectionText({ dir = DEFAULT_DIARY_DIR, now = new Date() }
     const summary = summarizeDiaryText(yesterdayEntries.text, { excerptChars: 60 });
     if (summary.excerpt) yesterdayList = [{ time: '', text: summary.excerpt, mood: summary.mood, legacy: true }];
   }
+
+  const todayCount = todayEntries.entries.length || (todayList.length ? 1 : 0);
+  const dateLine = todayCount > 0
+    ? `今天是 ${today} ${weekdayCn(today)}，今天已经记过 ${todayCount} 条。`
+    : `今天是 ${today} ${weekdayCn(today)}。`;
+  const intro = `【我的日记】我习惯想到就记一笔，日记存在 ${dir}，不发给别人，只有我自己和爸能看。${dateLine}`;
+  const tail = '上面有今天的内容就代表今天已经写过，不许说没写/还没写/等晚上再写，也不用为此调用 qq_diary_read；只有明确写“今天还没记”时才可以说没写。要看更多或全文时，由命令层读取文件回答。';
 
   const levels = [
     { today: 2, yesterday: 1, chars: 60 },
@@ -584,7 +609,12 @@ export function readDiaryForTool({
   if (!file) return { ok: false, error: '日期格式不对，只支持 YYYY-MM-DD。' };
   const { text, entries, legacy } = readDiaryEntries(dir, targetDay);
   auditDiaryRead({ auditPath, qq, dayKey: targetDay, mode, now });
-  if (!text.trim()) return { ok: true, text: `${targetDay} 那天没有日记。`, truncated: false, total: 0, dayKey: targetDay };
+  if (!text.trim()) {
+    const todayKey = localDayKey(now);
+    const todayCount = readDiaryEntries(dir, todayKey).entries.length;
+    const hint = todayCount > 0 ? `今天（${todayKey}）有 ${todayCount} 条，可用 mode=day 查看。` : '';
+    return { ok: true, text: `${targetDay} 那天没有日记。${hint}`, truncated: false, total: 0, dayKey: targetDay };
+  }
   if (mode === 'full') {
     const out = truncateWithNote(text.trim());
     return { ok: true, text: out.text, truncated: out.truncated, total: out.total, dayKey: targetDay };
