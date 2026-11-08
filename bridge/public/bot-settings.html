@@ -25,8 +25,38 @@
     .hero p { margin:0; color:var(--muted); line-height:1.7; font-size:14px; }
     .version { min-width:185px; border-left:1px solid var(--line); padding-left:18px; color:var(--muted); font:11px/1.8 var(--mono); }
     .version strong { display:block; color:var(--ink); font:600 15px var(--body); }
-    .layout { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(270px,.68fr); gap:18px; margin-top:24px; align-items:start; }
+    [hidden] { display:none !important; }
+    .shell { display:grid; grid-template-columns:236px minmax(0,1fr); gap:20px; margin-top:24px; align-items:start; }
+    .side { position:sticky; top:18px; border:1px solid var(--line); background:rgba(23,29,23,.94); }
+    .side-head { padding:16px 16px 13px; border-bottom:1px solid var(--line); }
+    .side-head strong { display:block; margin-top:6px; font:normal 17px var(--serif); }
+    .nav { display:grid; gap:3px; padding:9px; }
+    .nav button { display:flex; align-items:center; gap:9px; width:100%; padding:10px 11px; border:1px solid transparent; background:transparent; color:var(--muted); font-size:12px; text-align:left; transition:color .15s,background .15s,border-color .15s; }
+    .nav button:hover { color:var(--ink); background:#ffffff07; }
+    .nav button.active { color:var(--lime); border-color:#d2f36d33; background:#d2f36d12; }
+    .nav .idx { flex:none; color:#6d806b; font:10px var(--mono); letter-spacing:.04em; }
+    .nav button.active .idx { color:var(--lime); }
+    .side-foot { padding:13px 16px 15px; border-top:1px solid var(--line); color:#849181; font:10px/1.7 var(--mono); }
+    .content { min-width:0; }
+    .pages { margin-top:24px; }
+    .page { display:none; }
+    .page.active { display:grid; gap:18px; }
+    .page-status.active { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .page-status .page-head { grid-column:1/-1; }
+    .page-head { display:flex; justify-content:space-between; align-items:end; gap:18px; padding:2px 2px 0; }
+    .page-head h2 { margin:6px 0 5px; font:normal 24px var(--serif); letter-spacing:-.01em; }
+    .page-head p { margin:0; color:var(--muted); font-size:12px; line-height:1.6; }
+    .page-actions { flex:none; }
+    .fold-all { padding:8px 12px; border:1px solid var(--line); background:transparent; color:var(--muted); font-size:11px; }
+    .fold-all:hover { color:var(--lime); border-color:#d2f36d55; }
     .stack { display:grid; gap:18px; }
+    .section-head { cursor:pointer; }
+    .head-tools { display:flex; align-items:center; gap:12px; flex:none; margin-left:auto; }
+    .head-tools .fold { width:26px; height:26px; display:grid; place-items:center; border:1px solid var(--line); background:transparent; color:var(--muted); font-size:12px; transition:transform .18s,color .18s; }
+    .head-tools .fold:hover { color:var(--lime); }
+    section.collapsed .section-head .fold { transform:rotate(-90deg); }
+    section.collapsed .section-body { display:none; }
+    section.collapsed .section-head { border-bottom-color:transparent; }
     section { border:1px solid var(--line); background:rgba(27,33,27,.94); }
     .section-head { display:flex; align-items:start; justify-content:space-between; gap:12px; padding:23px 25px 19px; border-bottom:1px solid var(--line); }
     .section-head h2 { margin:7px 0 5px; font:normal 26px var(--serif); }
@@ -78,16 +108,35 @@
     .actions button { padding:10px 18px; border:1px solid var(--line); background:transparent; color:var(--ink); font-size:12px; }
     .actions .primary { border-color:var(--lime); color:#1c2914; background:var(--lime); font-weight:700; }
     .actions button:disabled { opacity:.48; cursor:not-allowed; }
-    @media(max-width:900px) { .layout { grid-template-columns:1fr; } .hero { align-items:start; } }
-    @media(max-width:600px) { .hero { display:block; } .version { margin-top:22px; } .field-grid { grid-template-columns:1fr; } .section-head,.section-body,.status-card,.events { padding-left:18px; padding-right:18px; } .links { gap:12px; } }
+    @media(max-height:760px) { .side-foot { display:none; } }
+    @media(max-width:900px) {
+      .shell { grid-template-columns:1fr; }
+      .side { position:sticky; top:0; z-index:6; display:flex; border-left:0; border-right:0; border-top:0; background:#101410f5; backdrop-filter:blur(14px); }
+      .side-head,.side-foot { display:none; }
+      .nav { display:flex; gap:6px; width:100%; overflow-x:auto; padding:9px 12px; scrollbar-width:thin; }
+      .nav button { flex:none; width:auto; white-space:nowrap; }
+      .nav .idx { display:none; }
+      .page-status.active { grid-template-columns:1fr; }
+      .hero { align-items:start; }
+    }
+    @media(max-width:600px) { .hero { display:block; } .version { margin-top:22px; } .field-grid { grid-template-columns:1fr; } .section-head,.section-body,.status-card,.events { padding-left:18px; padding-right:18px; } .links { gap:12px; } .page-head { align-items:start; } .page-head h2 { font-size:21px; } }
   </style>
 </head>
 <body>
   <header class="bar"><a class="brand" href="/settings"><span class="mark">鲸</span> 小鲸鱼 / CONTROL</a><nav class="links"><a class="active" href="/settings">运行设置</a><a href="/models">对话模型</a><a href="/">图片库 ↗</a></nav></header>
   <main>
-    <div class="hero"><div><div class="eyebrow">LOCAL CONTROL PANEL · 18902</div><h1>把节奏交给你。</h1><p>管理群聊插话、表情包、QQ 动态、主动私聊和戳一戳互动。保存后，运行中的 QQBridge 会在约 5 秒内应用设置。</p></div><div class="version"><span>当前配置</span><strong id="version">读取中…</strong><span id="loadedAt">—</span></div></div>
-    <div class="layout">
-      <div class="stack">
+    <div class="shell">
+      <aside class="side">
+        <div class="side-head"><div class="tag">NAVIGATION</div><strong>设置分区</strong></div>
+        <nav id="nav" class="nav" aria-label="设置分区"></nav>
+        <div class="side-foot">点击卡片标题可折叠子项；窄屏时导航自动变为顶部横滑。</div>
+      </aside>
+      <div class="content">
+        <div class="hero"><div><div class="eyebrow">LOCAL CONTROL PANEL · 18902</div><h1>把节奏交给你。</h1><p>按分区管理回复、语音与点歌、画图、QQ 动态和主动私聊。左侧切换分区，每块卡片可点击标题折叠；保存后，运行中的 QQBridge 会在约 5 秒内应用设置。</p></div><div class="version"><span>当前配置</span><strong id="version">读取中…</strong><span id="loadedAt">—</span></div></div>
+        <div id="content" class="pages"></div>
+      </div>
+    </div>
+    <div id="sections" class="stack" hidden>
         <section><div class="section-head"><div><div class="tag">REPLY CONTROL</div><h2>聊天回复开关</h2><p>分别控制私聊和群聊；名单里的会话单独保持安静。</p></div></div><div class="section-body"><label class="switch-row"><span><strong>允许私聊回复</strong><small>关闭后不回复任何私聊消息，也不会主动私聊或回应私聊戳一戳。</small></span><input id="privateReplyEnabled" type="checkbox"></label><label class="switch-row"><span><strong>允许群聊回复</strong><small>关闭后所有群都不回复，包括 @、命令、表情包和戳一戳。</small></span><input id="groupReplyEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">不回复的私聊 QQ 号</span><textarea id="disabledPrivateReplies" rows="3" placeholder="每行一个 QQ 号"></textarea><small class="hint">全局私聊开启时，这些联系人仍不回复。</small></label><label class="field"><span class="field-name">不回复的群号</span><textarea id="disabledGroupReplies" rows="3" placeholder="每行一个群号"></textarea><small class="hint">这些群完全不回复；与下方“自然插话”开关不同。</small></label></div></div></section>
         <section><div class="section-head"><div><div class="tag">01 / GROUP CHAT</div><h2>群聊发言</h2><p>未点名消息不再抽签；只按冷却时间决定何时插话。</p></div><div class="number">01</div></div><div class="section-body"><div class="field-grid"><label class="field"><span class="field-name">同群插话冷却</span><div class="input-wrap"><input id="groupCooldown" type="number" min="0" max="300" step="1"><span>秒</span></div><small class="hint">0 表示不冷却。被 @、点名和主人消息不受此限制。</small></label></div><label class="switch-row"><span><strong>允许群友发送“闭嘴 / 解禁”</strong><small>开启后，群内成员可用独立命令控制本群静音，支持“先闭嘴十分钟，鲸鱼”；到时自动恢复，不影响其他群或私聊。</small></span><input id="groupMuteEnabled" type="checkbox"></label><div id="groupList" class="group-list"></div><div class="callout">群聊开关只影响未点名的自然插话；有人明确叫小鲸鱼时仍会回复。</div></div></section>
         <section><div class="section-head"><div><div class="tag">VOICE REPLY</div><h2>语音回复概率</h2><p>语音服务选择“按概率回复”后，普通聊天按此概率发送语音。</p></div></div><div class="section-body"><label class="field"><span class="field-name">普通回复使用语音的概率</span><div class="input-wrap"><input id="voiceReplyProbability" type="number" min="0" max="100" step="1"><span>%</span></div><small class="hint">默认 20%；0% 为只在明确要求时发语音，100% 为每次普通回复发语音。明确要求语音不受此概率限制。</small></label></div></section>
@@ -142,14 +191,112 @@
         <section><div class="section-head"><div><div class="tag">04 / OWNER DM</div><h2>主动私聊主人</h2><p>安静一段时间后发起自然的问候或话题。</p></div><div class="number">04</div></div><div class="section-body"><label class="switch-row"><span><strong>主动发起私聊</strong><small>只发送给主人；模型没有自然话题时会跳过</small></span><input id="ownerEnabled" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">主人未互动多久后尝试</span><div class="input-wrap"><input id="ownerIdle" type="number" min="30" max="10080" step="1"><span>分钟</span></div></label><label class="field"><span class="field-name">检查间隔</span><div class="input-wrap"><input id="ownerCheck" type="number" min="5" max="1440" step="1"><span>分钟</span></div></label><label class="field"><span class="field-name">两次尝试最短间隔</span><div class="input-wrap"><input id="ownerCooldown" type="number" min="60" max="10080" step="60"><span>分钟</span></div></label><label class="field"><span class="field-name">每天最多发送</span><div class="input-wrap"><input id="ownerMax" type="number" min="1" max="20" step="1"><span>条</span></div></label><label class="field"><span class="field-name">开始时间</span><div class="input-wrap"><input id="ownerStart" type="number" min="0" max="23" step="1"><span>点</span></div></label><label class="field"><span class="field-name">结束时间</span><div class="input-wrap"><input id="ownerEnd" type="number" min="1" max="24" step="1"><span>点前</span></div></label></div></div></section>
         <section><div class="section-head"><div><div class="tag">04 / POKE</div><h2>戳一戳互动</h2><p>按 QQ 事件里的目标账号判断是谁被戳，回复和回戳都受频率限制。</p></div><div class="number">04</div></div><div class="section-body"><label class="switch-row"><span><strong>启用戳一戳互动</strong><small>关闭后不回复戳一戳通知</small></span><input id="pokeEnabled" type="checkbox"></label><label class="switch-row"><span><strong>群聊被戳时回复</strong><small>仅别人戳机器人自己的 QQ 号</small></span><input id="pokeGroup" type="checkbox"></label><label class="switch-row"><span><strong>私聊被戳时回复</strong><small>只回应允许私聊的联系人</small></span><input id="pokePrivate" type="checkbox"></label><label class="switch-row"><span><strong>群友互戳时插话</strong><small>默认关闭；开启后可能参与别人之间的戳一戳</small></span><input id="pokeOthers" type="checkbox"></label><label class="switch-row"><span><strong>连续被戳 2 次后回戳</strong><small>同一个人 60 秒内戳机器人 2 次，自动回戳对方</small></span><input id="pokeBack" type="checkbox"></label><div class="field-grid"><label class="field"><span class="field-name">同会话回复冷却</span><div class="input-wrap"><input id="pokeCooldown" type="number" min="0" max="60" step="1"><span>分钟</span></div></label><label class="field"><span class="field-name">同会话每小时上限</span><div class="input-wrap"><input id="pokeHourly" type="number" min="1" max="30" step="1"><span>次</span></div></label></div><div class="field-grid" style="margin-top:18px"><label class="field"><span class="field-name">被戳时的回复</span><textarea id="pokeReplies" rows="4" maxlength="1200"></textarea><small class="hint">每行一句，随机选择；最多 12 行，每行不超过 100 字。</small></label><label class="field"><span class="field-name">群友互戳时的回复</span><textarea id="pokeOthersReplies" rows="4" maxlength="1200"></textarea><small class="hint">仅开启“群友互戳时插话”后使用。</small></label></div><div class="callout">群聊禁言仍优先：禁言的群不会回复或回戳。</div></div></section>
         <section><div class="section-head"><div><div class="tag">05 / STICKERS</div><h2>表情包发送</h2><p>分别控制聊天中顺手发表情，以及有人明确索要时的发图间隔。</p></div><div class="number">05</div></div><div class="section-body"><div class="field-grid"><label class="field"><span class="field-name">普通私聊表情冷却</span><div class="input-wrap"><input id="stickerPrivate" type="number" min="0" max="60" step="1"><span>分钟</span></div><small class="hint">当前的 5 分钟限制就在这里。0 表示不冷却。</small></label><label class="field"><span class="field-name">普通群聊表情冷却</span><div class="input-wrap"><input id="stickerGroup" type="number" min="0" max="60" step="1"><span>分钟</span></div><small class="hint">只影响随聊天附带的表情，不影响文字回复。</small></label><label class="field"><span class="field-name">私聊明确索要间隔</span><div class="input-wrap"><input id="stickerPrivateRequest" type="number" min="0" max="300" step="1"><span>秒</span></div><small class="hint">例如“来点你的表情包”；每次最多发 3 张。</small></label><label class="field"><span class="field-name">群聊明确索要间隔</span><div class="input-wrap"><input id="stickerGroupRequest" type="number" min="0" max="300" step="1"><span>秒</span></div><small class="hint">同一群的请求共用这一间隔。</small></label></div><div class="callout">明确索要表情包会走下方秒级间隔，不受上方普通聊天的分钟级冷却影响。</div></div></section>
+        <section><div class="section-head"><div><div class="tag">06 / IMAGE GENERATION</div><h2>画图功能</h2><p>主人私聊或群聊发送“画图 描述”即可生成；群友需打开开关并 @ 机器人。</p></div><div class="number">06</div></div><div class="section-body">
+          <label class="switch-row"><span><strong>启用画图功能</strong><small>关闭后任何渠道都不会生成图片，主人私聊的随机画图也会停止。</small></span><input id="imageGenEnabled" type="checkbox"></label>
+          <label class="switch-row"><span><strong>允许群友触发</strong><small>开启后群友可在群里 @ 机器人发送“画图 描述”；受按人冷却、按群冷却和每日上限共同限制。主人在群聊里不受此开关限制，始终可用。</small></span><input id="imageGenAllowGroup" type="checkbox"></label>
+          <label class="field"><span class="field-name">群友每日上限</span><div class="input-wrap"><input id="imageGenGroupLimit" type="number" min="0" max="20" step="1"><span>张 / 每群</span></div><small class="hint">0 表示群友暂时不能画。主人私聊不受此上限影响；保存后约 5 秒生效。</small></label>
+          <div class="callout">生成的图片先经过本地视觉审核，不通过的图会静默丢弃，不会发到聊天里。图片只保存在本机 state/imagegen 目录。</div>
+        </div></section>
       </div>
-      <aside class="stack"><section class="status-card"><div class="tag">LIVE STATUS</div><h2>运行状态</h2><div id="applied" class="state waiting">读取中</div><div class="facts"><div class="fact"><span>上次 QQ 动态</span><strong id="lastQzone">—</strong></div><div class="fact"><span>下次动态检查</span><strong id="nextQzone">—</strong></div><div class="fact"><span>上次主动私聊</span><strong id="lastOwner">—</strong></div><div class="fact"><span>最早可再尝试</span><strong id="nextOwner">—</strong></div><div class="fact"><span>今日主动私聊</span><strong id="ownerCount">—</strong></div><div class="fact"><span>桥接心跳</span><strong id="heartbeat">—</strong></div></div></section><section class="events"><div class="tag">RECENT ACTIVITY</div><h2>最近记录</h2><div id="events" class="empty">读取中…</div></section></aside>
-    </div>
+    <div id="statusSections" hidden><section class="status-card"><div class="tag">LIVE STATUS</div><h2>运行状态</h2><div id="applied" class="state waiting">读取中</div><div class="facts"><div class="fact"><span>上次 QQ 动态</span><strong id="lastQzone">—</strong></div><div class="fact"><span>下次动态检查</span><strong id="nextQzone">—</strong></div><div class="fact"><span>上次主动私聊</span><strong id="lastOwner">—</strong></div><div class="fact"><span>最早可再尝试</span><strong id="nextOwner">—</strong></div><div class="fact"><span>今日主动私聊</span><strong id="ownerCount">—</strong></div><div class="fact"><span>桥接心跳</span><strong id="heartbeat">—</strong></div></div></section><section class="events"><div class="tag">RECENT ACTIVITY</div><h2>最近记录</h2><div id="events" class="empty">读取中…</div></section></div>
   </main>
   <div class="savebar"><div class="save-inner"><span id="message" class="save-note">正在读取设置…</span><div class="actions"><button id="reload" type="button">重新读取</button><button id="save" class="primary" type="button" disabled>保存设置</button></div></div></div>
   <script>
     (() => {
       const $ = (id) => document.getElementById(id);
+      const SECTIONS = [
+        { id:'status', label:'运行状态', desc:'确认设置是否已生效，以及最近的任务与频率记录。', tags:['LIVE STATUS','RECENT ACTIVITY'] },
+        { id:'reply', label:'回复与发言', desc:'私聊与群聊总开关、不回复名单、插话节奏和连续消息合并。', tags:['REPLY CONTROL','01 / GROUP CHAT','MESSAGE BATCH'] },
+        { id:'interact', label:'互动与群管理', desc:'戳一戳、表情包发送节奏，以及群好感度与自动退群。', tags:['04 / POKE','05 / STICKERS','GROUP AFFINITY'] },
+        { id:'voice', label:'语音与点歌', desc:'语音回复概率、各家语音合成、克隆音色、普通语音 RVC 与点唱。', tags:['VOICE REPLY','AZURE SPEECH','XFYUN SPEECH','EDGE TTS','LOCAL VOICE CLONE','LIUYING RVC · SPEECH','SINGING'] },
+        { id:'image', label:'画图', desc:'画图总开关、群友触发权限与每日上限。', tags:['06 / IMAGE GENERATION'] },
+        { id:'qzone', label:'QQ 动态', desc:'自动发布动态、名片赞、点赞回谢与好友动态互动。', tags:['02 / QZONE','03 / AFFINITY SOCIAL'] },
+        { id:'owner', label:'主动私聊', desc:'安静一段时间后主动找主人聊天的时间窗与频率。', tags:['04 / OWNER DM'] },
+        { id:'other', label:'其他设置', desc:'未归类的设置项。', tags:[] }
+      ];
+      const pages = new Map();
+      function makeFoldable(section) {
+        const head = section.querySelector('.section-head');
+        if (!head) return;
+        section.classList.add('collapsible');
+        const tools = document.createElement('div'); tools.className = 'head-tools';
+        const number = head.querySelector(':scope > .number');
+        if (number) tools.append(number);
+        const fold = document.createElement('button');
+        fold.type = 'button'; fold.className = 'fold'; fold.textContent = '⌄';
+        fold.setAttribute('aria-label', '展开或收起这一组设置');
+        fold.setAttribute('aria-expanded', 'true');
+        tools.append(fold); head.append(tools);
+        head.setAttribute('role', 'button'); head.tabIndex = 0;
+        const toggle = () => {
+          section.classList.toggle('collapsed');
+          fold.setAttribute('aria-expanded', String(!section.classList.contains('collapsed')));
+        };
+        head.addEventListener('click', (event) => {
+          if (event.target.closest('input,textarea,select,button') && event.target !== fold) return;
+          toggle();
+        });
+        head.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
+        });
+      }
+      function showPage(id, push) {
+        if (!pages.has(id) || !pages.get(id).count) id = 'status';
+        for (const [key, entry] of pages) entry.page.classList.toggle('active', key === id);
+        for (const button of $('nav').children) button.classList.toggle('active', button.dataset.page === id);
+        if (push) history.replaceState(null, '', '#' + id);
+        window.scrollTo({ top:0, behavior:'smooth' });
+      }
+      function buildNavigation() {
+        const nav = $('nav'), content = $('content');
+        const sources = [$('sections'), $('statusSections')];
+        const sections = sources.flatMap((box) => box ? [...box.querySelectorAll(':scope > section')] : []);
+        SECTIONS.forEach((group, index) => {
+          const page = document.createElement('div');
+          page.className = 'page' + (group.id === 'status' ? ' page-status' : '');
+          page.id = 'page-' + group.id;
+          const head = document.createElement('div'); head.className = 'page-head';
+          const copy = document.createElement('div');
+          const tag = document.createElement('div'); tag.className = 'tag';
+          tag.textContent = 'SECTION ' + String(index + 1).padStart(2, '0') + ' / ' + group.id.toUpperCase();
+          const title = document.createElement('h2'); title.textContent = group.label;
+          const desc = document.createElement('p'); desc.textContent = group.desc;
+          copy.append(tag, title, desc);
+          const actions = document.createElement('div'); actions.className = 'page-actions';
+          const foldAll = document.createElement('button'); foldAll.type = 'button'; foldAll.className = 'fold-all'; foldAll.textContent = '收起全部';
+          actions.append(foldAll);
+          head.append(copy, actions); page.append(head);
+          const button = document.createElement('button');
+          button.type = 'button'; button.dataset.page = group.id;
+          const idx = document.createElement('span'); idx.className = 'idx'; idx.textContent = String(index + 1).padStart(2, '0');
+          const label = document.createElement('span'); label.className = 'nav-label'; label.textContent = group.label;
+          button.append(idx, label);
+          button.addEventListener('click', () => showPage(group.id, true));
+          foldAll.addEventListener('click', () => {
+            const items = [...page.querySelectorAll(':scope > section.collapsible')];
+            const collapse = items.some((item) => !item.classList.contains('collapsed'));
+            items.forEach((item) => item.classList.toggle('collapsed', collapse));
+            foldAll.textContent = collapse ? '展开全部' : '收起全部';
+          });
+          pages.set(group.id, { page, button, foldAll, count:0 });
+          if (group.id !== 'other') { nav.append(button); content.append(page); }
+        });
+        for (const section of sections) {
+          const tagText = section.querySelector('.section-head .tag, .tag')?.textContent.trim() || '';
+          const group = SECTIONS.find((item) => item.tags.includes(tagText)) || SECTIONS.find((item) => item.id === 'other');
+          const entry = pages.get(group.id);
+          entry.page.append(section); entry.count += 1;
+          makeFoldable(section);
+        }
+        const fallback = pages.get('other');
+        if (fallback.count) { content.append(fallback.page); nav.append(fallback.button); }
+        else { fallback.page.remove(); fallback.button.remove(); }
+        for (const entry of pages.values()) {
+          if (entry.count && !entry.page.querySelector(':scope > section.collapsible')) entry.foldAll.hidden = true;
+        }
+        const initial = location.hash.replace('#', '');
+        showPage(pages.has(initial) ? initial : 'status', false);
+      }
       let version = '', groups = [], otherDisabled = [], original = '', busy = false;
       const date = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12:false }) : '暂无';
       const number = (id) => { const raw = $(id).value.trim(); return raw === '' ? NaN : Number(raw); };
@@ -180,6 +327,8 @@
           groupInterjectionDisabled: [...otherDisabled, ...groups.filter((id) => !$('group-' + id).checked)],
           stickerCooldown: { privateMs:number('stickerPrivate') * 60000, groupMs:number('stickerGroup') * 60000,
             privateRequestMs:number('stickerPrivateRequest') * 1000, groupRequestMs:number('stickerGroupRequest') * 1000 },
+          imageGen: { enabled:$('imageGenEnabled').checked, allowGroup:$('imageGenAllowGroup').checked,
+            groupDailyLimit:number('imageGenGroupLimit') },
           dailyQzone: { enabled:$('qzoneEnabled').checked, minute:number('qzoneMinute'), minIntervalMs:number('qzoneInterval') * 60000 },
           qzoneLikeReply: { enabled:$('qzoneLikeEnabled').checked, cooldownMs:number('qzoneLikeCooldown') * 60000, maxPerDay:number('qzoneLikeMax') },
           ownerCardLike: { enabled:$('ownerCardLikeEnabled').checked, time:$('ownerCardLikeTime').value },
@@ -220,7 +369,7 @@
         }
       }
       function draw(data) {
-        const required = ['replyControl', 'dailyQzone', 'qzoneLikeReply', 'ownerCardLike', 'qzoneSocial', 'ownerProactive', 'pokeInteraction', 'stickerCooldown', 'messageBatch', 'groupAffinity', 'azureTts', 'xfyunTts', 'edgeTts', 'voiceClone', 'speechRvc', 'singing'];
+        const required = ['replyControl', 'dailyQzone', 'qzoneLikeReply', 'ownerCardLike', 'qzoneSocial', 'ownerProactive', 'pokeInteraction', 'stickerCooldown', 'messageBatch', 'groupAffinity', 'azureTts', 'xfyunTts', 'edgeTts', 'voiceClone', 'speechRvc', 'singing', 'imageGen'];
         if (!data?.settings || required.some((key) => !data.settings[key])) {
           throw new Error('设置页面与管理服务版本不一致，请重启本机设置服务后重新读取。');
         }
@@ -264,6 +413,8 @@
         $('groupMuteEnabled').checked = s.groupMuteEnabled;
         $('stickerPrivate').value = c.privateMs / 60000; $('stickerGroup').value = c.groupMs / 60000;
         $('stickerPrivateRequest').value = c.privateRequestMs / 1000; $('stickerGroupRequest').value = c.groupRequestMs / 1000;
+        $('imageGenEnabled').checked = s.imageGen.enabled; $('imageGenAllowGroup').checked = s.imageGen.allowGroup;
+        $('imageGenGroupLimit').value = s.imageGen.groupDailyLimit;
         $('qzoneEnabled').checked = q.enabled; $('qzoneMinute').value = q.minute; $('qzoneInterval').value = q.minIntervalMs / 60000;
         $('qzoneLikeEnabled').checked = ql.enabled; $('qzoneLikeCooldown').value = ql.cooldownMs / 60000; $('qzoneLikeMax').value = ql.maxPerDay;
         $('ownerCardLikeEnabled').checked = s.ownerCardLike.enabled; $('ownerCardLikeTime').value = s.ownerCardLike.time;
@@ -313,6 +464,7 @@
         } catch (error) { note(error.message, true); }
         finally { button.disabled = false; }
       }
+      buildNavigation();
       document.querySelectorAll('input,textarea').forEach((input) => input.addEventListener('input', changed));
       $('xfyunTtsSpeed').addEventListener('input', () => { $('xfyunSpeedLabel').textContent = $('xfyunTtsSpeed').value; });
       $('reload').addEventListener('click', load); $('save').addEventListener('click', save);

@@ -18,6 +18,7 @@ import { collectExistingGroupIds, initializeGroupInterjectionSettings, isGroupIn
 import { handleRedPacketCandidateNotice, handleSongLibraryCommand, isSongLibraryCommand, normalizeSongCommandText, shouldRouteSongLibraryCommand } from './song-library-commands.mjs';
 import { markFreeQuotaExemptSenders } from './song-library.mjs';
 import { callOnebotApi } from './onebot-api.mjs';
+import { decideImageSendAccess, loadImagePayload, parseSendKey } from './send-image.mjs';
 import { listArchived } from './image-archive.mjs';
 import { readImageAnalyses } from './image-analysis-store.mjs';
 import { makePaidSongPreview, makePaidFullSong } from './paid-song-producer.mjs';
@@ -4924,6 +4925,86 @@ async function main() {
           } catch (error) {
             log(`图片查询失败 ${key} ${messageId}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `图片查询失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+
+        // ── 图片发送端点（qq_draw_image 走这里） ────────────────────────────
+        // 与文本发送共用：控制台令牌、agent token、模式/目标白名单、静音、回复开关、
+        // 每分钟/每小时发送频控；不接受任意本地路径。
+        if (req.method === 'POST' && url.pathname === '/api/send/image') {
+          const body = await readBody();
+          const token = String(body.token ?? '').trim();
+          const rawKey = String(body.key ?? body.chatKey ?? '').trim();
+          const key = rawKey || (body.groupId ? `group:${String(body.groupId).trim()}` : body.userId ? `private:${String(body.userId).trim()}` : '');
+          const caption = String(body.caption ?? '').trim();
+          const imageInput = String(body.image ?? '').trim();
+          const parsedKey = parseSendKey(key);
+          if (!parsedKey) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = parsedKey.kind;
+          const id = parsedKey.id;
+          if (!imageInput) { sendJson({ ok: false, error: 'image 不能为空（base64 或 state/imagegen/ 下的路径）' }, 400); return; }
+          const flag = kind === 'private' ? 'sendPrivate' : 'sendGroup';
+          const guard = decideImageSendAccess({
+            mode: currentMode,
+            token,
+            tokenValid: token ? agentTokenOk(key, token) : false,
+            toolEnabled: token ? v2ToolEnabled(flag) : true,
+            silentBlocked: shouldBlockSilentReply(key),
+            targetAllowed: Number.isFinite(id) && id > 0 && modeAllowed(key, kind, id, cfg, currentMode)
+          });
+          if (!guard.ok) { sendJson({ ok: false, error: guard.error }, guard.status); return; }
+          if (socialV2.paused && token) {
+            sendJson({ ok: false, error: 'AI 已暂停，当前不允许执行发送工具' }, 403);
+            return;
+          }
+          try { assertToolSendAllowed(key); } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 403);
+            return;
+          }
+          const payload = loadImagePayload(imageInput, { rootDir: path.join(ROOT, 'state', 'imagegen') });
+          if (!payload.ok) { sendJson({ ok: false, error: payload.error }, payload.status); return; }
+          const buffer = payload.buffer;
+          const source = payload.source;
+          const sendCfg = cfg.socialV2?.send ?? {};
+          const maxChars = Math.max(1, Number(sendCfg.maxMessageChars) || 500);
+          if (caption.length > maxChars) { sendJson({ ok: false, error: `说明文字不能超过 ${maxChars} 字` }, 400); return; }
+          if (caption && (SENSITIVE_RE.test(caption) || (kind === 'group' && groupIdentityLeak(caption, protectedOwnerQQs(cfg))))) {
+            sendJson({ ok: false, error: '说明文字含敏感信息，已阻止发送' }, 403);
+            return;
+          }
+          const segments = [];
+          if (caption) segments.push({ type: 'text', data: { text: escapeCqText(caption) } });
+          segments.push({ type: 'image', data: { file: `base64://${buffer.toString('base64')}` } });
+          const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+          const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
+          const st = getSocialV2State(key);
+          const now = Date.now();
+          try {
+            const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
+            const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
+            const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
+            const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
+            if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+              return;
+            }
+            st.sendTimes.push(now);
+            if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+            const data = await onebotApi(action, params, 60000);
+            st.lastAiReplyAt = now;
+            st.lastActionAt = now;
+            saveSocialV2State();
+            log(`[send-image] ${key}: 成功 ${Math.round(buffer.length / 1024)}KB source=${source} messageId=${data?.message_id ?? '-'}`);
+            appendActivity(`${key} [send-image] 图片发送成功 ${Math.round(buffer.length / 1024)}KB`);
+            scheduleReplyCheckV2(key);
+            sendJson({ ok: true, key, messageId: data?.message_id ?? null, bytes: buffer.length, source });
+          } catch (error) {
+            const idx = st.sendTimes.indexOf(now);
+            if (idx >= 0) st.sendTimes.splice(idx, 1);
+            saveSocialV2State();
+            log(`[send-image] ${key}: 失败 ${error?.message ?? error}`);
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
           }
           return;
         }

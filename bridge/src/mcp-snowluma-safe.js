@@ -24,6 +24,11 @@ import {
 } from './avatar-image.mjs';
 import { resolveFfmpegPath } from './animated-image.mjs';
 import { readDiaryForTool } from './diary.mjs';
+import { generateImage, normalizeImageGenConfig, pickStylePreset, resolveStylePreset, sanitizeDrawDescription, STYLE_PRESET_NAMES, OUTFIT_NAMES, pickOutfit, TAIL_MODES, EXPRESSION_NAMES, EXPRESSIONS, resolveExpression, VIBE_MODES, VIBES, resolveVibe, drawFailureReply } from './image-gen.mjs';
+import { DRAW_MODERATION_PROMPT } from './image-content-policy.mjs';
+import { inspectStickerImage } from './sticker-vision.mjs';
+import { createDrawToolQuota, decideDrawToolAccess, normalizeDrawToolArgs, DRAW_SIZE_OPTIONS } from './image-draw-tool.mjs';
+import { findImageMeta, formatSelfDrawnTag, sha256Of } from './image-gen-meta.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -1305,7 +1310,13 @@ if (cfg.socialV2?.tools?.getImages !== false) {
         const textParts = [];
         for (const img of images) {
           if (img?.data && img?.mimeType) {
-            textParts.push(`[${img.kind === 'face' ? '表情' : '图片'}${img.index ?? ''}${img.text ? ' ' + img.text : ''}]`);
+            // 复看自己画过的图：按内容 hash 命中元数据，明确标注来源。
+            let tag = '';
+            try {
+              const meta = findImageMeta({ sha256: sha256Of(Buffer.from(img.data, 'base64')) });
+              tag = formatSelfDrawnTag(meta);
+            } catch {}
+            textParts.push(`${tag}[${img.kind === 'face' ? '表情' : '图片'}${img.index ?? ''}${img.text ? ' ' + img.text : ''}]`);
             content.push({ type: 'image', mimeType: img.mimeType, data: img.data });
           } else {
             textParts.push(`[${img.kind === 'face' ? '表情' : '图片'}${img.index ?? ''}${img.text ? ' ' + img.text : '（获取失败）'}]`);
@@ -1541,7 +1552,7 @@ if (cfg.socialV2?.stickerPack?.enabled !== false && cfg.socialV2?.tools?.listLoc
 if (cfg.socialV2?.tools?.listArchiveImages !== false) {
   server.tool(
     'qq_list_archive_images',
-    '搜索主人本地归档图片库并返回图片编号、描述和标签。仅主人私聊可用。主人要求发壁纸/图库图片时，先用本工具查找；如描述不足，再用 qq_get_archive_image 预览。imageId 格式为“日期/文件名”，后续发送时必须原样使用。',
+    '搜索主人本地归档图片库并返回图片编号、描述和标签。仅主人私聊可用。主人要求发壁纸/图库图片时，先用本工具查找；如描述不足，再用 qq_get_archive_image 预览。imageId 格式为“日期/文件名”，后续发送时必须原样使用。主人要“你自己的立绘/自拍”时，query 固定用“形象立绘”（或“自绘·AI生成”），只从这些正面立绘里挑；标有“反面教材/不要这样画”的失败样图已被 appropriate=false 过滤，不会出现在本工具结果里，也不得用其他方式发送。',
     {
       key: z.string().describe('当前主人私聊会话 key，格式 private:QQ号'),
       token: z.string().describe('当前会话令牌'),
@@ -1566,7 +1577,7 @@ if (cfg.socialV2?.tools?.listArchiveImages !== false) {
 if (cfg.socialV2?.tools?.getArchiveImage !== false) {
   server.tool(
     'qq_get_archive_image',
-    '读取主人本地归档图库中的一张图片并以图像内容返回，供视觉模型预览。仅主人私聊可用。imageId 必须来自 qq_list_archive_images；本工具只预览，不会发送到 QQ。',
+    '读取主人本地归档图库中的一张图片并以图像内容返回，供视觉模型预览。仅主人私聊可用。imageId 必须来自 qq_list_archive_images；本工具只预览，不会发送到 QQ。反面教材类图片不可预览，仅用于训练/复盘。',
     {
       key: z.string().describe('当前主人私聊会话 key，格式 private:QQ号'),
       token: z.string().describe('当前会话令牌'),
@@ -1590,7 +1601,7 @@ if (cfg.socialV2?.tools?.getArchiveImage !== false) {
 if (cfg.socialV2?.tools?.sendArchiveImage !== false) {
   server.tool(
     'qq_send_archive_image',
-    '把主人本地归档图库中的一张图片作为真实 QQ 图片发送到当前主人私聊。仅主人私聊可用；imageId 必须来自 qq_list_archive_images。发送前应确认图片符合当前请求，不能把图库内容批量发送。',
+    '把主人本地归档图库中的一张图片作为真实 QQ 图片发送到当前主人私聊。仅主人私聊可用；imageId 必须来自 qq_list_archive_images。发送前应确认图片符合当前请求，不能把图库内容批量发送。发“自己的立绘/自拍”只能选 query=形象立绘 得到的正面图；带“反面教材/不要这样画”标签的失败样图（Q 版、发色跑偏、鳍耳退化、尾巴缺失、半写实等）一律禁止发送。',
     {
       key: z.string().describe('当前主人私聊会话 key，格式 private:QQ号'),
       token: z.string().describe('当前会话令牌'),
@@ -1734,5 +1745,182 @@ if (cfg.socialV2?.tools?.getForwardMsg !== false) {
     }
   );
 }
+
+// ── 自绘图片：主人会话可用；审核+落盘+元数据，不绕过发送白名单 ──────────────
+function drawOwnerIds() {
+  const c = getConfig();
+  return (Array.isArray(c.ownerQQs) && c.ownerQQs.length ? c.ownerQQs : [c.ownerQQ])
+    .filter((id) => id != null && String(id).trim())
+    .map(String);
+}
+
+async function recentSessionMessages(key, token) {
+  try {
+    const data = await agentApi(`/api/socialV2/recent?key=${encodeURIComponent(key)}&limit=8`, {
+      headers: { 'x-agent-token': token }
+    });
+    return Array.isArray(data?.messages) ? data.messages : [];
+  } catch {
+    return [];
+  }
+}
+
+async function drawWithFallback(request) {
+  return generateImage(request, {
+    logger: (line) => console.error(line),
+    inspectImage: (b64, mime) => inspectStickerImage(b64, mime, {
+      baseUrl: cfg.stickerVisionBaseUrl || 'http://127.0.0.1:18901/v1',
+      prompt: DRAW_MODERATION_PROMPT,
+      models: Array.isArray(cfg.stickerVisionModels) && cfg.stickerVisionModels.length ? cfg.stickerVisionModels : undefined
+    })
+  });
+}
+
+server.tool(
+  'qq_draw_image',
+  '给自己画一张图。人物由系统锁定为 DeepSeek 女化形象（纯宝蓝长发、半杏眼、鹅蛋脸、鲸鳍状耳、小鲸鱼发饰），禁止画其他角色、其他动漫 IP 人物或真人，也禁止换发色/种族。服装不再固定旗袍：用 outfit 在六套里选（maid=女仆装、jk=JK 水手服、hoodie=休闲卫衣+短裙、knit=针织衫+百褶裙、yukata=和风浴衣、shirt=简约白衬衫），默认 auto 每次随机，none 表示沿用配置；每套只有小鲸鱼刺绣/挂件这类低调元素，且不改变脸和发型。尾巴用 tail 三档：required=正身必带、optional=构图拥挤或侧身时省略（默认）、off=完全不画，改由发饰/刺绣/耳鳍维持辨识度。表情用 expression 控制，优先级：显式传参 > 按最近对话情绪推断 > 默认温柔浅笑（gentle）；可选 gentle=温柔浅笑、happy=开心大笑、shy=害羞脸红、pout=委屈撅嘴、smug=得意坏笑、surprised=惊讶睁大眼、sleepy=困倦半睡、serious=认真皱眉。换表情只动眉眼嘴与脸红，绝不改脸型、眼型、五官位置、发型发色与耳饰。气质用 vibe 控制：cute=萌系（更圆润、眼睛更亮，但仍是成年女性体型）、youth=青春少女、mature=成熟御姐，默认 auto 按权重随机并在同一会话里避开上一档；气质只调幼态感、圆润度、眼神与姿态，同样不换脸不换发色。preset 只影响构图与光影（keyvisual=成人比例日系立绘、closeup=番剧半身特写、maid=三分之二身、jk=夜景立绘、qipao=旗袍夜景构型）。prompt 只写动作、场景与光线，不要改人物设定。正常出图默认带角色参考图（没传就用配置的锚点图），缺参考图会直接拒绝而不是画歪。仅主人会话可用：主人私聊，或群里主人本人刚发过话；非主人调用会直接拒绝且不生成。可选传 referenceImage（本地绝对路径或 data URL，png/jpeg/webp，最多 3 张）启用“保角色换场景”。图片先经过内容审核才会落盘到 state/imagegen/，并写入同名元数据（prompt/negativePrompt/seed/provider/model/参考图哈希/outfit/tail/size/createdAt/chatKey/trigger/senderId）。画完会通过边车 /api/send/image 按当前会话自动发图（共用白名单/静音/限频），发送失败会明确返回原因，不会静默。',
+  {
+    key: z.string().describe('当前会话 key，格式 private:QQ号 或 group:群号'),
+    token: z.string().describe('当前会话令牌'),
+    prompt: z.string().trim().min(1).max(200).describe('画面内容描述，1 到 200 字；人物由系统锁定为 DeepSeek 女化形象（纯宝蓝长发、半杏眼、鹅蛋脸、鲸鳍状耳），这里只写动作、场景、光线与表情，不要写人物外貌/发色/种族，也不要写 Q版/三头身/萌系/猫耳帽等画风词'),
+    size: z.enum(DRAW_SIZE_OPTIONS).optional().describe('可选尺寸；默认沿用 config.json 的 imageGen 尺寸'),
+    style: z.string().trim().max(120).optional().describe('可选补充画面细节或光线，最多 120 字；不能用来覆盖系统画风，Q版/三头身/猫耳帽一类词会被清掉'),
+    preset: z.enum(STYLE_PRESET_NAMES).optional().describe('可选画风档位（只影响构图与光影）：keyvisual=成人比例日系立绘（默认），closeup=番剧半身特写，maid=三分之二身立绘，jk=夜景立绘，qipao=旗袍夜景构型；不填则用 config 里的 stylePreset，config.styleRotate=true 时随机轮换'),
+    outfit: z.enum([...OUTFIT_NAMES, 'auto', 'none']).optional().describe('可选服装：maid/jk/hoodie/knit/yukata/shirt，auto=每次随机（默认），none=沿用配置里的服装描述；换装不改变脸与发型'),
+    tail: z.enum(TAIL_MODES).optional().describe('可选尾巴档位：required=正身必带一条鲸尾，optional=构图拥挤/侧身时省略（默认），off=不画尾巴、改用发饰与刺绣保证辨识度'),
+    expression: z.enum(EXPRESSION_NAMES).optional().describe('可选表情：gentle=温柔浅笑（默认）、happy=开心大笑、shy=害羞脸红、pout=委屈撅嘴、smug=得意坏笑、surprised=惊讶睁大眼、sleepy=困倦半睡、serious=认真皱眉。不传时按最近几条对话的语气推断（逗/夸/凶/撒娇等），推断不出用 gentle；只改眉眼嘴与脸红，不改脸型与发型'),
+    vibe: z.enum([...VIBE_MODES, 'auto']).optional().describe('可选气质/年龄表现：cute=萌系（脸略圆润、眼睛更亮更软，但必须是成年女性体型，绝不画成小孩）、youth=青春少女、mature=成熟御姐、auto=默认随机（萌系与青春权重更高，同一会话尽量不连续重复）。只调幼态感/圆润度/眼神/姿态，不换脸、不改发色、不换耳饰'),
+    referenceImage: z.string().trim().max(3000).optional().describe('可选参考图：本地绝对路径（png/jpeg/webp）或 data:image/...;base64,...；用于保角色换场景，仅当生图后端声明支持参考图时生效（当前 dashscope），最多 3 张、单张不超过 10MB、边长 256–4096；不传时用配置里的角色锚点'),
+    chatKey: z.string().optional().describe('可选会话标识，通常留空（默认使用 key）')
+  },
+  async ({ key, token, prompt, size, style, chatKey, preset, outfit, tail, expression, vibe, referenceImage }) => {
+    try {
+      const config = normalizeImageGenConfig(getConfig().imageGen || {});
+      if (!config.enabled) {
+        return { content: [{ type: 'text', text: '画图功能现在是关着的，这次没有画。' }] };
+      }
+      const args = normalizeDrawToolArgs({ prompt, size, style, chatKey });
+      if (!args.ok) return { content: [{ type: 'text', text: args.reply }] };
+
+      await authorizeRead(key, token);
+
+      // chatKey 只能与当前会话一致，避免用别的会话标识绕过权限。
+      const currentKey = String(key ?? '').trim();
+      if (args.request.chatKey && args.request.chatKey !== currentKey) {
+        return { content: [{ type: 'text', text: 'chatKey 与当前会话不一致，这次没有画。' }] };
+      }
+      const sessionKey = currentKey;
+      const owners = drawOwnerIds();
+      // 私聊也会拉最近消息，用于没显式传 expression 时按语境推断表情。
+      const recentMessages = await recentSessionMessages(key, token);
+      const contextText = recentMessages
+        .map((message) => String(message?.text ?? message?.content ?? ''))
+        .filter(Boolean)
+        .join('\n');
+      const expressionChoice = resolveExpression({ expression, context: contextText });
+      // 气质：显式传参优先；auto 时按会话避开上一档随机。
+      const vibeChoice = resolveVibe(vibe, key || chatKey || '');
+      // 服装 auto 时按最终气质重选，避免先随机出与气质违和的组合（萌系配女仆装等）。
+      const finalOutfit = outfit && outfit !== 'auto'
+        ? outfit
+        : (config.outfit === 'none' ? 'none' : pickOutfit(Math.random, vibeChoice.name));
+      const access = decideDrawToolAccess({ key: sessionKey, owners, recentMessages });
+      if (!access.allowed) return { content: [{ type: 'text', text: access.reply }] };
+
+      const quota = createDrawToolQuota();
+      const quotaCheck = quota.check({ cooldownMs: config.ownerCooldownMs, dailyLimit: config.ownerDailyLimit });
+      if (!quotaCheck.ok) {
+        return {
+          content: [{
+            type: 'text',
+            text: quotaCheck.reason === 'daily-limit' ? '今天的画图额度用完了，明天再画。' : '刚画过一张，歇一会再画。'
+          }]
+        };
+      }
+      const chosenSize = args.request.size || config.size;
+      const [width, height] = chosenSize.split('x').map(Number);
+      const presetName = preset || (config.styleRotate ? pickStylePreset() : config.stylePreset);
+      const stylePreset = resolveStylePreset(presetName);
+      const extraStyle = sanitizeDrawDescription(args.request.style);
+      // 分层模板：默认沿用配置里已解析的六层；显式换 preset 才用该档的层；
+      // style 参数只追加到光影层，避免整段覆盖掉分层结构。
+      const promptLayers = { ...config.promptLayers };
+      if (presetName !== config.stylePreset) Object.assign(promptLayers, stylePreset.layers);
+      if (extraStyle) promptLayers.lighting = `${promptLayers.lighting}，${extraStyle}`;
+      const merged = normalizeImageGenConfig({
+        ...(getConfig().imageGen || {}),
+        width,
+        height,
+        stylePreset: stylePreset.name,
+        promptLayers,
+        negativePrompt: stylePreset.negativePrompt,
+        outfit: finalOutfit,
+        tail: tail || config.tail,
+        vibe: vibeChoice.name,
+        expression: expressionChoice.name
+      });
+      const isGroup = String(sessionKey).startsWith('group:');
+      const target = String(sessionKey).split(':')[1];
+      const lastOwnerMessage = [...recentMessages].reverse().find((message) => message?.isOwner);
+
+      const result = await drawWithFallback({
+        description: args.request.prompt,
+        config: merged,
+        target,
+        isGroup,
+        chatKey: sessionKey,
+        trigger: 'tool',
+        senderId: isGroup ? String(lastOwnerMessage?.userId || '') : String(target),
+        expression: expressionChoice.name,
+        expressionSource: expressionChoice.source,
+        vibe: vibeChoice.name,
+        vibeSource: vibeChoice.source,
+        referenceImage: referenceImage || null
+      });
+
+      if (!result.ok) {
+        return { content: [{ type: 'text', text: drawFailureReply(result) }] };
+      }
+
+      quota.record();
+
+      const kb = Math.round(result.buffer.length / 1024);
+      const moderation = result.analysis
+        ? `审核通过（confidence=${Number(result.analysis.confidence) || 0}）`
+        : '本次未开启审核';
+      let delivery = { ok: false, error: '发送未执行' };
+      try {
+        delivery = await agentApi('/api/send/image', {
+          method: 'POST',
+          headers: { 'x-agent-token': token },
+          body: JSON.stringify({ key: sessionKey, token, image: result.filePath })
+        });
+      } catch (error) {
+        delivery = { ok: false, error: error?.message ?? String(error) };
+      }
+      const summary = [
+        `画好了：${result.filePath}`,
+        `画风档位：${stylePreset.name}（${stylePreset.label}）`,
+        `服装：${result.meta?.outfit || merged.outfit}，尾巴：${result.meta?.tail || merged.tail}`,
+        `表情：${EXPRESSIONS[result.meta?.expression || expressionChoice.name]?.label || expressionChoice.name}（来源：${result.meta?.expressionSource || expressionChoice.source}）`,
+        `气质：${VIBES[result.meta?.vibe || vibeChoice.name]?.label || vibeChoice.name}（来源：${result.meta?.vibeSource || vibeChoice.source}）`,
+        `耗时 ${(result.ms / 1000).toFixed(1)}s，${result.width}×${result.height}，${result.mime}，${kb} KB，provider=${result.provider}/${result.model}（tier=${result.tier}，seed=${result.seed}${result.references?.length ? `，参考图 ${result.references.length} 张` : ''}）`,
+        `审核：${moderation}`,
+        `元数据：${result.metaPath || '未写入'}`,
+        delivery?.ok
+          ? `已发送到 ${sessionKey}，messageId=${delivery.messageId ?? '-'}`
+          : `图已生成，但发送失败：${delivery?.error || '未知原因'}`
+      ].join('\n');
+      return {
+        content: [
+          { type: 'text', text: summary },
+          { type: 'image', mimeType: result.mime, data: result.buffer.toString('base64') }
+        ]
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `画图失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
 
 await server.connect(new StdioServerTransport());

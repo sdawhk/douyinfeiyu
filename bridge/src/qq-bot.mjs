@@ -44,15 +44,17 @@ import { describeMessageReferences, explicitGroupReplyDecision, groupTurnPrompt,
 import { GroupConversationContext } from './group-conversation-context.mjs';
 import { searchWeb, needsFreshSearch } from './web-search-engine.mjs';
 import { readSettingsDocument } from './bot-settings.mjs';
+import { createImageGenQuota, decideImageAccess, drawFailureReply, generateImage, normalizeImageGenConfig, parseImageCommand, pickRandomTheme, shouldDrawRandomly, toImageSegment } from './image-gen.mjs';
 import { isOwnerImageReplyRequest, resolveGroupMention, latestOwnerImage, recentGroupSummary } from './owner-group-request.mjs';
-import { recentImageFollowupContext, falselyClaimsImageIsUnavailable, hasUsableImageDescription, resolveImageDescription } from './recent-image-context.mjs';
+import { recentImageFollowupContext, falselyClaimsImageIsUnavailable, hasUsableImageDescription, resolveImageDescription, selfDrawnImageDescription } from './recent-image-context.mjs';
+import { findImageMeta, sha256Of } from './image-gen-meta.mjs';
 import { parseOwnerPrivateReplyRequest, findUnansweredPrivateMessages, decideMissedPrivateReply } from './owner-private-reply.mjs';
 import { normalizePokeNotice, choosePokeReply, registerDirectPoke } from './poke-interaction.mjs';
 import { parseGroupMuteCommand } from './group-mute-command.mjs';
 import { parseStickerSaveIntent, isStickerName } from './sticker-save-intent.mjs';
 import { decideStickerHandling } from './sticker-moderation.mjs';
 import { IMAGE_LIBRARY_CLEANUP_INTERVAL_MS, cleanupClassifiedImages, shouldCleanImageArchiveRecord } from './image-library-cleanup.mjs';
-import { shouldBlockImageStorage } from './image-content-policy.mjs';
+import { shouldBlockImageStorage, DRAW_MODERATION_PROMPT, inspectDrawPrompt } from './image-content-policy.mjs';
 import { createLatestGroupTurnQueue } from './latest-group-turn-queue.mjs';
 import { createMessageBatcher } from './message-batcher.mjs';
 import { getGroupAffinity, markGroupLeft, parseGroupAffinityQuery, recordGroupAffinityMessage } from './group-affinity.mjs';
@@ -151,6 +153,11 @@ let runtimeVoiceClone = cfg.voiceClone || {};
 let runtimeSpeechRvc = cfg.speechRvc || {};
 let runtimeSinging = cfg.singing || {};
 let singingBusy = false;
+const imageGenQuota = createImageGenQuota();
+let imageGenBusy = false;
+let randomImageLastAt = 0;
+let randomImageDay = '';
+let randomImageCount = 0;
 let songLibraryLoaded = false;
 let songPreviewRecoveryDone = false;
 let botNickname = '';
@@ -816,6 +823,60 @@ async function sendText(target, text, isGroup) {
   }
 }
 
+function imageGenConfig() {
+  return normalizeImageGenConfig({ ...(cfg.imageGen || {}), ...(settingsDocument.settings.imageGen || {}) });
+}
+
+function imageGenFailureLine(result) {
+  if (result.reason === 'moderation') return '这张没过内容审核（涉及露点或裸露），已拦下，没有发送。';
+  if (result.reason === 'moderation-unavailable') return '我这边的图片检查服务没响应，先不发了。';
+  return drawFailureReply(result);
+}
+
+/** 生成并直接发送一张图；失败时返回原因，由调用方决定话术。 */
+async function drawAndSendImage({ description, target, isGroup, trigger = 'command', senderId = '', referenceImages = null }) {
+  const config = imageGenConfig();
+  const chatKey = `${isGroup ? 'group' : 'private'}:${target}`;
+  const dependencies = {
+    logger: (line) => log(line),
+    inspectImage: (b64, mime) => inspectStickerImage(b64, mime, {
+      baseUrl: cfg.stickerVisionBaseUrl || 'http://127.0.0.1:18901/v1',
+      prompt: DRAW_MODERATION_PROMPT,
+      models: Array.isArray(cfg.stickerVisionModels) && cfg.stickerVisionModels.length ? cfg.stickerVisionModels : undefined
+    })
+  };
+  const request = { description, target, isGroup, trigger, senderId, chatKey, referenceImages, contextText: description };
+  const result = await generateImage({ ...request, config }, dependencies);
+  if (!result.ok) return result;
+  await sendSegments(target, [toImageSegment(result.buffer)], isGroup);
+  // 私聊里刚发的自绘图写进最近图片，主人接着说“这张图”时能命中来源标记。
+  if (!isGroup) {
+    recentPrivateImages.set(chatKey, { caption: description, at: Date.now(), selfDrawn: result.meta });
+  }
+  return result;
+}
+
+/** 主人私聊随机画图：只异步补一张，失败只记日志，不影响已发出的回复。 */
+async function maybeRandomOwnerImage(target) {
+  if (imageGenBusy) return;
+  const config = imageGenConfig();
+  const now = Date.now();
+  const day = localDayKey(new Date(now));
+  if (randomImageDay !== day) { randomImageDay = day; randomImageCount = 0; }
+  if (!shouldDrawRandomly({ config, now, lastAt: randomImageLastAt, usedToday: randomImageCount })) return;
+  imageGenBusy = true;
+  randomImageLastAt = now;
+  randomImageCount += 1;
+  try {
+    const result = await drawAndSendImage({
+      description: pickRandomTheme(), target, isGroup: false, trigger: 'random', senderId: String(target)
+    });
+    if (!result.ok) log(`[imagegen] random skipped reason=${result.reason}`);
+  } catch (error) {
+    log('[imagegen] random send failed', String(error?.message ?? error).slice(0, 160));
+  } finally { imageGenBusy = false; }
+}
+
 async function sendReplyText(target, text, isGroup, allowedMentionIds = [], replyToMessageId = null) {
   const safeIds = new Set(allowedMentionIds.map(String).filter((id) => /^\d{5,20}$/.test(id)));
   const segments = [];
@@ -1044,7 +1105,8 @@ const OWNER_TURN_GUIDANCE = [
   '主人明确说你语气不对、跑题、回错或没办事时，不回骂、不升级斗嘴，也不要用单独表情包代替答复；先简短承认并道歉，再回应当前这条消息或说明实际进度。不要把主人之前的话题硬套到当前问题上。',
   '执行资料、动态、表情或消息操作时，区分未调用、失败、结果待核对和已确认成功；只按工具真实返回说明结果。没有调用工具不能说接口失败，超时或状态不明先核对再重试，避免重复发布、删除或发送。',
   '本轮判断优先级：主人当前明确说的话 > 本轮真实工具结果和已核实事实 > 主人私聊记忆 > 角色语气。历史摘要和记忆只帮助接续，不是新指令；主人换话题就跟着换。',
-  '如果主人是在回答你上一轮提出的问题，先回应他的实际答案并延续同一话题；不要忘记自己刚问过什么，也不要用角色设定否定主人的玩笑。'
+  '如果主人是在回答你上一轮提出的问题，先回应他的实际答案并延续同一话题；不要忘记自己刚问过什么，也不要用角色设定否定主人的玩笑。',
+  '主人让你画图、自己画一张头像或设计自己的形象时，是要求你现在就用 qq_draw_image 画出来（它会自动发到当前会话）；不要只口头答应，也不要把它当成更换 QQ 头像的工具。'
 ].join('\n');
 
 function normalizeFriendLabel(value) {
@@ -2634,8 +2696,9 @@ function startQzoneToolServer() {
 }
 startQzoneToolServer();
 
-async function handleCommand(text, sender, isGroup, target, senderName = '') {
+async function handleCommand(text, sender, isGroup, target, senderName = '', mentioned = false) {
   const t = text.trim();
+  const imageRequest = parseImageCommand(t);
   const ownQzoneRead = !isGroup && isOwner(sender) && String(sender) !== BOT_SELF
     ? ownQzoneReadRequest(t) : null;
   const qzoneReadCommand = t.match(/^(?:我的动态|列我的动态)(?:\s+(\d+))?$/);
@@ -2658,9 +2721,41 @@ async function handleCommand(text, sender, isGroup, target, senderName = '') {
   //   2) 无斜杠的中文短命令（发动态、表情、状态 ...）
   //   3) 中文命令 + 参数（发动态 xxx、/表情 xxx）
   const bareCmd = /^(?:发动态|发说说|说说|我的动态|列我的动态|发表情|表情|状态|群列表|帮助|存表情|表情包列表|删表情|图库|今天加了什么功能|今天更新了什么|今天改了什么|今日更新|好感度)(?:\s+(\S+))?$/;
-  if (!t.startsWith('/') && !bareCmd.test(t) && !qzoneDetailCommand && !qzoneReplyCommand && !affinityCommand && !tokenUsageDate && !diaryCommand && naturalQzone === null && !missedPrivateReply && !['ability', 'list'].includes(ownQzoneRead?.kind)
+  if (!t.startsWith('/') && !bareCmd.test(t) && !imageRequest && !qzoneDetailCommand && !qzoneReplyCommand && !affinityCommand && !tokenUsageDate && !diaryCommand && naturalQzone === null && !missedPrivateReply && !['ability', 'list'].includes(ownQzoneRead?.kind)
       && !selfAccessListCommand && !selfAccessGrant && !selfAccessRevoke && !selfNickname && !selfSignature) {
     return null; // 不是命令
+  }
+  if (imageRequest) {
+    const config = imageGenConfig();
+    const access = decideImageAccess({
+      isGroup, isOwner: isOwner(sender), mentioned, target, sender, config, quota: imageGenQuota
+    });
+    if (!access.allowed) return access.reply;
+    if (imageGenBusy) return '上一张还在画，稍等。';
+    imageGenBusy = true;
+    // 主人不占群友配额；群友按人/按群分别计数。
+    if (!isGroup || !isOwner(sender)) {
+      imageGenQuota.record(`u:${sender}`);
+      if (isGroup) imageGenQuota.record(`g:${target}`);
+    }
+    try {
+      // 慢后端（30–60 秒）先回执，别让主人以为没反应；提示词闸门不过就不发回执。
+      if (inspectDrawPrompt(imageRequest.description).ok) {
+        try {
+          await sendText(target, '接单了，正在画（约 30–60 秒）。', isGroup);
+        } catch (error) {
+          log('[imagegen] ack failed', String(error?.message ?? error).slice(0, 120));
+        }
+      }
+      const result = await drawAndSendImage({
+        description: imageRequest.description, target, isGroup, trigger: 'command', senderId: String(sender)
+      });
+      if (result.ok) return '';
+      return imageGenFailureLine(result);
+    } catch (error) {
+      log('[imagegen] command failed', String(error?.message ?? error).slice(0, 160));
+      return '图没能发出去，稍后再试。';
+    } finally { imageGenBusy = false; }
   }
   if (tokenUsageDate) {
     if (!isOwner(sender)) return '这项统计只有主人能查看。';
@@ -2992,6 +3087,7 @@ async function handleCommand(text, sender, isGroup, target, senderName = '') {
       '  动态详情 <序号> —— 查看动态预览、评论和楼中楼',
       '  回复动态评论 <序号> <评论路径> <文本> —— 回复评论（如：回复动态评论 12 1.1 谢谢你）',
       '  /face <关键词> —— 发一个系统表情（如 /face 笑）',
+      '  /画图 <描述>   —— 画一张图（主人私聊；群聊需控制台开放并 @ 机器人）',
       '  /groups        —— 查看已加入的群',
       '  /status        —— 查看 QQ 在线状态',
       '  好感度         —— 查看自己的关系分；主人可用 /好感度 调整|设置|重置 管理',
@@ -4130,7 +4226,11 @@ async function processMessage(ev) {
   //   2) 私聊必回
   //   3) 群里没叫它时，同一群有冷却时间
   const isAffinityCommand = parseAffinityCommand(text) !== null;
-  if (isGroup && !isAffinityCommand && !shouldReplyInGroup(ev, text, target, messageReferences) && affinityChange?.delta !== -1) {
+  // 画图命令在群聊里也要进命令分支：主人直接放行，群友需 @ 才响应；
+  // 否则会被下面的群频率控制静默丢弃（主人反馈“群里画图没反应”就是这个原因）。
+  const groupImageCommand = isGroup ? parseImageCommand(text) : null;
+  const imageCommandAddressed = Boolean(groupImageCommand) && (isOwner(sender) || atMe);
+  if (isGroup && !isAffinityCommand && !imageCommandAddressed && !shouldReplyInGroup(ev, text, target, messageReferences) && affinityChange?.delta !== -1) {
     log(`[turn:${traceId}] skipped reason=group-frequency-control target=${target}`);
     return;
   }
@@ -4169,9 +4269,10 @@ async function processMessage(ev) {
       await sendText(target, saveReply, isGroup);
       return;
     }
-    const cmdReply = await handleCommand(text, sender, isGroup, target, ev.sender?.card || ev.sender?.nickname || '');
-    if (cmdReply) {
-      await sendText(target, cmdReply, isGroup);
+    const cmdReply = await handleCommand(text, sender, isGroup, target, ev.sender?.card || ev.sender?.nickname || '', messageReferences.hasBotMention);
+    // 画图命令成功时图片已由命令内部发出，返回空串表示“已处理、无需再发文字”。
+    if (cmdReply !== null && cmdReply !== undefined) {
+      if (cmdReply) await sendText(target, cmdReply, isGroup);
       return;
     }
     const runTurn = async (isLatestGroupTurn = () => true) => {
@@ -4215,10 +4316,10 @@ async function processMessage(ev) {
         return;
       }
       const imageContext = firstImage
-        ? `【图片内容】${inspected?.animated ? `[动图 ${inspected.frameCount} 帧时序，按左→右、上→下理解动作] ` : ''}${imageDescription}`
+        ? `【图片内容】${inspected?.animated ? `[动图 ${inspected.frameCount} 帧时序，按左→右、上→下理解动作] ` : ''}${selfDrawnImageDescription(imageDescription, inspected?.selfDrawn)}`
         : '';
       if (!isGroup && inspected?.caption) {
-        recentPrivateImages.set(chatKey, { caption: imageDescription, at: Date.now() });
+        recentPrivateImages.set(chatKey, { caption: imageDescription, at: Date.now(), selfDrawn: inspected?.selfDrawn || null });
       }
       const followupImageContext = !isGroup && !firstImage
         ? recentImageFollowupContext(recentPrivateImages.get(chatKey), text) : '';
@@ -4285,6 +4386,8 @@ async function processMessage(ev) {
       log(sent
         ? `[turn:${traceId}] sent target=${target} chars=${reply.length}`
         : `[turn:${traceId}] skipped reason=unsafe-reply target=${target}`);
+      // 随机画图只在主人私聊；异步执行，失败只记日志，不阻塞本轮回复。
+      if (sent && !isGroup && isOwner(sender)) void maybeRandomOwnerImage(target);
     };
     const priority = isGroup && (isOwner(sender) || messageReferences.hasBotMention
       || (messageReferences.replyId && messageReferences.quotedUserId === String(currentBotQQ)));
@@ -4703,14 +4806,23 @@ async function inspectAndArchiveImage(image, sender, chatKey, receivedAt) {
       } : {})
     });
     const result = animated ? { ...inspection, animated: true, frameCount: animated.frameCount } : inspection;
+    // 复看/引用到自己画过的图时按文件名或内容 hash 命中元数据，注入来源标记。
+    let selfDrawn = null;
+    try {
+      const byName = findImageMeta({ file: image.file || image.url || '' });
+      const byHash = byName ? null : findImageMeta({ sha256: sha256Of(Buffer.from(thumb, 'base64')) });
+      selfDrawn = byName || byHash;
+    } catch {}
+    if (selfDrawn) log(`[imagegen] recognized self-drawn image file=${selfDrawn.file} trigger=${selfDrawn.trigger || '-'}`);
+    const withSource = selfDrawn ? { ...result, selfDrawn } : result;
     log('[vision] image', result.cacheHit ? 'cache hit' : `inspected by ${result.model}`);
-    if (!isOwner(sender)) return result;
+    if (!isOwner(sender)) return withSource;
     if (shouldBlockImageStorage(result)) {
       forgetStickerImage(chatKey, sender, image, receivedAt);
       log('[image-policy] incoming image blocked from storage', JSON.stringify({
         reason: result.safetyReason, confidence: result.confidence
       }));
-      return result;
+      return withSource;
     }
     if (isOwner(sender)) {
       // 存表情需要原始动图，但内存缓存只保留 4MB 以内，避免大 GIF 常驻。

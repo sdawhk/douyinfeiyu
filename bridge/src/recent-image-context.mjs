@@ -1,3 +1,5 @@
+import { formatSelfDrawnTag } from './image-gen-meta.mjs';
+
 const IMAGE_FOLLOWUP_MS = 5 * 60_000;
 const UNRECOGNIZED_IMAGE = /(?:无法|不能|没法|看不清|识别不出|未能).{0,14}(?:识别|看清|辨认|图片|图像|画面|内容|文字)|(?:图片|图像|画面|内容|文字).{0,14}(?:无法|不能|没法|看不清|识别不出|未能)|看不出(?:图片|图像|画面|内容)/i;
 const MEDIA_PLACEHOLDER = /^(?:\[?(?:图片|动画表情|表情|动图)\]?|QQ 图片|QQ 动态表情|未知图片|无可用描述)$/i;
@@ -17,10 +19,19 @@ export function resolveImageDescription({ caption = '', summary = '', animatedFa
   return animatedFallback ? ANIMATED_FALLBACK_DESCRIPTION : '';
 }
 
+/** 自绘图描述前缀：让模型知道这张图不是别人发的。 */
+export function selfDrawnImageDescription(description, meta) {
+  const text = String(description ?? '').trim();
+  const tag = formatSelfDrawnTag(meta);
+  return tag ? `${tag}${text}` : text;
+}
+
 export function recentImageFollowupContext(image, text, now = Date.now()) {
   if (!image?.caption || now - image.at < 0 || now - image.at > IMAGE_FOLLOWUP_MS) return '';
   if (!/(?:图|照片|截图|画面|刚才|刚发|这个|那个|这样|如果是你|你会怎么|怎么看|你觉得|这事)/.test(String(text))) return '';
-  return `【你刚才收到的图片，识图结果】${image.caption}\n用户正在接着谈这张图片。根据已识别内容回答；不要声称看不到图片。`;
+  const caption = selfDrawnImageDescription(image.caption, image.selfDrawn);
+  const source = image.selfDrawn ? '这张图是你自己画的，不要当成别人发来的图片。' : '用户正在接着谈这张图片。';
+  return `【你刚才收到的图片，识图结果】${caption}\n${source}根据已识别内容回答；不要声称看不到图片。`;
 }
 
 export function falselyClaimsImageIsUnavailable(reply) {

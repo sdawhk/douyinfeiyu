@@ -33,6 +33,7 @@ export function publicSettings(config) {
   const speechRvc = config.speechRvc || {};
   const singing = config.singing || {};
   const replyControl = config.replyControl || {};
+  const imageGen = config.imageGen || {};
   return {
     voiceReplyProbability: Number.isInteger(config.voiceReplyProbability) && config.voiceReplyProbability >= 0 && config.voiceReplyProbability <= 100 ? config.voiceReplyProbability : 20,
     replyControl: {
@@ -138,6 +139,11 @@ export function publicSettings(config) {
       maxPerHour: poke.maxPerHour ?? 6,
       replies: poke.replies ?? '戳到我啦？\n在呢，怎么啦？\n再戳就要反击啦。',
       othersReplies: poke.othersReplies ?? '你们戳来戳去的，好热闹。'
+    },
+    imageGen: {
+      enabled: imageGen.enabled !== false,
+      allowGroup: imageGen.allowGroup === true,
+      groupDailyLimit: Number.isInteger(imageGen.groupDailyLimit) ? imageGen.groupDailyLimit : 3
     }
   };
 }
@@ -169,6 +175,7 @@ export function validateSettings(value) {
   const voiceClone = value.voiceClone || {};
   const speechRvc = value.speechRvc || {};
   const replyControl = value.replyControl;
+  const imageGen = value.imageGen;
   if (!replyControl || typeof replyControl !== 'object') throw Object.assign(new Error('聊天回复开关缺失'), { status: 400 });
   const replyIds = (ids, name) => {
     if (!Array.isArray(ids)) throw Object.assign(new Error(`${name}列表无效`), { status: 400 });
@@ -346,6 +353,11 @@ export function validateSettings(value) {
       maxPerHour: integer(p.maxPerHour, 1, 30, '戳一戳每小时上限'),
       replies: pokeReplies(p.replies, '被戳回复'),
       othersReplies: pokeReplies(p.othersReplies, '群友互戳回复')
+    },
+    imageGen: {
+      enabled: boolean(imageGen?.enabled ?? true, '画图功能'),
+      allowGroup: boolean(imageGen?.allowGroup ?? false, '允许群友触发画图'),
+      groupDailyLimit: integer(imageGen?.groupDailyLimit ?? 3, 0, 20, '群友每日画图上限')
     }
   };
 }
@@ -407,6 +419,7 @@ export function saveSettingsDocument(expectedVersion, value, configPath = CONFIG
   config.qzoneSocial = { ...config.qzoneSocial, ...settings.qzoneSocial };
   config.ownerProactive = { ...config.ownerProactive, ...settings.ownerProactive };
   config.pokeInteraction = { ...config.pokeInteraction, ...settings.pokeInteraction };
+  config.imageGen = { ...config.imageGen, ...settings.imageGen };
   const temp = `${configPath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   writeFileSync(`${configPath}.bak`, raw, 'utf8');
   writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
