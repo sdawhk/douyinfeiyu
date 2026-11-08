@@ -5,8 +5,12 @@ export const IMAGE_LIBRARY_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const PAYMENT_IMAGE = /(?:支付|付款|收款|转账|交易|银行卡).{0,8}(?:截图|凭证|二维码|收款码|付款码|账单|记录)|(?:截图|凭证|二维码|收款码|付款码|账单|记录).{0,8}(?:支付|付款|收款|转账|交易|银行卡)|支付宝|微信支付/i;
 const CHAT_SCREENSHOT = /聊天截图|聊天记录截图|对话截图|私聊截图|群聊截图|聊天记录图片/i;
 
+const CURATED_NEGATIVE_TAG = /反面教材|不要这样画/;
+
 /** Only act on a confident visual classification of a payment image or chat screenshot. */
 export function shouldCleanImageArchiveRecord(analysis) {
+  // 人工归档的反面教材要留在图库里供复盘，不参与自动隔离。
+  if (CURATED_NEGATIVE_TAG.test((Array.isArray(analysis?.tags) ? analysis.tags : []).join(' '))) return false;
   if (shouldBlockImageStorage(analysis)) return true;
   const confidence = Number(analysis?.confidence);
   if (!analysis || !Number.isFinite(confidence) || confidence < 0.8) return false;

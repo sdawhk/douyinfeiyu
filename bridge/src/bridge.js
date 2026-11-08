@@ -965,6 +965,10 @@ async function main() {
     if (analysis.appropriate === false || analysis.sexualSuggestive === true || analysis.grossOrGraphic === true) {
       throw new Error('这张图片未通过发送内容检查，已拒绝发送');
     }
+    // 反面教材样图只用于复盘，绝不允许当作角色立绘发出去。
+    if (/反面教材|不要这样画/.test((Array.isArray(analysis.tags) ? analysis.tags : []).join(' '))) {
+      throw new Error('这是反面教材样图，禁止发送');
+    }
     const stat = fs.statSync(record.path);
     const maxBytes = Math.min(16 * 1024 * 1024, Math.max(1, Number(cfg.socialV2?.archiveImages?.maxBytes) || 10 * 1024 * 1024));
     if (!stat.isFile() || stat.size > maxBytes) throw new Error(`图片过大（${Math.round(stat.size / 1024)}KB），超过图库发送上限`);

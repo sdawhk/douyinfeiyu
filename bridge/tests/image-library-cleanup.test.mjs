@@ -24,6 +24,9 @@ test('cleans confidently flagged sexualized or graphic images and preserves unce
   assert.equal(shouldCleanImageArchiveRecord({ kind: '照片', sexualSuggestive: true, confidence: 0.7 }), false);
   assert.equal(shouldCleanImageArchiveRecord({ kind: '照片', sexualSuggestive: true }), false);
   assert.equal(shouldCleanImageArchiveRecord({ kind: '照片', grossOrGraphic: false, confidence: 0.95 }), false);
+  // 人工归档的反面教材即使 appropriate=false 也保留在图库，供复盘与负向词提炼。
+  assert.equal(shouldCleanImageArchiveRecord({ kind: '自绘测试图', appropriate: false, confidence: 0.9, tags: ['反面教材·发色跑偏·1', '不要这样画·发色跑偏·1'] }), false);
+  assert.equal(shouldCleanImageArchiveRecord({ kind: '自绘测试图', appropriate: false, confidence: 0.9, tags: ['不要这样画·Q版幼态·3'] }), false);
 });
 
 test('cleanup moves matching files and removes aliases only after a successful move', () => {
