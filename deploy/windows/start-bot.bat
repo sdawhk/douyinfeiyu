@@ -199,6 +199,7 @@ if defined START_BOT_DRYRUN echo [dry-run] nothing was started; exiting with 0
 echo  ============================================
 echo   Done. Check status:
 echo     SnowLuma  : http://127.0.0.1:5099
+echo     OneBot    : 3002 (2427256325) / 3010 (1668389572)
 echo     Keys admin: http://127.0.0.1:18901
 echo     Image lib : http://127.0.0.1:18902
 echo  ============================================
