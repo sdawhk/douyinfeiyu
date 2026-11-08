@@ -260,6 +260,11 @@ function loadConfig() {
     agentPreset: file.agentPreset ?? 'qq-chat',
     workspaceTitle: file.workspaceTitle ?? 'QQ 聊天',
     ownerQQ: normalizeOwnerQQ(file.ownerQQ),
+    // 允许配置多个主人 QQ；未配置时退回单个 ownerQQ。
+    ownerQQs: normalizeIdList(file.ownerQQs).length
+      ? normalizeIdList(file.ownerQQs)
+      : (normalizeOwnerQQ(file.ownerQQ) ? [String(normalizeOwnerQQ(file.ownerQQ))] : []),
+    selfQQ: String(file.selfQQ ?? ''),
     allow: {
       private: normalizeIdList(file.allow?.private ?? file.allow?.privates ?? []),
       groups: normalizeIdList(file.allow?.groups ?? file.allow?.group ?? [])
