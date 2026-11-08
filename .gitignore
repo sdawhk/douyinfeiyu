@@ -49,3 +49,5 @@ config.json
 *.swp
 *.bak
 *.bak.*
+# 带时间戳的备份，如 start-bot.bat.bak-20261105
+*.bak-*

@@ -18,3 +18,6 @@ topic-search-state.json
 listener-heartbeat.json
 browse-request*.json
 browse-response-*.json
+
+# 外部工具在本目录留下的 8 位随机名临时文件（内容固定 4 字节，无扩展名）
+/[0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_]
