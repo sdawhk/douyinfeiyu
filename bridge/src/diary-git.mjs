@@ -27,13 +27,26 @@ function runGit(dir, args, { timeoutMs = DIARY_PUSH_TIMEOUT_MS } = {}) {
  * 提交并推送当天日记。dir 本身就是独立仓库根目录，`git add` 只覆盖其中的日记文件。
  * @returns {Promise<{ok:boolean, reason:string, skipped?:boolean, viaBypass?:boolean, commit?:string, detail?:string}>}
  */
-export async function pushDiaryRepo({ dir, dayKey, log = () => {}, run = runGit } = {}) {
+export async function pushDiaryRepo({ dir, dayKey, log = () => {}, run = runGit, commitMessage = '', paths = ['.'] } = {}) {
+  // 日记与图片归档共用同一个私人仓库：按仓库串行，避免并发 add/commit/push 互相踩。
+  const previous = repoPushChains.get(dir) || Promise.resolve();
+  const task = previous.then(
+    () => pushRepoOnce({ dir, dayKey, log, run, commitMessage, paths }),
+    () => pushRepoOnce({ dir, dayKey, log, run, commitMessage, paths })
+  );
+  repoPushChains.set(dir, task.catch(() => {}));
+  return task;
+}
+
+const repoPushChains = new Map();
+
+async function pushRepoOnce({ dir, dayKey, log, run, commitMessage, paths }) {
   const inside = await run(dir, ['rev-parse', '--is-inside-work-tree']);
   if (!inside.ok || inside.stdout !== 'true') {
     return { ok: false, reason: 'not-a-repo', detail: inside.stderr || inside.error };
   }
 
-  const added = await run(dir, ['add', '--all', '--', '.']);
+  const added = await run(dir, ['add', '--all', '--', ...paths]);
   if (!added.ok) return { ok: false, reason: 'add-failed', detail: added.stderr || added.error };
 
   // diff --quiet：0=无差异，1=有差异。
@@ -44,7 +57,7 @@ export async function pushDiaryRepo({ dir, dayKey, log = () => {}, run = runGit 
 
   let commit = '';
   if (staged.code === 1) {
-    const committed = await run(dir, ['commit', '-m', `diary: ${dayKey}`]);
+    const committed = await run(dir, ['commit', '-m', commitMessage || `diary: ${dayKey}`]);
     if (!committed.ok) return { ok: false, reason: 'commit-failed', detail: committed.stderr || committed.error };
     commit = committed.stdout;
   } else {
