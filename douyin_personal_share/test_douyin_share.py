@@ -69,9 +69,11 @@ from douyin_search import (
     MAX_LIMIT as SEARCH_MAX_LIMIT,
     collect_search_videos,
     mark_topic_searched,
+    normalize_search_entry,
     normalize_topic,
     parse_search_cards,
     search_url_for,
+    topic_cooldown_reason,
     topic_recently_searched,
 )
 
@@ -824,8 +826,77 @@ class CommentParsingTests(unittest.TestCase):
         self.assertEqual(parse_like_count("1.2万"), 12000)
         self.assertEqual(parse_like_count("3.4w"), 34000)
         self.assertEqual(parse_like_count("1,234"), 1234)
-        self.assertEqual(parse_like_count("赞"), 0)
-        self.assertEqual(parse_like_count(""), 0)
+        # 取不到数字时是未知，不是 0。
+        self.assertIsNone(parse_like_count("赞"))
+        self.assertIsNone(parse_like_count(""))
+        self.assertIsNone(parse_like_count(None))
+
+    def test_comment_body_stops_before_time_region_and_drops_controls(self):
+        html = _comment_item_real("甲", "这条真的好看", "12")
+        item = parse_comment_nodes([html], limit=10)[0]
+        self.assertEqual(item["text"], "这条真的好看")
+        self.assertNotIn("4天前", item["text"])
+        self.assertNotIn("四川", item["text"])
+        self.assertNotIn("分享", item["text"])
+        self.assertNotIn("展开", item["text"])
+        self.assertNotIn("回复", item["text"])
+
+    def test_nested_reply_is_not_merged_into_the_main_comment(self):
+        html = _comment_item_real("甲", "主评论正文", "8",
+                                  reply=("厌世小孤狼", "我也这么觉得"))
+        item = parse_comment_nodes([html], limit=10)[0]
+        self.assertEqual(item["author"], "甲")
+        self.assertEqual(item["text"], "主评论正文")
+        self.assertNotIn("厌世小孤狼", item["text"])
+        self.assertNotIn("我也这么觉得", item["text"])
+        # 楼中楼里的“作者：”不能把主评论误标成作者本人。
+        self.assertFalse(item["isAuthor"])
+
+    def test_main_comment_author_badge_is_detected(self):
+        html = _comment_item_real("甲", "谢谢大家", "8", badge=True)
+        item = parse_comment_nodes([html], limit=10)[0]
+        self.assertTrue(item["isAuthor"])
+
+    def test_like_count_is_parsed_and_unknown_stays_none(self):
+        self.assertEqual(parse_comment_nodes([_comment_item_real("甲", "正文", "1.2万")], 10)[0]["likes"], 12000)
+        self.assertIsNone(parse_comment_nodes([_comment_item_real("甲", "正文", "赞")], 10)[0]["likes"])
+        no_like = _comment_item_real("甲", "正文", "").replace("comment-item-like", "plain-node")
+        self.assertIsNone(parse_comment_nodes([no_like], 10)[0]["likes"])
+
+    def test_ellipsis_placeholder_is_removed_from_the_body(self):
+        html = _comment_item_real("甲", "…真的好看…", "3")
+        item = parse_comment_nodes([html], limit=10)[0]
+        self.assertEqual(item["text"], "真的好看")
+        self.assertNotIn("…", item["text"])
+
+    def test_real_dom_keeps_body_author_likes_and_reply_separate(self):
+        html = _comment_item_real_dom(
+            "不困", "神性游戏授权改编漫剧《劫无止境》即将上线！", likes="401",
+            badge=True, reply=("厌世小孤狼", "别把主包搞没了"),
+        )
+        item = parse_comment_nodes([html], limit=10)[0]
+        # 作者徽标在 <a> 内部，不能粘进作者名。
+        self.assertEqual(item["author"], "不困")
+        # 正文只取 time 行前一个兄弟节点，不含更多菜单的 "..."、时间、地区、楼中楼。
+        self.assertEqual(item["text"], "神性游戏授权改编漫剧《劫无止境》即将上线！")
+        for noise in ("...", "2周前", "北京", "分享", "回复", "别把主包搞没了"):
+            self.assertNotIn(noise, item["text"])
+        # 真机赞数在 comment-item-stats-container 的第一个 <p> 里。
+        self.assertEqual(item["likes"], 401)
+        self.assertTrue(item["isAuthor"])
+
+    def test_real_dom_without_badge_is_not_marked_as_author(self):
+        html = _comment_item_real_dom("站着尿尿", "永劫也是好起来了", likes="313",
+                                      reply=("不困", "作者：别把主包搞没了"))
+        item = parse_comment_nodes([html], limit=10)[0]
+        self.assertFalse(item["isAuthor"])
+        self.assertEqual(item["text"], "永劫也是好起来了")
+        self.assertEqual(item["likes"], 313)
+
+    def test_author_liked_badge_is_not_part_of_the_body(self):
+        html = _comment_item_real_dom("Www VV.", "北京的秋天我一定会到作者赞过", likes="5")
+        item = parse_comment_nodes([html], limit=10)[0]
+        self.assertEqual(item["text"], "北京的秋天我一定会到")
 
     def test_text_emoji_code_is_marked_as_image_placeholder(self):
         items = parse_comment_nodes([_comment_item("甲", "好笑[笑哭]")], limit=10)
@@ -948,6 +1019,29 @@ class BrowseTopicTests(unittest.TestCase):
         self.assertEqual(items[2]["title"], "雪山公路")
         self.assertEqual(items[2]["author"], "旅行者")
 
+    def test_search_cards_parse_real_waterfall_shape(self):
+        # 形状来自 2026-11 真实快照：卡片没有 <a href="/video/">，视频 id 在
+        # #waterfall_item_<awemeId> 上，作者被拆成“@”和昵称两个 span。
+        html = (
+            '<div class="FPJdJmQO" id="waterfall_item_7691953072452477874" '
+            'style="visibility: visible;"><div class="search-result-card">'
+            '<div class="M5bVC8vY"><div class="BR8wO6ui videoImage"><div class="ZYKiUg6O">00:22</div>'
+            '<div class="g5BarT4O"><span>11.7万</span></div></div>'
+            '<div class="UKo6X6RE"><div class="k67CTqHQ">'
+            '<div class="hu36PKCP">向全世界安利会摆pose的小猫 #猫猫就是小宝宝啊</div>'
+            '<div class="kNJ4cF_N"><span class="Lk2jVuV9"><span class="h4HSl6U9">@</span>'
+            '<span class="vgw3V2Fj">是甜口的鸭蛋</span></span>'
+            '<span class="iOLHOuw4"> · 2024年7月18日</span></div>'
+            '</div></div></div></div></div>'
+        )
+        items = parse_search_cards([html])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["url"],
+                         "https://www.douyin.com/video/7691953072452477874")
+        self.assertEqual(items[0]["author"], "是甜口的鸭蛋")
+        self.assertIn("猫猫", items[0]["title"])
+        self.assertNotIn("2024", items[0]["title"])
+
     def test_search_cards_are_deduplicated_and_capped(self):
         fixtures = [_search_card("e2e", "111", "@甲", "标题") for _ in range(3)]
         fixtures += [_search_card("e2e", str(200 + i), f"@用户{i}", f"标题{i}") for i in range(20)]
@@ -968,8 +1062,33 @@ class BrowseTopicTests(unittest.TestCase):
         self.assertEqual(result["reason"], "ok")
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["strategy"], '[data-e2e="search-result-card"]')
-        self.assertTrue(result["videoTab"])
+        # URL 已带 type=video，首屏就有卡片时无需再点 tab。
+        self.assertFalse(result["videoTab"])
+        self.assertGreaterEqual(result["waitMs"], 0)
         self.assertEqual(result["items"][0]["url"], "https://www.douyin.com/video/111")
+
+    def test_search_clicks_video_tab_when_first_render_is_empty(self):
+        page = Mock()
+        page.url = "https://www.douyin.com/search/x?type=video"
+        empty = {"strategy": "", "nodes": [], "blocked": False, "noResults": False}
+        found = {"strategy": "s", "nodes": [_search_card("e2e", "111", "@园艺师", "月季")],
+                 "blocked": False, "noResults": False}
+        calls = {"n": 0}
+
+        def fake(_page):
+            calls["n"] += 1
+            return empty if calls["n"] == 1 else found
+
+        with patch("douyin_search.FIRST_RESULT_WAIT_SECONDS", 0), \
+                patch("douyin_search.TAB_RESULT_WAIT_SECONDS", 0), \
+                patch("douyin_search.extract_search_cards", side_effect=fake), \
+                patch("douyin_search.ensure_video_tab", return_value=True) as tab, \
+                patch("douyin_search.scroll_search_results", return_value=True):
+            result = collect_search_videos(page, "猫", timeout_seconds=10)
+        tab.assert_called_once()
+        self.assertTrue(result["videoTab"])
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["strategy"], "s")
 
     def test_search_blocked_page_returns_reason_without_items(self):
         page = Mock()
@@ -980,6 +1099,77 @@ class BrowseTopicTests(unittest.TestCase):
             result = collect_search_videos(page, "园艺", timeout_seconds=10)
         self.assertEqual(result["items"], [])
         self.assertEqual(result["reason"], "blocked")
+
+    def test_search_entry_values_are_normalized(self):
+        self.assertEqual(normalize_search_entry("direct-url"), "direct-url")
+        self.assertEqual(normalize_search_entry("SEARCH-BOX"), "search-box")
+        self.assertEqual(normalize_search_entry("bogus"), "search-box")
+        self.assertEqual(normalize_search_entry(None), "search-box")
+
+    def test_search_box_entry_types_topic_and_parses_cards(self):
+        page = Mock()
+        route = "https://www.douyin.com/search/%E7%8C%AB?type=general"
+        page.url = route
+        nav = {"ok": True, "reason": "", "blocked": False,
+               "extra": {"searchEntry": "search-box",
+                         "boxSelector": 'input[placeholder*="搜索"]',
+                         "typeMs": 210, "routeUrl": route}}
+        empty = {"strategy": "", "nodes": [], "blocked": False, "noResults": False}
+        found = {"strategy": 'a[href*="/video/"]',
+                 "nodes": [_search_card("e2e", "111", "@猫叔", "猫咪日常")],
+                 "blocked": False, "noResults": False}
+        calls = {"n": 0}
+
+        def fake(_page):
+            calls["n"] += 1
+            return empty if calls["n"] == 1 else found
+
+        with patch("douyin_search._open_via_search_box", return_value=nav) as box, \
+                patch("douyin_search.extract_search_cards", side_effect=fake), \
+                patch("douyin_search.wait_for_video_tab", return_value=(True, "clicked+selected")), \
+                patch("douyin_search.FIRST_RESULT_WAIT_SECONDS", 0), \
+                patch("douyin_search.TAB_RESULT_WAIT_SECONDS", 0), \
+                patch("douyin_search.scroll_search_results", return_value=True):
+            result = collect_search_videos(page, "猫", timeout_seconds=10, entry="search-box")
+        box.assert_called_once()
+        self.assertEqual(result["searchEntry"], "search-box")
+        self.assertEqual(result["boxSelector"], 'input[placeholder*="搜索"]')
+        self.assertEqual(result["typeMs"], 210)
+        self.assertTrue(result["videoTab"])
+        self.assertEqual(result["count"], 1)
+        self.assertFalse(result["entryFallback"])
+
+    def test_search_box_missing_falls_back_to_direct_url(self):
+        page = Mock()
+        page.url = "https://www.douyin.com/search/x?type=video"
+        nav = {"ok": False, "reason": "search-box-missing", "blocked": False,
+               "extra": {"searchEntry": "search-box", "boxSelector": "",
+                         "typeMs": 0, "routeUrl": ""}}
+        with patch("douyin_search._open_via_search_box", return_value=nav), \
+                patch("douyin_search.extract_search_cards", return_value={
+                    "strategy": "s",
+                    "nodes": [_search_card("e2e", "111", "@甲", "标题")],
+                    "blocked": False, "noResults": False}), \
+                patch("douyin_search.scroll_search_results", return_value=True):
+            result = collect_search_videos(page, "猫", timeout_seconds=10, entry="search-box")
+        self.assertTrue(result["entryFallback"])
+        self.assertEqual(result["entryError"], "search-box-missing")
+        self.assertEqual(result["count"], 1)
+        page.goto.assert_called_with(search_url_for("猫"), wait_until="domcontentloaded",
+                                    timeout=45000)
+
+    def test_search_box_blocked_page_stops_without_direct_fallback(self):
+        page = Mock()
+        nav = {"ok": False, "reason": "blocked", "blocked": True,
+               "extra": {"searchEntry": "search-box", "boxSelector": "",
+                         "typeMs": 0, "routeUrl": ""}}
+        with patch("douyin_search._open_via_search_box", return_value=nav), \
+                patch("douyin_search.extract_search_cards") as extract:
+            result = collect_search_videos(page, "猫", timeout_seconds=10, entry="search-box")
+        page.goto.assert_not_called()
+        extract.assert_not_called()
+        self.assertEqual(result["reason"], "blocked")
+        self.assertEqual(result["items"], [])
 
     def test_search_page_open_failure_returns_search_unavailable(self):
         page = Mock()
@@ -992,13 +1182,14 @@ class BrowseTopicTests(unittest.TestCase):
         meta = {}
         with patch("douyin_share.collect_search_videos", return_value={
                 "items": [], "reason": "blocked", "strategy": "", "searchUrl": "u", "videoTab": False,
-        }), patch("douyin_share.topic_recently_searched", return_value=False), \
+        }), patch("douyin_share.topic_cooldown_reason", return_value=None), \
                 patch("douyin_share.mark_topic_searched") as mark, \
                 patch("douyin_share.collect_feed", return_value=[]) as feed:
             rows = browse_feed(Mock(), 2, topic="园艺", topic_meta=meta)
         self.assertEqual(rows, [])
         feed.assert_called_once()
-        mark.assert_not_called()
+        # 失败也写冷却记录，避免反复重试同一主题。
+        mark.assert_called_once_with("园艺", reason="blocked")
         self.assertTrue(meta["topicFallback"])
         self.assertEqual(meta["topicFallbackReason"], "blocked")
         self.assertEqual(meta["topicSource"], "owner")
@@ -1007,8 +1198,8 @@ class BrowseTopicTests(unittest.TestCase):
         meta = {}
         with patch("douyin_share.collect_search_videos", return_value={
                 "items": [{"url": "https://www.douyin.com/video/111", "title": "月季", "author": "园艺师"}],
-                "reason": "ok", "strategy": "s", "searchUrl": "u", "videoTab": True,
-        }), patch("douyin_share.topic_recently_searched", return_value=False), \
+                "reason": "ok", "strategy": "s", "searchUrl": "u", "videoTab": True, "waitMs": 900,
+        }), patch("douyin_share.topic_cooldown_reason", return_value=None), \
                 patch("douyin_share.mark_topic_searched") as mark, \
                 patch("douyin_share.collect_feed") as feed:
             # minutes=0 让播放循环立即结束，这里只验证候选来源与 meta。
@@ -1018,10 +1209,12 @@ class BrowseTopicTests(unittest.TestCase):
         mark.assert_called_once_with("园艺")
         self.assertFalse(meta["topicFallback"])
         self.assertEqual(meta["searchSelector"], "s")
+        self.assertTrue(meta["videoTab"])
+        self.assertEqual(meta["searchWaitMs"], 900)
 
     def test_recent_topic_is_not_searched_again_within_24_hours(self):
         meta = {}
-        with patch("douyin_share.topic_recently_searched", return_value=True), \
+        with patch("douyin_share.topic_cooldown_reason", return_value=""), \
                 patch("douyin_share.collect_search_videos") as search, \
                 patch("douyin_share.collect_feed", return_value=[]) as feed:
             browse_feed(Mock(), 5, topic="园艺", topic_meta=meta)
@@ -1029,6 +1222,17 @@ class BrowseTopicTests(unittest.TestCase):
         feed.assert_called_once()
         self.assertTrue(meta["topicFallback"])
         self.assertEqual(meta["topicFallbackReason"], "topic-cooldown")
+
+    def test_failed_topic_cooldown_is_reported_as_after_failure(self):
+        meta = {}
+        with patch("douyin_share.topic_cooldown_reason", return_value="blocked"), \
+                patch("douyin_share.collect_search_videos") as search, \
+                patch("douyin_share.collect_feed", return_value=[]) as feed:
+            browse_feed(Mock(), 2, topic="园艺", topic_meta=meta)
+        search.assert_not_called()
+        feed.assert_called_once()
+        self.assertTrue(meta["topicFallback"])
+        self.assertEqual(meta["topicFallbackReason"], "topic-cooldown(after-failure:blocked)")
 
     def test_no_topic_keeps_the_original_recommendation_flow(self):
         with patch("douyin_share.collect_feed", return_value=[]) as feed, \
@@ -1046,6 +1250,26 @@ class BrowseTopicTests(unittest.TestCase):
             self.assertTrue(topic_recently_searched("园艺", path, now=now + 60))
             self.assertFalse(topic_recently_searched("园艺", path, now=now + 24 * 3600 + 1))
             self.assertFalse(topic_recently_searched("猫咪", path, now=now))
+
+    def test_failed_search_is_recorded_with_reason_and_cools_down(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "topic-search-state.json"
+            now = 2_000_000.0
+            mark_topic_searched("园艺", path, now=now, reason="blocked")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["topics"]["园艺"]["reason"], "blocked")
+            self.assertTrue(topic_recently_searched("园艺", path, now=now + 60))
+            self.assertEqual(topic_cooldown_reason("园艺", path, now=now + 60), "blocked")
+            self.assertIsNone(topic_cooldown_reason("园艺", path, now=now + 24 * 3600 + 1))
+            self.assertIsNone(topic_cooldown_reason("猫咪", path, now=now))
+
+    def test_legacy_float_state_still_counts_as_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "topic-search-state.json"
+            path.write_text(json.dumps({"schemaVersion": 1, "topics": {"园艺": 1_000_000.0}}),
+                            encoding="utf-8")
+            self.assertTrue(topic_recently_searched("园艺", path, now=1_000_060.0))
+            self.assertEqual(topic_cooldown_reason("园艺", path, now=1_000_060.0), "")
 
     def test_topic_search_state_keeps_only_the_newest_thirty(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1070,10 +1294,53 @@ class BrowseTopicTests(unittest.TestCase):
         self.assertIn("没有搜到结果", fallback)
         self.assertIn("改刷推荐流", fallback)
         self.assertIn("没有确认到持续播放", fallback)
+        after_failure = format_browse_review(
+            [], {"topic": "园艺", "topicFallback": True,
+                 "topicFallbackReason": "topic-cooldown(after-failure:blocked)"},
+        )
+        self.assertIn("刚试过没搜到", after_failure)
+        self.assertIn("搜索页被验证拦截", after_failure)
         # 不带主题时不增加任何主题说明，保持原输出。
         self.assertNotIn("本次主题", format_browse_review(
             [{"title": "月季", "url": "u", "watched_seconds": 10}],
         ))
+
+    def test_topic_review_exposes_search_diagnostics(self):
+        review = format_browse_review([], {
+            "topic": "猫", "topicSource": "owner", "topicFallback": False,
+            "searchSelector": '[data-e2e="search-result-card"]',
+            "searchUrl": "https://www.douyin.com/search/%E7%8C%AB?type=video",
+            "videoTab": True, "searchWaitMs": 1500,
+        })
+        self.assertIn("搜索诊断", review)
+        self.assertIn('[data-e2e="search-result-card"]', review)
+        self.assertIn("视频tab 是", review)
+        self.assertIn("等待 1500 ms", review)
+        self.assertIn("search/%E7%8C%AB", review)
+
+    def test_topic_review_separates_search_and_browse_time(self):
+        review = format_browse_review([], {
+            "topic": "猫", "topicSource": "owner", "topicFallback": False,
+            "searchSelector": "div.search-result-card", "searchEntry": "search-box",
+            "searchMs": 12345, "browseMs": 180000, "videoTab": False,
+            "videoTabReason": "tab-not-found",
+        })
+        self.assertIn("耗时：搜索 12345 ms | 浏览 180000 ms", review)
+        self.assertIn("视频tab 否(tab-not-found)", review)
+
+    def test_topic_review_reports_playback_failure_state(self):
+        review = format_browse_review([], {
+            "topic": "猫", "topicSource": "owner", "topicFallback": False,
+            "searchSelector": "div.search-result-card",
+            "playbackDiagnostics": [{
+                "videoUrl": "https://www.douyin.com/video/1",
+                "title": "抖音-记录美好生活", "videoCount": 1,
+                "verificationFrame": False,
+                "videos": [{"paused": True, "readyState": 0, "currentTime": 0}],
+            }],
+        })
+        self.assertIn("播放诊断", review)
+        self.assertIn("paused=True readyState=0 currentTime=0", review)
 
     def test_queue_records_topic_and_caps_minutes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1218,6 +1485,89 @@ def _comment_item(author, text, likes="", badge=False, style="e2e", image=False)
         '<div>2小时前</div>'
         f'<div>{likes or "86"}</div>'
         '<div>回复</div>'
+        '</div>'
+    )
+
+
+def _comment_item_real(author, body, likes="12", badge=False, meta="4天前·四川",
+                       reply=("", ""), placeholder=True):
+    """Sanitized fixture shaped like the real comment item captured on 2026-11.
+
+    The body and the time/region/control row are inline siblings, and an
+    optional nested reply container (楼中楼) follows the main comment.
+    """
+    pad = '<span class="comment-pad">…</span>' if placeholder else ''
+    badge_html = '<span class="author-tag">作者</span>' if badge else ''
+    reply_html = ''
+    if reply[0]:
+        reply_html = (
+            '<div class="comment-item-reply-container">'
+            '<div data-e2e="comment-item" class="comment-item comment-item-reply">'
+            f'<a href="/user/MS4wreplyfixture">{reply[0]}</a>'
+            f'<div class="comment-item-text">作者：{reply[1]}</div>'
+            '</div></div>'
+        )
+    return (
+        '<div data-e2e="comment-item" class="comment-item">'
+        '<a href="/user/MS4wauthorfixture">'
+        '<img class="avatar" src="https://p3.douyinpic.com/aweme/100x100/a.jpeg"></a>'
+        f'<div class="comment-item-head">{pad}'
+        f'<a href="/user/MS4wauthorfixture">{author}</a>{badge_html}</div>'
+        '<div class="comment-item-content">'
+        f'<div data-e2e="comment-item-text">{body}'
+        f'<span>{meta}</span><span>分享</span><span>回复</span>'
+        '<span>展开12条回复</span></div>'
+        f'<div class="comment-item-like" data-e2e="comment-item-like-count">{likes}</div>'
+        '</div>'
+        f'{reply_html}'
+        '</div>'
+    )
+
+
+def _comment_item_real_dom(author, body, likes="401", badge=False,
+                           meta="2周前·北京", reply=("", "")):
+    """Sanitized copy of the 2026-11 real DOM: hashed classes, stats container,
+    a "..." more-menu node, and an optional replyContainer (楼中楼)."""
+    badge_html = ''
+    if badge:
+        badge_html = (
+            '<div class="semi-tag comment-item-tag">'
+            '<div class="semi-tag-content"><span class="comment-item-tag-text">作者</span></div>'
+            '</div>'
+        )
+    reply_html = ''
+    if reply[0]:
+        reply_html = (
+            '<div class="jHIdiiVr replyContainer">'
+            '<div class="Eh0a5CD4" data-e2e="comment-item">'
+            f'<a href="//www.douyin.com/user/MS4wreplyfixture">{reply[0]}</a>'
+            f'<div class="FduGc_lz"><span>{reply[1]}</span></div>'
+            f'<div class="VAQA49VP"><span>{meta}</span></div>'
+            '</div></div>'
+        )
+    return (
+        '<div class="Eh0a5CD4" data-e2e="comment-item">'
+        '<div class="xUjvrHoz comment-item-avatar"><div></div></div>'
+        '<div class="JPoP3Ezg">'
+        '<div class="dIlRe7ZV"><div class="xRxUIIMP comment-item-info-wrap">'
+        '<div class="lUJL6ihF"><div class="vlTNLkdG">'
+        f'<a href="//www.douyin.com/user/MS4wauthorfixture" class="ALink-a">'
+        f'<span data-click-from="title"><span><span>{author}</span></span></span>{badge_html}</a>'
+        '</div></div>'
+        '<div data-e2e="video-comment-more"><div>...</div></div>'
+        '</div>'
+        f'<div class="FduGc_lz"><span>{body}</span></div>'
+        f'<div class="VAQA49VP"><span>{meta}</span></div>'
+        '<div class="Ctt1baq8"><div class="kz17Mrdw comment-item-stats-container">'
+        '<div class="a2ls69qS">'
+        f'<p class="VpA2NKl1"><svg></svg><span>{likes}</span></p>'
+        '<p class="HJa8wFwW"><svg></svg></p>'
+        '</div>'
+        '<div class="KsYeSxLP"><div><svg></svg><div>分享</div></div></div>'
+        '<div class="LJU9cDNW"><div><svg></svg><span>回复</span></div></div>'
+        '</div></div>'
+        '</div>'
+        f'{reply_html}'
         '</div>'
     )
 

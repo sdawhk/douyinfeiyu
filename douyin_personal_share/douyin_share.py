@@ -31,12 +31,15 @@ from douyin_comments import (
     PROMPT_TEXT_CHARS,
     collect_video_comments,
 )
+import douyin_debug
 from douyin_search import (
+    DEFAULT_SEARCH_ENTRY,
     MAX_LIMIT as SEARCH_MAX_LIMIT,
     collect_search_videos,
     mark_topic_searched,
+    normalize_search_entry as normalize_browse_search_entry,
     normalize_topic as normalize_browse_topic,
-    topic_recently_searched,
+    topic_cooldown_reason,
 )
 
 for _stream in (sys.stdout, sys.stderr):
@@ -494,10 +497,13 @@ def load_config() -> dict:
     topics = cfg.setdefault("browse_topics", {})
     topics.setdefault("pool", [])
     topics.setdefault("blacklist", [])
+    topics.setdefault("search_entry", DEFAULT_SEARCH_ENTRY)
     for key in ("pool", "blacklist"):
         if not isinstance(topics[key], list):
             raise RuntimeError(f"browse_topics.{key} must be a list of strings")
         topics[key] = [str(value).strip() for value in topics[key] if str(value).strip()]
+    if topics["search_entry"] not in {"search-box", "direct-url"}:
+        raise RuntimeError("browse_topics.search_entry must be search-box or direct-url")
     return cfg
 
 
@@ -1214,7 +1220,8 @@ def deliver_selected(page, cfg: dict, videos: list[Video], state: dict, today: s
 
 def browse_feed(page, minutes: int, history_path: Path = SHARED_INTEREST_PATH,
                 comment_options: dict | None = None, topic: str = "",
-                topic_meta: dict | None = None) -> list[dict]:
+                topic_meta: dict | None = None,
+                search_entry: str = DEFAULT_SEARCH_ENTRY) -> list[dict]:
     """Browse normal recommendations via canonical public video pages and record actual playback only.
 
     When ``topic`` is supplied, video candidates come from the search page first
@@ -1236,22 +1243,29 @@ def browse_feed(page, minutes: int, history_path: Path = SHARED_INTEREST_PATH,
         comment_max_videos = 3
     comment_max_videos = max(0, min(10, comment_max_videos))
     comment_slots = comment_max_videos if comments_enabled else 0
+    search_started = time_module.monotonic()
     if topic:
         minutes = min(minutes, 3)
+        entry = normalize_browse_search_entry(search_entry)
         videos = []
-        if topic_recently_searched(topic):
+        cooldown_reason = topic_cooldown_reason(topic)
+        if cooldown_reason is not None:
+            fallback_reason = ("topic-cooldown" if not cooldown_reason
+                               else f"topic-cooldown(after-failure:{cooldown_reason})")
             if meta is not None:
                 meta.update({
                     "topic": topic, "topicSource": "owner", "topicFallback": True,
-                    "topicFallbackReason": "topic-cooldown", "searchSelector": "",
-                    "searchUrl": "", "videoTab": False,
+                    "topicFallbackReason": fallback_reason, "searchSelector": "",
+                    "searchUrl": "", "videoTab": False, "searchWaitMs": 0,
+                    "searchEntry": entry,
                 })
-            print(f"主题搜索跳过：{topic} 在 24 小时内已经搜过；改用推荐流。")
+            print(f"主题搜索跳过：{topic} 在 24 小时内已经试过"
+                  f"（{cooldown_reason or '成功'}）；改用推荐流。")
             videos = collect_feed(page)
         else:
             search = collect_search_videos(
                 page, topic, limit=SEARCH_MAX_LIMIT,
-                timeout_seconds=min(40, max(10, minutes * 60)),
+                timeout_seconds=min(90, max(10, minutes * 60)), entry=entry,
             )
             if meta is not None:
                 meta.update({
@@ -1261,20 +1275,33 @@ def browse_feed(page, minutes: int, history_path: Path = SHARED_INTEREST_PATH,
                     "searchSelector": str(search.get("strategy") or ""),
                     "searchUrl": str(search.get("searchUrl") or ""),
                     "videoTab": bool(search.get("videoTab")),
+                    "videoTabReason": str(search.get("videoTabReason") or ""),
+                    "searchWaitMs": int(search.get("waitMs") or 0),
+                    "searchEntry": str(search.get("searchEntry") or entry),
+                    "entryFallback": bool(search.get("entryFallback")),
+                    "boxSelector": str(search.get("boxSelector") or ""),
+                    "typeMs": int(search.get("typeMs") or 0),
                 })
             if search.get("items"):
                 mark_topic_searched(topic)
                 videos = [Video(item["url"], item.get("title", ""), item.get("author", ""))
                           for item in search["items"]]
                 print(f"主题搜索：{topic} 找到 {len(videos)} 条候选（选择器 "
-                      f"{search.get('strategy') or '-'}；{search.get('searchUrl') or '-'}）。")
+                      f"{search.get('strategy') or '-'}；等待 {int(search.get('waitMs') or 0)} ms；"
+                      f"{search.get('searchUrl') or '-'}）。")
             else:
                 reason = str(search.get("reason") or "no-results")
+                # 失败的尝试同样进入 24 小时冷却，避免反复重试同一主题。
+                mark_topic_searched(topic, reason=reason)
                 print(f"主题搜索未命中（{reason}）：{topic}；改用推荐流。")
                 videos = collect_feed(page)
     else:
         videos = collect_feed(page)
+    # 搜索阶段单独计时：浏览预算从“搜到卡片之后”才开始，避免搜索把时长吃光。
+    search_ms = int((time_module.monotonic() - search_started) * 1000)
+    browse_started = time_module.monotonic()
     deadline = datetime.now().timestamp() + minutes * 60
+    playback_failures: list[dict] = []
     watched: list[dict] = []
     for video in videos:
         if datetime.now().timestamp() >= deadline:
@@ -1288,6 +1315,26 @@ def browse_feed(page, minutes: int, history_path: Path = SHARED_INTEREST_PATH,
             page.wait_for_timeout(1000)
             current_time = playback_time(page)
         if current_time is None:
+            # 播放器可能只是没起播：点一次播放器（仅播放，不做任何社交动作）。
+            if kick_video_playback(page):
+                wait_until = min(deadline, datetime.now().timestamp() + 4)
+                while current_time is None and datetime.now().timestamp() < wait_until:
+                    page.wait_for_timeout(500)
+                    current_time = playback_time(page)
+        if current_time is None:
+            if len(playback_failures) < 2:
+                diag = playback_diagnostics(page)
+                diag["videoUrl"] = video.url
+                diag["candidateTitle"] = video.title
+                playback_failures.append(diag)
+                douyin_debug.save("video-playback-failed", page.content(), {
+                    "phase": "playback", "url": video.url,
+                    "videoCount": diag.get("videoCount"),
+                    "verificationFrame": diag.get("verificationFrame"),
+                })
+                print(f"  播放未起播：{video.url}（video={diag.get('videoCount')}，"
+                      f"验证框={'是' if diag.get('verificationFrame') else '否'}，"
+                      f"标题={str(diag.get('title') or '')[:40]}）")
             continue
         capture_started = start_video_audio_capture(page, seconds=12)
         last_time = current_time
@@ -1338,6 +1385,10 @@ def browse_feed(page, minutes: int, history_path: Path = SHARED_INTEREST_PATH,
             })
             print(f"  内容理解：转写 {len(row['transcript'])} 字；画面摘要 {'完成' if row['content_summary'] else '未完成'}。")
             watched.append(row)
+    if meta is not None:
+        meta["searchMs"] = search_ms
+        meta["browseMs"] = int((time_module.monotonic() - browse_started) * 1000)
+        meta["playbackDiagnostics"] = playback_failures
     accepted = watched
     saved = save_watch_history(history_path, accepted)
     print(f"浏览结束：观察到 {len(accepted)} 条实际播放达到 8 秒的视频，共写入 {saved} 条共享观看记录。")
@@ -1356,6 +1407,58 @@ def playback_time(page) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def playback_diagnostics(page) -> dict:
+    """Read-only snapshot of every video element's state for failure reporting."""
+    try:
+        info = page.evaluate("""() => {
+          const videos = Array.from(document.querySelectorAll('video'));
+          const frames = videos.slice(0, 4).map(video => {
+            const rect = video.getBoundingClientRect();
+            return {
+              paused: !!video.paused, ended: !!video.ended,
+              readyState: Number(video.readyState || 0),
+              currentTime: Number(video.currentTime || 0),
+              muted: !!video.muted,
+              duration: Number(video.duration || 0),
+              width: Math.round(rect.width), height: Math.round(rect.height),
+              top: Math.round(rect.top), bottom: Math.round(rect.bottom),
+              src: String(video.currentSrc || video.src || '').slice(0, 100)
+            };
+          });
+          return {
+            url: location.href,
+            title: String(document.title || '').slice(0, 120),
+            videoCount: videos.length,
+            videos: frames,
+            verificationFrame: !!document.querySelector(
+              'iframe[src*="rmc.bytedance.com"], iframe[src*="captcha"], iframe[src*="verify"]'),
+            bodySnippet: String(document.body ? document.body.innerText : '').slice(0, 160)
+          };
+        }""")
+    except Exception as exc:
+        return {"error": exc.__class__.__name__}
+    return info if isinstance(info, dict) else {}
+
+
+def kick_video_playback(page) -> bool:
+    """Click a paused player once (playback only; no social interaction)."""
+    try:
+        index = page.evaluate("""() => {
+          const visible = el => {
+            const rect = el.getBoundingClientRect();
+            return rect.width > 100 && rect.height > 100;
+          };
+          return Array.from(document.querySelectorAll('video'))
+            .findIndex(v => visible(v) && v.paused && !v.ended);
+        }""")
+        if not isinstance(index, int) or index < 0:
+            return False
+        page.locator("video").nth(index).click(timeout=4000, position={"x": 40, "y": 40})
+        return True
+    except Exception:
+        return False
 
 
 def current_video_index(page) -> int | None:
@@ -1529,7 +1632,8 @@ def analyze_shared_video(page, event: dict) -> dict:
 
 def browse_session(minutes: int, wait_seconds: int = 0,
                    comment_options: dict | None = None, topic: str = "",
-                   topic_meta: dict | None = None) -> list[dict]:
+                   topic_meta: dict | None = None,
+                   search_entry: str = DEFAULT_SEARCH_ENTRY) -> list[dict]:
     """Run one read-only browse session and return the videos actually watched."""
     if sync_playwright is None:
         raise RuntimeError("Playwright is missing. Install the dependencies from requirements.txt.")
@@ -1548,7 +1652,8 @@ def browse_session(minutes: int, wait_seconds: int = 0,
         try:
             page = context.pages[0] if context.pages else context.new_page()
             return browse_feed(page, minutes, comment_options=comment_options,
-                               topic=topic, topic_meta=topic_meta)
+                               topic=topic, topic_meta=topic_meta,
+                               search_entry=search_entry)
         finally:
             context.close()
 
@@ -1606,11 +1711,14 @@ def format_comment_reference(sample) -> list[str]:
             notes.append("作者本人")
         if item.get("hasImage"):
             notes.append("含图片/表情")
-        try:
-            likes = int(item.get("likes") or 0)
-        except (TypeError, ValueError):
-            likes = 0
-        notes.append(f"赞{likes}")
+        if item.get("likes") is None:
+            notes.append("赞数未知")
+        else:
+            try:
+                likes = int(item.get("likes"))
+            except (TypeError, ValueError):
+                likes = 0
+            notes.append(f"赞{likes}")
         shown += 1
         lines.append(f"    {shown}. {author}：{text}（{'，'.join(notes)}）")
     if not shown:
@@ -1631,6 +1739,13 @@ _TOPIC_FALLBACK_REASONS = {
 
 
 def _topic_fallback_detail(reason: str) -> str:
+    prefix = "topic-cooldown(after-failure:"
+    if reason.startswith(prefix):
+        inner = reason[len(prefix):].rstrip(")")
+        base = _TOPIC_FALLBACK_REASONS.get(inner)
+        if not base and inner.startswith("error:"):
+            base = f"搜索出错（{inner.split(':', 1)[1]}）"
+        return f"这个主题刚试过没搜到（{base or inner}），24 小时内不再重复搜索"
     if reason in _TOPIC_FALLBACK_REASONS:
         return _TOPIC_FALLBACK_REASONS[reason]
     if reason.startswith("error:"):
@@ -1648,8 +1763,42 @@ def format_browse_review(rows: list[dict], topic_meta: dict | None = None) -> st
             lines.append(f"本次主题：{topic}（{detail}，改刷推荐流）。")
         else:
             lines.append(f"本次主题：{topic}（按你的要求从搜索页刷的）。")
+        selector = str(meta.get("searchSelector") or "")
+        search_url = str(meta.get("searchUrl") or "")
+        if selector or search_url or meta.get("videoTab") or meta.get("searchEntry"):
+            entry = str(meta.get("searchEntry") or "-")
+            if meta.get("entryFallback"):
+                entry += "(降级直开)"
+            box = str(meta.get("boxSelector") or "-")
+            tab_reason = str(meta.get("videoTabReason") or "")
+            tab_state = "是" if meta.get("videoTab") else "否"
+            if not meta.get("videoTab") and tab_reason:
+                tab_state += f"({tab_reason})"
+            lines.append(
+                f"  搜索诊断：入口 {entry} | 输入框 {box} | 输入 "
+                f"{int(meta.get('typeMs') or 0)} ms | 选择器 {selector or '-'} | "
+                f"视频tab {tab_state} | "
+                f"等待 {int(meta.get('searchWaitMs') or 0)} ms | {search_url or '-'}"
+            )
+            lines.append(
+                f"  耗时：搜索 {int(meta.get('searchMs') or 0)} ms | "
+                f"浏览 {int(meta.get('browseMs') or 0)} ms"
+            )
     if topic and not rows:
         lines.append("本次没有确认到持续播放的视频；未保存观看记录。")
+        failures = meta.get("playbackDiagnostics") if meta else None
+        if isinstance(failures, list) and failures:
+            first = failures[0] if isinstance(failures[0], dict) else {}
+            videos = first.get("videos") if isinstance(first.get("videos"), list) else []
+            state = videos[0] if videos and isinstance(videos[0], dict) else {}
+            lines.append(
+                f"  播放诊断：{first.get('videoUrl') or '-'} | 标题 "
+                f"{str(first.get('title') or '')[:40] or '-'} | video 元素 "
+                f"{first.get('videoCount')} 个 | 验证框 "
+                f"{'是' if first.get('verificationFrame') else '否'} | "
+                f"paused={state.get('paused')} readyState={state.get('readyState')} "
+                f"currentTime={state.get('currentTime')}"
+            )
         return "\n".join(lines)
     for row in rows:
         lines.append(f"- 视频：{row['title']} | 作者：{row.get('author') or '未知作者'} | 实际播放：{int(row.get('watched_seconds', 0))} 秒")
@@ -1670,7 +1819,9 @@ def run_browse(minutes: int, topic: str = "") -> int:
     comment_options = cfg.get("browse_comments") or {}
     topic_meta = {}
     rows = browse_session(minutes, comment_options=comment_options,
-                          topic=topic, topic_meta=topic_meta)
+                          topic=topic, topic_meta=topic_meta,
+                          search_entry=(cfg.get("browse_topics") or {}).get(
+                              "search_entry", DEFAULT_SEARCH_ENTRY))
     review = format_browse_review(rows, topic_meta)
     if review:
         print(review)
@@ -2183,7 +2334,9 @@ def service_browse_request(page, cfg: dict, selectors: dict):
             minutes = min(minutes, 3)
             topic_meta = {}
             rows = browse_feed(page, minutes, comment_options=cfg.get("browse_comments") or {},
-                               topic=topic, topic_meta=topic_meta)
+                               topic=topic, topic_meta=topic_meta,
+                               search_entry=(cfg.get("browse_topics") or {}).get(
+                                   "search_entry", DEFAULT_SEARCH_ENTRY))
             result = (format_browse_review(rows, topic_meta)
                       or "没有确认到持续播放的视频；未保存观看记录。")
             response = {
@@ -2192,6 +2345,16 @@ def service_browse_request(page, cfg: dict, selectors: dict):
                 "topicFallbackReason": str(topic_meta.get("topicFallbackReason") or ""),
                 "searchSelector": str(topic_meta.get("searchSelector") or ""),
                 "searchUrl": str(topic_meta.get("searchUrl") or ""),
+                "videoTab": bool(topic_meta.get("videoTab")),
+                "videoTabReason": str(topic_meta.get("videoTabReason") or ""),
+                "searchWaitMs": int(topic_meta.get("searchWaitMs") or 0),
+                "searchEntry": str(topic_meta.get("searchEntry") or ""),
+                "entryFallback": bool(topic_meta.get("entryFallback")),
+                "boxSelector": str(topic_meta.get("boxSelector") or ""),
+                "typeMs": int(topic_meta.get("typeMs") or 0),
+                "searchMs": int(topic_meta.get("searchMs") or 0),
+                "browseMs": int(topic_meta.get("browseMs") or 0),
+                "playbackDiagnostics": topic_meta.get("playbackDiagnostics") or [],
             }
         else:
             rows = browse_feed(page, minutes, comment_options=cfg.get("browse_comments") or {})

@@ -15,6 +15,8 @@ import re
 import time as time_module
 from html.parser import HTMLParser
 
+import douyin_debug
+
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 30
 DEFAULT_TIMEOUT_SECONDS = 20
@@ -30,6 +32,31 @@ PROMPT_AUTHOR_CHARS = 20
 _ZERO_WIDTH = re.compile("[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
 _EMOJI_CODE = re.compile(r"[\[［][^\[\]［］\r\n]{1,10}[\]］]")
 _WHITESPACE = re.compile(r"\s+")
+# "4天前·四川" / "刚刚" / "昨天 12:30" style meta line that ends the comment body.
+_TIME_MARKER = re.compile(
+    r"(?:刚刚|今天|昨天|前天|"
+    r"\d+\s*(?:秒|分钟|小时|天|周|星期|个月|月|年)前|"
+    r"\d{4}-\d{1,2}-\d{1,2}(?:\s+\d{1,2}:\d{2})?|"
+    r"\d{1,2}-\d{1,2}(?:\s+\d{1,2}:\d{2})?|"
+    r"\d{1,2}:\d{2})"
+)
+# No boundary requirement: Douyin renders the meta row as inline spans, so
+# "正文4天前·四川" is common and still must be cut at "4天前".
+_TIME_AT = _TIME_MARKER
+_TIME_ROW_FULL = re.compile(
+    r"^(?:" + _TIME_MARKER.pattern + r")(?:\s*\d{1,2}:\d{2})?"
+    r"(?:\s*[·•]\s*[^\s·•]{1,16})?$"
+)
+# Page-side collapsed placeholder: a lone "…" or "..." token, not ellipsis inside prose.
+_STANDALONE_ELLIPSIS = re.compile(r"(?:^|(?<=\s))(?:[…]+|\.{3,})(?=\s|$)")
+_EDGE_NOISE = re.compile(r"^[\s…·•]+|[\s…·•]+$")
+_BODY_EDGE_NOISE = re.compile(r"^[\s…·•\.]+|[\s…·•\.]+$")
+_TAIL_CONTROLS = re.compile(
+    r"(?:\s*(?:分享|回复|展开\s*\d*\s*条回复|展开更多回复|展开\s*\d+\s*条|"
+    r"收起|展开|作者赞过|作者置顶|作者|置顶|点赞|赞))*\s*$"
+)
+_GENERIC_LINES = {"作者", "回复", "分享", "展开", "收起", "置顶", "点赞", "赞"}
+_REPLY_MARKERS = ("reply", "sub-comment", "subcomment")
 
 
 def clamp_limit(value, default: int = DEFAULT_LIMIT) -> int:
@@ -41,25 +68,51 @@ def clamp_limit(value, default: int = DEFAULT_LIMIT) -> int:
 
 
 def clean_comment_text(value, limit: int = MAX_TEXT_CHARS) -> str:
-    """Drop emoji codes, zero-width characters and redundant whitespace."""
+    """Drop emoji codes, zero-width characters, ellipsis placeholders and extra whitespace."""
     text = _ZERO_WIDTH.sub("", str(value or ""))
     text = _EMOJI_CODE.sub("", text)
+    text = _STANDALONE_ELLIPSIS.sub(" ", text)
     text = _WHITESPACE.sub(" ", text).strip()
+    text = _EDGE_NOISE.sub("", text).strip()
     return text[:limit].strip()
 
 
-def parse_like_count(value) -> int:
-    """Parse Douyin-style counters such as ``1.2万``, ``3.4w`` or ``1,234``."""
+def clean_comment_body(value, limit: int = MAX_TEXT_CHARS) -> str:
+    """Trim the comment body at its time/region row and drop trailing control labels."""
+    text = _ZERO_WIDTH.sub("", str(value or ""))
+    text = _EMOJI_CODE.sub("", text)
+    text = _STANDALONE_ELLIPSIS.sub(" ", text)
+    text = _WHITESPACE.sub(" ", text).strip()
+    match = _TIME_AT.search(text)
+    if match:
+        text = text[:match.start()]
+    text = _WHITESPACE.sub(" ", text).strip()
+    for _ in range(3):
+        trimmed = _TAIL_CONTROLS.sub("", text).strip()
+        if trimmed == text:
+            break
+        text = trimmed
+    text = _BODY_EDGE_NOISE.sub("", text).strip()
+    return text[:limit].strip()
+
+
+def parse_like_count(value) -> int | None:
+    """Parse Douyin-style counters such as ``1.2万``, ``3.4w`` or ``1,234``.
+
+    Returns ``None`` when the node has no number (unknown), never a fake 0.
+    """
     raw = _ZERO_WIDTH.sub("", str(value or "")).strip().lower()
     raw = raw.replace(",", "").replace("，", "")
+    if not raw:
+        return None
     match = re.search(r"(\d+(?:\.\d+)?)\s*([万亿wkm]?)", raw)
     if not match:
-        return 0
+        return None
     multiplier = {"万": 10_000, "w": 10_000, "k": 1_000, "千": 1_000, "m": 1_000_000, "亿": 100_000_000}
     try:
         number = float(match.group(1))
     except ValueError:
-        return 0
+        return None
     return int(round(number * multiplier.get(match.group(2), 1)))
 
 
@@ -161,77 +214,205 @@ _TEXT_HINTS = (
 )
 
 
-def _author_from_item(item: _DomNode) -> str:
-    for node in _walk(item):
-        if node.tag != "a":
+def _is_reply_container(node: _DomNode) -> bool:
+    """Nested replies (楼中楼) are excluded from the main comment's own fields."""
+    if node.tag in {"#text", "#root"}:
+        return False
+    markers = _markers(node)
+    return any(hint in markers for hint in _REPLY_MARKERS)
+
+
+def _walk_main(node: _DomNode):
+    """Walk descendants while skipping every nested reply container."""
+    for child in node.children:
+        if child.tag != "#text" and _is_reply_container(child):
             continue
-        if "/user/" not in _attr(node, "href"):
+        yield child
+        yield from _walk_main(child)
+
+
+def _raw_text_main(node: _DomNode) -> str:
+    parts: list[str] = []
+
+    def walk(current: _DomNode) -> None:
+        if current.tag == "#text":
+            parts.append(current.text)
+        elif current.tag == "br":
+            parts.append("\n")
+        elif current.tag in _SKIP_TEXT_TAGS:
+            return
+        elif _is_reply_container(current):
+            return
+        else:
+            for child in current.children:
+                walk(child)
+            if current.tag in _BLOCK_TAGS:
+                parts.append("\n")
+
+    for child in node.children:
+        walk(child)
+    return _ZERO_WIDTH.sub("", "".join(parts))
+
+
+def _strip_author_badge(text: str) -> str:
+    """The 作者 badge is rendered inside the name anchor, so it leaks into the name."""
+    cleaned = re.sub(r"\s*作者\s*$", "", str(text or "")).strip()
+    return cleaned
+
+
+def _author_node(item: _DomNode) -> tuple[str, _DomNode | None]:
+    for node in _walk_main(item):
+        if node.tag != "a" or "/user/" not in _attr(node, "href"):
             continue
-        text = clean_comment_text(_raw_text(node), 40)
+        text = _strip_author_badge(clean_comment_text(_raw_text(node), 40))
         if text and text != "作者":
-            return text
-    for node in _walk(item):
+            return text, node
+    for node in _walk_main(item):
         if node.tag == "#text":
             continue
         if any(hint in _markers(node) for hint in _AUTHOR_HINTS):
-            text = clean_comment_text(_raw_text(node), 40)
+            text = _strip_author_badge(clean_comment_text(_raw_text(node), 40))
             if text and text != "作者":
-                return text
-    for line in _raw_text(item).splitlines():
-        text = clean_comment_text(line, 40)
-        if text and text not in {"作者", "回复", "展开", "收起"}:
-            return text
-    return ""
-
-
-def _comment_text_from_item(item: _DomNode, author: str) -> str:
-    for node in _walk(item):
-        if node.tag == "#text":
+                return text, node
+    for line in _raw_text_main(item).splitlines():
+        text = _strip_author_badge(clean_comment_text(line, 40))
+        if not text or text in _GENERIC_LINES or _TIME_AT.search(text):
             continue
-        if any(hint in _markers(node) for hint in _TEXT_HINTS):
-            text = clean_comment_text(_raw_text(node))
-            if text:
-                return text
-
-    lines = [_WHITESPACE.sub(" ", line).strip() for line in _raw_text(item).splitlines()]
-    kept: list[str] = []
-    for line in lines:
-        if not line or line == author or line in {"作者", "回复", "展开", "收起"}:
+        if re.fullmatch(r"\d+(?:\.\d+)?[万亿wkm]?", text):
             continue
-        if re.fullmatch(r"\d+(?:\.\d+)?[万亿wkm]?", line):
-            continue
-        if re.fullmatch(r"(?:刚刚|昨天|今天|\d+.*前|\d{1,2}-\d{1,2}|\d{4}-\d{1,2}-\d{1,2})", line):
-            continue
-        kept.append(line)
-    return clean_comment_text(" ".join(kept))
+        return text, None
+    return "", None
 
 
-def _likes_from_item(item: _DomNode) -> int:
-    for node in _walk(item):
-        if node.tag == "#text":
-            continue
-        if "like" in _markers(node):
-            value = _raw_text(node).strip()
-            if re.search(r"\d", value):
-                return parse_like_count(value)
-    return 0
+def _author_from_item(item: _DomNode) -> str:
+    return _author_node(item)[0]
 
 
-def _is_author(item: _DomNode) -> bool:
-    for node in _walk(item):
+def _time_row_node(item: _DomNode) -> _DomNode | None:
+    """Find the small "2周前·北京" element; its previous sibling is the body."""
+    for node in _walk_main(item):
         if node.tag == "#text":
             continue
         text = _WHITESPACE.sub(" ", _raw_text(node)).strip()
+        if text and len(text) <= 24 and _TIME_ROW_FULL.match(text):
+            return node
+    return None
+
+
+def _body_node_from_time_row(item: _DomNode) -> _DomNode | None:
+    time_node = _time_row_node(item)
+    if time_node is None or time_node._parent is None:
+        return None
+    siblings = time_node._parent.children
+    try:
+        index = siblings.index(time_node)
+    except ValueError:
+        return None
+    for previous in reversed(siblings[:index]):
+        if previous.tag == "#text" or _is_reply_container(previous):
+            continue
+        return previous
+    return None
+
+
+def _comment_text_from_item(item: _DomNode, author: str) -> str:
+    for node in _walk_main(item):
+        if node.tag == "#text":
+            continue
+        if any(hint in _markers(node) for hint in _TEXT_HINTS):
+            text = clean_comment_body(_raw_text(node))
+            if author and text.startswith(author):
+                text = clean_comment_body(text[len(author):].lstrip("：: "))
+            if text:
+                return text
+
+    # Real 2026-11 DOM: body sits in the element right before the time row.
+    body_node = _body_node_from_time_row(item)
+    if body_node is not None:
+        text = clean_comment_body(_raw_text(body_node))
+        if author and text.startswith(author):
+            text = clean_comment_body(text[len(author):].lstrip("：: "))
+        if text:
+            return text
+
+    kept: list[str] = []
+    for line in _raw_text_main(item).splitlines():
+        text = clean_comment_body(line)
+        if not text or text == author or text in _GENERIC_LINES:
+            continue
+        if re.fullmatch(r"\d+(?:\.\d+)?[万亿wkm]?", text):
+            continue
+        kept.append(text)
+    text = clean_comment_body(" ".join(kept))
+    if author and text.startswith(author):
+        text = clean_comment_body(text[len(author):])
+    return text
+
+
+def _likes_from_item(item: _DomNode) -> int | None:
+    """Read the main comment's like counter; ``None`` means the page hid it."""
+    # Real 2026-11 DOM: <div class="... comment-item-stats-container">
+    #   <p><svg .../><span>401</span></p><p><svg .../></p>  (first <p> = likes)
+    for node in _walk_main(item):
+        if node.tag == "#text" or _is_reply_container(node):
+            continue
+        markers = _markers(node)
+        if "comment-item-stats" not in markers and "stats-container" not in markers:
+            continue
+        for child in _walk_main(node):
+            if child.tag != "p":
+                continue
+            value = _WHITESPACE.sub(" ", _raw_text(child)).strip()
+            return parse_like_count(value)
+
+    best: int | None = None
+    for node in _walk_main(item):
+        if node.tag == "#text" or _is_reply_container(node):
+            continue
+        markers = _markers(node)
+        if "like" not in markers and "digg" not in markers:
+            continue
+        value = _WHITESPACE.sub(" ", _raw_text(node)).strip()
+        if not value or len(value) > 24 or "\n" in value:
+            continue
+        parsed = parse_like_count(value)
+        if parsed is not None and (best is None or parsed > best):
+            best = parsed
+    return best
+
+
+def _contains_author_badge(node: _DomNode) -> bool:
+    for child in _walk_main(node):
+        if child.tag == "#text":
+            continue
+        text = _WHITESPACE.sub(" ", _raw_text(child)).strip()
+        if not text or len(text) > 8:
+            continue
+        markers = _markers(child)
         if text == "作者":
             return True
-        markers = _markers(node)
-        if ("author-tag" in markers or "authortag" in markers) and "作者" in text:
+        if "作者" in text and ("author-tag" in markers or "authortag" in markers):
             return True
     return False
 
 
+def _is_author(item: _DomNode, author: str) -> bool:
+    """True only when the *main* commenter's name carries the 作者 badge."""
+    name, node = _author_node(item)
+    if not name or not author or name != author or node is None:
+        return False
+    current: _DomNode | None = node
+    for _ in range(3):
+        if current is None:
+            return False
+        if _contains_author_badge(current):
+            return True
+        current = current._parent
+    return False
+
+
 def _has_image(item: _DomNode) -> bool:
-    for node in _walk(item):
+    for node in _walk_main(item):
         if node.tag == "img":
             if _is_avatar_image(node):
                 continue
@@ -303,7 +484,7 @@ def parse_comment_nodes(nodes, limit: int = MAX_LIMIT) -> list[dict]:
                 "author": author,
                 "text": text,
                 "likes": _likes_from_item(root),
-                "isAuthor": _is_author(root),
+                "isAuthor": _is_author(root, author),
                 "hasImage": has_image,
             })
         except Exception:
@@ -451,6 +632,25 @@ def _result(items: list[dict], limit: int, partial: bool, reason: str,
     }
 
 
+def _snapshot_comments(page, state: dict) -> None:
+    """Read-only debug snapshot of the comment DOM; no-op unless the env flag is on."""
+    if not douyin_debug.enabled():
+        return
+    meta = {
+        "url": str(getattr(page, "url", "") or ""),
+        "strategy": str(state.get("strategy") or ""),
+        "panel": bool(state.get("panel")),
+        "nodes": len(state.get("nodes") or []),
+    }
+    douyin_debug.save("comments-items", "\n".join((state.get("nodes") or [])[:3]), meta)
+    try:
+        page_html = page.content()
+    except Exception:
+        page_html = ""
+    if page_html:
+        douyin_debug.save("comments-page", page_html, meta)
+
+
 def collect_video_comments(page, limit: int = DEFAULT_LIMIT,
                            timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
     """Collect up to ``limit`` comments with a hard total timeout.
@@ -468,9 +668,18 @@ def collect_video_comments(page, limit: int = DEFAULT_LIMIT,
     collected: dict[tuple[str, str], dict] = {}
     strategy = ""
     items: list[dict] = []
+
+    def finish(result: dict) -> dict:
+        if douyin_debug.enabled():
+            douyin_debug.save_json("comments-parsed", result, {
+                "url": str(getattr(page, "url", "") or ""),
+            })
+        return result
+
     try:
         if not ensure_comment_panel(page, deadline):
-            return _result([], limit, False, "no-comment-panel", strategy, started)
+            return finish(_result([], limit, False, "no-comment-panel", strategy, started))
+        _snapshot_comments(page, extract_comment_nodes(page))
         idle = 0
         empty_rounds = 0
         while True:
@@ -485,27 +694,27 @@ def collect_video_comments(page, limit: int = DEFAULT_LIMIT,
                     grew = True
             items = list(collected.values())[:limit]
             if len(items) >= limit:
-                return _result(items, limit, False, "ok", strategy, started)
+                return finish(_result(items, limit, False, "ok", strategy, started))
             if time_module.monotonic() >= deadline:
-                return _result(items, limit, bool(items), "timeout", strategy, started)
+                return finish(_result(items, limit, bool(items), "timeout", strategy, started))
             if not state["nodes"]:
                 # The panel can render slightly after it opens; give it a short grace.
                 empty_rounds += 1
                 if empty_rounds >= 3:
-                    return _result(items, limit, False, "no-comments", strategy, started)
+                    return finish(_result(items, limit, False, "no-comments", strategy, started))
                 time_module.sleep(0.6)
                 continue
             empty_rounds = 0
             idle = 0 if grew else idle + 1
             if idle >= 3:
-                return _result(items, limit, False, "exhausted", strategy, started)
+                return finish(_result(items, limit, False, "exhausted", strategy, started))
             if not scroll_comment_list(page):
                 idle += 1
                 if idle >= 3:
-                    return _result(items, limit, False, "exhausted", strategy, started)
+                    return finish(_result(items, limit, False, "exhausted", strategy, started))
             if time_module.monotonic() >= deadline:
-                return _result(items, limit, bool(items), "timeout", strategy, started)
+                return finish(_result(items, limit, bool(items), "timeout", strategy, started))
             time_module.sleep(0.6)
     except Exception as exc:
-        return _result(items[:limit], limit, bool(items),
-                       f"error:{exc.__class__.__name__}", strategy, started)
+        return finish(_result(items[:limit], limit, bool(items),
+                              f"error:{exc.__class__.__name__}", strategy, started))
