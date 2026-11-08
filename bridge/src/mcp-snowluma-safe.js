@@ -24,7 +24,8 @@ import {
 } from './avatar-image.mjs';
 import { resolveFfmpegPath } from './animated-image.mjs';
 import { readDiaryForTool } from './diary.mjs';
-import { generateImage, normalizeImageGenConfig, pickStylePreset, resolveStylePreset, sanitizeDrawDescription, STYLE_PRESET_NAMES, OUTFIT_NAMES, pickOutfit, TAIL_MODES, EXPRESSION_NAMES, EXPRESSIONS, resolveExpression, VIBE_MODES, VIBES, resolveVibe, drawFailureReply } from './image-gen.mjs';
+import { generateImage, normalizeImageGenConfig, pickStylePreset, resolveStylePreset, sanitizeDrawDescription, STYLE_PRESET_NAMES, OUTFIT_NAMES, PRIVATE_ONLY_OUTFITS, pickOutfit, TAIL_MODES, EXPRESSION_NAMES, EXPRESSIONS, resolveExpression, VIBE_MODES, VIBES, resolveVibe, HAIRSTYLE_NAMES, HAIRSTYLES, FRAMING_NAMES, drawFailureReply } from './image-gen.mjs';
+import { enqueuePendingSend } from './imagegen-pending-send.mjs';
 import { DRAW_MODERATION_PROMPT } from './image-content-policy.mjs';
 import { inspectStickerImage } from './sticker-vision.mjs';
 import { createDrawToolQuota, decideDrawToolAccess, normalizeDrawToolArgs, DRAW_SIZE_OPTIONS } from './image-draw-tool.mjs';
@@ -1786,14 +1787,16 @@ server.tool(
     size: z.enum(DRAW_SIZE_OPTIONS).optional().describe('可选尺寸；默认沿用 config.json 的 imageGen 尺寸'),
     style: z.string().trim().max(120).optional().describe('可选补充画面细节或光线，最多 120 字；不能用来覆盖系统画风，Q版/三头身/猫耳帽一类词会被清掉'),
     preset: z.enum(STYLE_PRESET_NAMES).optional().describe('可选画风档位（只影响构图与光影）：keyvisual=成人比例日系立绘（默认），closeup=番剧半身特写，maid=三分之二身立绘，jk=夜景立绘，qipao=旗袍夜景构型；不填则用 config 里的 stylePreset，config.styleRotate=true 时随机轮换'),
-    outfit: z.enum([...OUTFIT_NAMES, 'auto', 'none']).optional().describe('可选服装：maid/jk/hoodie/knit/yukata/shirt，auto=每次随机（默认），none=沿用配置里的服装描述；换装不改变脸与发型'),
+    outfit: z.enum([...OUTFIT_NAMES, 'auto', 'none']).optional().describe('可选服装：maid/jk/hoodie/knit/yukata/shirt/swim/dress，bikini 与 nightgown 仅主人私聊可用；auto=每次随机（默认），none=沿用配置里的服装描述；换装不改变脸与发型'),
     tail: z.enum(TAIL_MODES).optional().describe('可选尾巴档位：required=正身必带一条鲸尾，optional=构图拥挤/侧身时省略（默认），off=不画尾巴、改用发饰与刺绣保证辨识度'),
     expression: z.enum(EXPRESSION_NAMES).optional().describe('可选表情：gentle=温柔浅笑（默认）、happy=开心大笑、shy=害羞脸红、pout=委屈撅嘴、smug=得意坏笑、surprised=惊讶睁大眼、sleepy=困倦半睡、serious=认真皱眉。不传时按最近几条对话的语气推断（逗/夸/凶/撒娇等），推断不出用 gentle；只改眉眼嘴与脸红，不改脸型与发型'),
     vibe: z.enum([...VIBE_MODES, 'auto']).optional().describe('可选气质/年龄表现：cute=萌系（脸略圆润、眼睛更亮更软，但必须是成年女性体型，绝不画成小孩）、youth=青春少女、mature=成熟御姐、auto=默认随机（萌系与青春权重更高，同一会话尽量不连续重复）。只调幼态感/圆润度/眼神/姿态，不换脸、不改发色、不换耳饰'),
+    hairstyle: z.enum([...HAIRSTYLE_NAMES, 'auto']).optional().describe(`可选发型：${HAIRSTYLE_NAMES.map((name) => `${name}=${HAIRSTYLES[name].label}`).join('、')}、auto=按气质与服装自动选并避开同一会话上一款。只换发型形态，发色、五官、瞳色、鳍耳与鲸鱼发饰不变；不传则用 config 里的 hairstyle`),
+    framing: z.enum([...FRAMING_NAMES, 'auto']).optional().describe('可选景别：full=全身（人物约占画幅 60%–75%，头顶留空、脚下落地，默认竖幅）、medium=七分身（大腿以上）、closeup=半身、auto=按服装自动（泳装七分身，其余全身）。不传则用 config 里的 framing'),
     referenceImage: z.string().trim().max(3000).optional().describe('可选参考图：本地绝对路径（png/jpeg/webp）或 data:image/...;base64,...；用于保角色换场景，仅当生图后端声明支持参考图时生效（当前 dashscope），最多 3 张、单张不超过 10MB、边长 256–4096；不传时用配置里的角色锚点'),
     chatKey: z.string().optional().describe('可选会话标识，通常留空（默认使用 key）')
   },
-  async ({ key, token, prompt, size, style, chatKey, preset, outfit, tail, expression, vibe, referenceImage }) => {
+  async ({ key, token, prompt, size, style, chatKey, preset, outfit, tail, expression, vibe, hairstyle, framing, referenceImage }) => {
     try {
       const config = normalizeImageGenConfig(getConfig().imageGen || {});
       if (!config.enabled) {
@@ -1861,7 +1864,16 @@ server.tool(
       });
       const isGroup = String(sessionKey).startsWith('group:');
       const target = String(sessionKey).split(':')[1];
-      const lastOwnerMessage = [...recentMessages].reverse().find((message) => message?.isOwner);
+      // 只有主人能触发画图：取最近一条真人消息判断身份，群友请求一律拒绝，不调模型也不落盘。
+      const lastIncoming = [...recentMessages].reverse().find((message) => message && message.isSelf !== true);
+      const ownerTriggered = Boolean(lastIncoming?.isOwner);
+      if (!ownerTriggered) {
+        return { content: [{ type: 'text', text: '画图功能只对主人开放，别人这边就不画了。' }] };
+      }
+      // 受限服装在「仅主人」之上再加一层：只在主人私聊里画，群里不画。
+      if (PRIVATE_ONLY_OUTFITS.includes(finalOutfit) && isGroup) {
+        return { content: [{ type: 'text', text: '这套衣服只在主人的私聊里画，群里就先不画了。' }] };
+      }
 
       const result = await drawWithFallback({
         description: args.request.prompt,
@@ -1870,11 +1882,14 @@ server.tool(
         isGroup,
         chatKey: sessionKey,
         trigger: 'tool',
-        senderId: isGroup ? String(lastOwnerMessage?.userId || '') : String(target),
+        senderId: isGroup ? String(lastIncoming?.userId || '') : String(target),
+        isOwner: true,
         expression: expressionChoice.name,
         expressionSource: expressionChoice.source,
         vibe: vibeChoice.name,
         vibeSource: vibeChoice.source,
+        hairstyle: hairstyle && hairstyle !== 'auto' ? hairstyle : undefined,
+        framing: framing && framing !== 'auto' ? framing : undefined,
         referenceImage: referenceImage || null
       });
 
@@ -1889,14 +1904,25 @@ server.tool(
         ? `审核通过（confidence=${Number(result.analysis.confidence) || 0}）`
         : '本次未开启审核';
       let delivery = { ok: false, error: '发送未执行' };
+      // 默认投递：群聊仍发回发起的群；私聊生成统一发主人私聊。
+      const deliverKey = isGroup ? sessionKey : (cfg.ownerQQ ? `private:${cfg.ownerQQ}` : sessionKey);
       try {
         delivery = await agentApi('/api/send/image', {
           method: 'POST',
           headers: { 'x-agent-token': token },
-          body: JSON.stringify({ key: sessionKey, token, image: result.filePath })
+          body: JSON.stringify({ key: deliverKey, token, image: result.filePath })
         });
       } catch (error) {
         delivery = { ok: false, error: error?.message ?? String(error) };
+      }
+      if (!delivery?.ok) {
+        // QQ 离线也不丢图：入待发队列，qq-bot 登录成功后补发（同一文件+目标只入队一次）。
+        enqueuePendingSend({
+          filePath: result.filePath,
+          target: deliverKey,
+          sha256: result.meta?.sha256 || '',
+          createdAt: Date.now()
+        });
       }
       const summary = [
         `画好了：${result.filePath}`,
@@ -1908,8 +1934,8 @@ server.tool(
         `审核：${moderation}`,
         `元数据：${result.metaPath || '未写入'}`,
         delivery?.ok
-          ? `已发送到 ${sessionKey}，messageId=${delivery.messageId ?? '-'}`
-          : `图已生成，但发送失败：${delivery?.error || '未知原因'}`
+          ? `已发送到 ${deliverKey}，messageId=${delivery.messageId ?? '-'}`
+          : `图已生成，但发送失败：${delivery?.error || '未知原因'}（已加入待发队列，登录后补发）`
       ].join('\n');
       return {
         content: [

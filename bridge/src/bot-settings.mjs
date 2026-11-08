@@ -141,9 +141,7 @@ export function publicSettings(config) {
       othersReplies: poke.othersReplies ?? '你们戳来戳去的，好热闹。'
     },
     imageGen: {
-      enabled: imageGen.enabled !== false,
-      allowGroup: imageGen.allowGroup === true,
-      groupDailyLimit: Number.isInteger(imageGen.groupDailyLimit) ? imageGen.groupDailyLimit : 3
+      enabled: imageGen.enabled !== false
     }
   };
 }
@@ -355,9 +353,8 @@ export function validateSettings(value) {
       othersReplies: pokeReplies(p.othersReplies, '群友互戳回复')
     },
     imageGen: {
-      enabled: boolean(imageGen?.enabled ?? true, '画图功能'),
-      allowGroup: boolean(imageGen?.allowGroup ?? false, '允许群友触发画图'),
-      groupDailyLimit: integer(imageGen?.groupDailyLimit ?? 3, 0, 20, '群友每日画图上限')
+      enabled: boolean(imageGen?.enabled ?? true, '画图功能')
+      // 生图只允许主人使用，不再提供「允许群友触发」开关。
     }
   };
 }
