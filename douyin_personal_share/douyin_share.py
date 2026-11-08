@@ -69,11 +69,6 @@ BROWSE_REQUEST_PATH = ROOT / "browse-request.json"
 BROWSE_ACTIVE_PATH = ROOT / "browse-request-active.json"
 LISTENER_HEARTBEAT_PATH = ROOT / "listener-heartbeat.json"
 LOCAL_TEMP_DIR = ROOT / "playwright-temp"
-
-# 商店版 Python 的 tempfile 不读 TEMP/TMP，会退回当前工作目录；本脚本常以仓库目录
-# 为 cwd 运行，第三方库的临时文件便会堆进仓库。这里显式指到本目录下的临时目录。
-LOCAL_TEMP_DIR.mkdir(parents=True, exist_ok=True)
-tempfile.tempdir = str(LOCAL_TEMP_DIR)
 VIDEO_ANALYZER = ROOT.parent / "bridge" / "scripts" / "analyze-douyin-video.mjs"
 SINGAPORE = ZoneInfo("Asia/Singapore")
 DAILY_WINDOWS = (
@@ -2579,4 +2574,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # 商店版 Python 的 tempfile 不读 TEMP/TMP，会退回当前工作目录；监听器以仓库目录
+    # 为 cwd 运行，第三方库的临时文件会堆在仓库里。仅在入口进程显式指定，避免影响测试。
+    LOCAL_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(LOCAL_TEMP_DIR)
     raise SystemExit(main())
