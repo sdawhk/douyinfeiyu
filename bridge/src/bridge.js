@@ -962,7 +962,7 @@ async function main() {
     const record = listArchived(3650).find((item) => item.day === match[1] && item.file.toLowerCase() === match[2].toLowerCase());
     if (!record || !record.path || !fs.existsSync(record.path)) throw new Error(`图库中找不到图片 ${imageId}`);
     const analysis = readImageAnalyses()[record.file] ?? {};
-    if (analysis.appropriate === false || analysis.sexualSuggestive === true || analysis.grossOrGraphic === true) {
+    if (analysis.appropriate === false) {
       throw new Error('这张图片未通过发送内容检查，已拒绝发送');
     }
     // 反面教材样图只用于复盘，绝不允许当作角色立绘发出去。
@@ -4009,7 +4009,7 @@ async function main() {
           const record = listArchived(3650).find((item) => `${item.day}/${item.file}` === imageId);
           if (!record || !record.path || !fs.existsSync(record.path)) { sendJson({ ok: false, error: `图库中找不到图片 ${imageId}` }, 404); return; }
           const analysis = readImageAnalyses()[record.file] ?? {};
-          if (analysis.appropriate === false || analysis.sexualSuggestive === true || analysis.grossOrGraphic === true) { sendJson({ ok: false, error: '这张图片未通过内容检查，不能提供预览' }, 403); return; }
+          if (analysis.appropriate === false) { sendJson({ ok: false, error: '这张图片未通过内容检查，不能提供预览' }, 403); return; }
           try {
             const stat = fs.statSync(record.path);
             const maxBytes = Math.min(16 * 1024 * 1024, Math.max(1, Number(cfg.socialV2?.archiveImages?.maxBytes) || 10 * 1024 * 1024));

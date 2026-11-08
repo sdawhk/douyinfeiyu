@@ -1,4 +1,4 @@
-import { shouldBlockImageStorage } from './image-content-policy.mjs';
+import { IMAGE_SAFETY_CONFIDENCE, shouldBlockImageStorage } from './image-content-policy.mjs';
 
 export const IMAGE_LIBRARY_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -13,7 +13,11 @@ export function shouldCleanImageArchiveRecord(analysis) {
   if (CURATED_NEGATIVE_TAG.test((Array.isArray(analysis?.tags) ? analysis.tags : []).join(' '))) return false;
   if (shouldBlockImageStorage(analysis)) return true;
   const confidence = Number(analysis?.confidence);
-  if (!analysis || !Number.isFinite(confidence) || confidence < 0.8) return false;
+  if (!analysis || !Number.isFinite(confidence)) return false;
+  // 自绘图审核口径已放宽到只看 appropriate，但图库清理仍要隔离分类器明确标记的性暗示/血腥图，
+  // 否则这些图只是不出现在列表里、文件依旧留在磁盘上。置信度沿用安全阈值 0.75。
+  if (confidence >= IMAGE_SAFETY_CONFIDENCE && (analysis.sexualSuggestive === true || analysis.grossOrGraphic === true)) return true;
+  if (confidence < 0.8) return false;
   const details = [analysis.kind, ...(Array.isArray(analysis.tags) ? analysis.tags : []), analysis.caption]
     .map((item) => String(item ?? '').trim())
     .join(' ');
