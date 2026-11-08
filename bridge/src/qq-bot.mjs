@@ -4853,7 +4853,7 @@ async function inspectAndArchiveImage(image, sender, chatKey, receivedAt) {
       log('[image-cleanup] incoming payment/chat image skipped archive', JSON.stringify({
         kind: result.kind, confidence: result.confidence
       }));
-      return result;
+      return withSource;
     }
     const ref = nameFor(full.data, full.mime);
     const previousAnalysis = readImageAnalyses()[ref] || {};
