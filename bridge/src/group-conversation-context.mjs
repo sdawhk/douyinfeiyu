@@ -1,5 +1,6 @@
-const DEFAULT_WINDOW_MS = 2 * 60_000;
-const DEFAULT_MAX_ENTRIES = 10;
+const DEFAULT_WINDOW_MS = 10 * 60_000;
+const DEFAULT_MAX_ENTRIES = 20;
+const DEFAULT_LATEST_ENTRIES = 8;
 const DEFAULT_MAX_TEXT_LENGTH = 180;
 const DEFAULT_ECHO_WINDOW_MS = 12 * 60 * 60_000;
 const DEFAULT_ECHO_MAX_ENTRIES = 60;
@@ -45,14 +46,14 @@ export class GroupConversationContext {
     this.versions.set(key, (this.versions.get(key) ?? 0) + 1);
   }
 
-  format(groupId, now = Date.now(), { senderId = null } = {}) {
+  format(groupId, now = Date.now(), { senderId = null, extra = '' } = {}) {
     const key = String(groupId);
     const recent = (this.groups.get(key) ?? []).filter((item) => now - item.at <= this.windowMs);
     this.groups.set(key, recent);
-    if (!recent.length) return '';
-    // A short window helps resolve follow-ups without carrying several parallel topics.
-    const latest = recent.slice(-2);
-    const sameSpeaker = senderId == null ? [] : recent.slice(0, -2)
+    if (!recent.length) return String(extra ?? '').trim();
+    // 保留最近 8 条，足以接住当前话题和多话题并行；更早的只补该发言人最近 1 条。
+    const latest = recent.slice(-DEFAULT_LATEST_ENTRIES);
+    const sameSpeaker = senderId == null ? [] : recent.slice(0, -DEFAULT_LATEST_ENTRIES)
       .filter((item) => item.senderId === String(senderId)).slice(-1);
     const lines = [...sameSpeaker, ...latest].map((item) => {
       const time = new Date(item.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
@@ -62,9 +63,10 @@ export class GroupConversationContext {
       return `- ${time} ${speaker}${item.directionHint ? `（${item.directionHint}）` : ''}：${JSON.stringify(item.text)}`;
     });
     return [
-      '【本群近期消息背景】只用于理解本轮明确的追问或引用；可能属于别人的话题，不要抢答或接错对象。',
+      extra,
+      '【本群近期消息背景】这是本群最近的真实对话，用来判断在跟谁说话、在聊什么；能自然接上就接，拿不准对象时只回应明确找你的那条。',
       ...lines
-    ].join('\n');
+    ].filter((line) => String(line ?? '').trim()).join('\n');
   }
 
   version(groupId) {

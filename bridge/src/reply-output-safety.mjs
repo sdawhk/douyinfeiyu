@@ -350,6 +350,16 @@ export function replyLanguageIssue(input, reply) {
     ? 'wrong-language' : '';
 }
 
+/** Catch replies that take over the other person's family role (e.g. “我帮你照顾”). */
+const RELATION_SELF_FAMILY = /我(?:的)?(?:女儿|儿子|孩子|爸|老爸|妈|老妈|老婆|老公|对象|媳妇|丈夫|妻子)/u;
+const RELATION_TAKEOVER = /(?:我(?:来|帮你|替你|给你|负责)?(?:照顾|照看|管|带|养|接送|辅导)|交给我|包在我身上|放心交给我)/u;
+
+export function relationshipMisclaimIssue(input, reply) {
+  if (!RELATION_SELF_FAMILY.test(String(input ?? ''))) return '';
+  return RELATION_TAKEOVER.test(stripStickerDirectives(String(reply ?? '')))
+    ? 'relationship-misclaim' : '';
+}
+
 /** Compare actual reply text, not just shared topic words. */
 export function repeatsRecentReply(reply, recentReplies = []) {
   const normalize = (value) => stripStickerDirectives(value)

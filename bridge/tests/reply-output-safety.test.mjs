@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeModelReply, replySafetyDiagnostics, replyQualityIssue, repeatsRecentReply, stripHistoryEcho, isHistoryEchoReply } from '../src/reply-output-safety.mjs';
+import { sanitizeModelReply, replySafetyDiagnostics, replyQualityIssue, repeatsRecentReply, relationshipMisclaimIssue, stripHistoryEcho, isHistoryEchoReply } from '../src/reply-output-safety.mjs';
 
 test('keeps ordinary conversational replies unchanged', () => {
   const result = sanitizeModelReply('这免死金牌听着挺可靠，金币都拿出来担保了。');
@@ -107,6 +107,18 @@ test('removes closed think tags and their contents', () => {
   assert.equal(result.text, '这承诺听着不太牢靠。');
   assert.equal(result.blocked, false);
   assert.equal(result.leaked, true);
+});
+
+test('flags taking over the speaker family role but allows caring follow-ups', () => {
+  for (const input of ['我女儿下周考试', '我爸最近住院了', '我老婆明天出差']) {
+    assert.equal(relationshipMisclaimIssue(input, '放心，我帮你照顾好。'), 'relationship-misclaim', input);
+    assert.equal(relationshipMisclaimIssue(input, '我来管，你别操心了。'), 'relationship-misclaim', input);
+    assert.equal(relationshipMisclaimIssue(input, '交给我吧。'), 'relationship-misclaim', input);
+    assert.equal(relationshipMisclaimIssue(input, '那你这周估计得围着她转。她紧张吗'), '', input);
+    assert.equal(relationshipMisclaimIssue(input, '严重吗？你现在人在医院？'), '', input);
+  }
+  assert.equal(relationshipMisclaimIssue('今天天气不错', '交给我吧'), '');
+  assert.equal(relationshipMisclaimIssue('我女儿下周考试', '我帮你提醒你'), '');
 });
 
 test('reports marker categories and lengths without including reply text', () => {

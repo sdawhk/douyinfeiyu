@@ -36,18 +36,32 @@ test('preserves whether a previous group message addressed another member', () =
   assert.match(context.format('group-a', 1_001), /@其他群友/);
 });
 
-test('keeps only a short background around the current speaker', () => {
+test('keeps the latest eight messages plus an earlier message from the current speaker', () => {
   const context = new GroupConversationContext();
-  for (let index = 1; index <= 8; index++) {
-    context.remember('group-a', { senderId: index === 4 ? 'alice' : 'other', text: `消息${index}` }, index * 100);
+  for (let index = 1; index <= 12; index++) {
+    context.remember('group-a', { senderId: index === 3 ? 'alice' : 'other', text: `消息${index}` }, index * 100);
   }
-  const selected = context.format('group-a', 900, { senderId: 'alice' });
-  assert.match(selected, /消息4/);
-  assert.doesNotMatch(selected, /消息3/);
-  assert.doesNotMatch(selected, /消息5/);
-  assert.match(selected, /消息7/);
-  assert.match(selected, /消息8/);
-  assert.equal(context.version('group-a'), 8);
+  const selected = context.format('group-a', 1_200, { senderId: 'alice' });
+  assert.match(selected, /消息3/);
+  assert.doesNotMatch(selected, /消息2/);
+  assert.match(selected, /消息5/);
+  assert.match(selected, /消息12/);
+  assert.equal(context.version('group-a'), 12);
+});
+
+test('injects group member impressions before the recent messages', () => {
+  const context = new GroupConversationContext();
+  context.remember('group-a', { senderId: '1', senderName: '甲', text: '在聊什么' }, 1_000);
+  const selected = context.format('group-a', 1_001, { extra: '【你记得的群友】佑小鲸：爱接梗。' });
+  assert.match(selected, /【你记得的群友】/);
+  assert.ok(selected.indexOf('【你记得的群友】') < selected.indexOf('【本群近期消息背景】'));
+});
+
+test('keeps the default context window at ten minutes', () => {
+  const context = new GroupConversationContext();
+  context.remember('group-a', { senderId: '1', text: '十分钟内' }, 0);
+  assert.match(context.format('group-a', 9 * 60_000), /十分钟内/);
+  assert.equal(context.format('group-a', 11 * 60_000), '');
 });
 
 test('describes media-only context without exposing raw placeholders', () => {
