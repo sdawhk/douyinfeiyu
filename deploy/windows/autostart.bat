@@ -71,6 +71,12 @@ if errorlevel 1 (
   echo [%date% %time%] bridge watchdog already up, skip >> "%LOGDIR%\autostart.log"
 )
 
+rem ---- 4b. AstrBot plugin sidecar ----
+if exist "%ROOT%\state\astrbot-sidecar\AstrBot\data\cmd_config.json" (
+  netstat -ano | findstr /R /C:"127.0.0.1:6199 .*LISTENING" >nul 2>&1
+  if errorlevel 1 start "QQAstrBot" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\astrbot-sidecar-watchdog.bat"
+)
+
 rem ---- 5. local image library ----
 netstat -ano | findstr /R /C:":18902 .*LISTENING" >nul 2>&1
 if errorlevel 1 (

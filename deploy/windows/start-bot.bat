@@ -172,6 +172,18 @@ if not errorlevel 1 (
   )
 )
 
+rem ---- 4b. AstrBot plugin sidecar ----
+if exist "%ROOT%\state\astrbot-sidecar\AstrBot\data\cmd_config.json" (
+  netstat -ano | findstr /R /C:"127.0.0.1:6199 .*LISTENING" >nul 2>&1
+  if errorlevel 1 (
+    if defined START_BOT_DRYRUN (
+      echo [dry-run] would run : start "QQAstrBot" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\astrbot-sidecar-watchdog.bat"
+    ) else (
+      start "QQAstrBot" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\astrbot-sidecar-watchdog.bat"
+    )
+  )
+)
+
 rem ---- 5. local image library ----
 echo [5/5] Image library
 if not defined NODE (

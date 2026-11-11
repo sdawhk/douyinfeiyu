@@ -79,6 +79,14 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `douyinOwnerQQ` / `douyinOwnerHandle` | 可选的 Douyin 主人身份映射；两项都需准确填写，且 QQ 号必须属于已配置的主人 QQ 列表。留空时本地回复接口关闭 |
 | `speechRecognition.modelDir` | 本地 SenseVoice 模型目录，默认 `D:/deepseek/state/voice-asr` |
 
+### 群日常分析与宠物插件
+
+当前大肥鱼仍由 SnowLuma + Node 桥接处理聊天。两个 AstrBot 插件运行在独立的本机附属进程中，和现有聊天共用同一个 QQ 账号的 OneBot 事件。插件源码分别来自 [群日常分析](https://github.com/SXP-Simon/astrbot_plugin_qq_group_daily_analysis) 和 [宠物系统](https://github.com/DITF16/astrbot_plugin_pet)；AstrBot、Python 与插件依赖安装在 `D:\deepseek\state\astrbot-sidecar`，不会装进系统 Python。
+
+在仓库根目录执行 `powershell -ExecutionPolicy Bypass -File bridge/scripts/setup-astrbot-sidecar.ps1` 准备环境。运行入口是 `bridge/astrbot-sidecar-watchdog.bat`；本机开机脚本也会启动它。AstrBot 面板仅监听 `127.0.0.1:6186`，面板密码保存在仅本机用户可读的隐藏文件 `D:\deepseek\state\astrbot-sidecar\dashboard-initial-password.txt`；OneBot 反向 WebSocket 仅监听 `127.0.0.1:6199`。SnowLuma 对当前大肥鱼账号添加一个指向 `ws://127.0.0.1:6199/ws` 的 WebSocket 客户端，现有 OneBot HTTP/WS 服务端端口保持原值。
+
+插件命令可用 `/` 或 `!` 前缀；桥接只让出这两项插件的明确命令，原有 `/help`、`/reset` 仍由桥接处理。群里可发送 `/宠物菜单`、`/领养宠物`、`/我的宠物`、`/宠物签到`；主人可用 `/群分析` 手动生成报告。群分析默认不自动发报，漫画功能默认关闭。只有在 SnowLuma 已连接附属进程后，才在 `bridge/config.json` 启用 `astrbotSidecar.enabled`，以免桥接提前让出这些命令。
+
 Douyin 本地接口只监听 `127.0.0.1:3101`，并要求 `x-console-token` 与控制台令牌匹配。`/douyin/reply` 只接受配置的 Douyin ID，通过独立 DSH 会话生成回复；`/douyin/browse` 只供主人私聊调用，可在普通“推荐”流中只读浏览 1–5 分钟并记录实际播放的视频。浏览接口先快速返回任务 ID，再由 MCP 使用短请求查询 `/douyin/browse-status`，避免单次工具调用超时。浏览请求会交给常驻私信监听器，在它已登录的 Edge 会话中执行，并在结束后回到私信页，避免重复启动同一 profile。QQ 主人私聊触发浏览后，会按视频摘要给出跳过/点赞建议/评论草稿（最多建议点赞 2 条、评论 1 条）；未经主人明确同意不会点赞或评论。若主人紧接着确认点赞建议，互动工具可用标题短语从近 30 条、7 天内观看记录中唯一解析标准视频链接；无匹配或多条匹配时拒绝操作。单日最多记录 5 次点赞尝试，包含结果不确定的操作。当前抖音评论输入流程也尚未验证真实 @ 账号选择。`/douyin/interact` 只允许主人私聊对一条明确指定的标准视频页点赞或评论。互动工具要求显式 dry-run 参数，评论必须是主人逐字提供的单行文案；不支持批量、关注或自动生成公开评论。MCP 工具会校验主人私聊与读取授权；互动若遇到控件不唯一、状态不明或浏览器 profile 被占用会停止，不会盲目重试。定时任务仍只处理定时分享和私信轮询，不会自动启动浏览或互动。
 
 机器人启动后会读取 OneBot 好友列表，将所有 QQ 好友合并进 `allow.private`；成为新好友时立即同步，另每 5 分钟刷新一次。原有手动白名单会保留，`deny.private` 仍优先拦截。
