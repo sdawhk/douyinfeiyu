@@ -10,7 +10,7 @@
 //   3. 发：OneBot HTTP API(127.0.0.1:3000) send_private_msg / send_group_msg
 //          以及 send_qzone_msg 发 QQ 动态（两者均已验证 retcode=0）
 
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -44,8 +44,9 @@ import { describeMessageReferences, explicitGroupReplyDecision, groupTurnPrompt,
 import { GroupConversationContext } from './group-conversation-context.mjs';
 import { searchWeb, needsFreshSearch } from './web-search-engine.mjs';
 import { readSettingsDocument } from './bot-settings.mjs';
-import { createImageGenQuota, decideImageAccess, drawFailureReply, generateImage, normalizeImageGenConfig, parseImageCommand, pickRandomTheme, shouldDrawRandomly, toImageSegment } from './image-gen.mjs';
-import { defaultPendingSendPath, enqueuePendingSend, flushPendingSends } from './imagegen-pending-send.mjs';
+import { createImageGenQuota, decideImageAccess, drawFailureReply, generateImage, logImageGenModuleFingerprint, normalizeImageGenConfig, parseImageCommand, pickRandomTheme, shouldDrawRandomly, toImageSegment } from './image-gen.mjs';
+import { defaultPendingSendPath, enqueuePendingSend, flushPendingSends, resolveImageDeliverKey } from './imagegen-pending-send.mjs';
+import { pickStockImageForRequest, recordStockSend } from './stock-image-picker.mjs';
 import { isOwnerImageReplyRequest, resolveGroupMention, latestOwnerImage, recentGroupSummary } from './owner-group-request.mjs';
 import { recentImageFollowupContext, falselyClaimsImageIsUnavailable, hasUsableImageDescription, resolveImageDescription, selfDrawnImageDescription } from './recent-image-context.mjs';
 import { findImageMeta, sha256Of } from './image-gen-meta.mjs';
@@ -81,7 +82,7 @@ import { estimateTokenCount } from '../../deploy/windows/token-usage.mjs';
 import { isDailyTaskDue, localDayKey } from './daily-task.mjs';
 import {
   DEFAULT_DIARY_DIR, DIARY_AUTO_MAX_ENTRIES, DIARY_ENTRY_MAX_CHARS, DIARY_MAX_ENTRIES_PER_DAY,
-  DIARY_MAX_INPUT_TOKENS_PER_DAY, DIARY_MIN_GAP_MS, appendDiaryEntry, diaryCommandDenial,
+  DIARY_MAX_INPUT_TOKENS_PER_DAY, DIARY_MIN_GAP_MS, appendDiaryEntry, detectDiaryGap, diaryCommandDenial,
   diaryEntryIssue, diaryInjectionText, diaryTailDue, formatDiaryReply, normalizeDiaryState,
   parseDiaryCommand, readDiaryEntries, redactDiaryText, scoreDiaryMaterial
 } from './diary.mjs';
@@ -106,9 +107,23 @@ import { resolveSingingPitchPlan } from './rvc-pitch.mjs';
 import { collectExistingGroupIds, initializeGroupInterjectionSettings, isGroupInterjectionEnabled, setGroupInterjectionEnabled } from './group-interjection-settings.mjs';
 import { getVerifiedCreditBalance, getVerifiedSongPreview, hasRedPacketMarker, listSongs, listUncertainPreviews, markFreeQuotaExemptSenders, ownerLedgerSummary, redPacketCapabilityStatus, reconcilePreviewReservations, refreshSongLibrary, registerSongOutput, reserveFreePreview, resolveUncertainPreview, settleFreePreview, cancelPaidSongOrders } from './song-library.mjs';
 import { buildPersonaContext, groupMemberImpressions, harvestBeforeRotation, observePersonaTurn, proactiveGroupDecision } from './persona-runtime.mjs';
+import { deleteGroupMemory, isBridgeRunning, startPersonaMaintenance } from './persona-maintenance.mjs';
 
 const CFG_PATH = new URL('../config.json', import.meta.url);
 const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
+// 出图等运行期路径按 mtime 热读 config.json：改配置不用重启，也不会吃到启动时的旧快照。
+let liveCfgCache = { mtimeMs: -1, value: cfg };
+function readLiveConfig() {
+  try {
+    const info = statSync(CFG_PATH);
+    if (info.mtimeMs !== liveCfgCache.mtimeMs) {
+      liveCfgCache = { mtimeMs: info.mtimeMs, value: JSON.parse(readFileSync(CFG_PATH, 'utf8')) };
+    }
+  } catch {
+    // 读不到就继续用上一份，不因为一次写盘抖动让进程挂掉。
+  }
+  return liveCfgCache.value;
+}
 // 日记（v2）：想到就记一笔，60s tick 扫描事件；23:30 只在当天 0 条时兜底收尾。
 function diaryNumber(value, min, max, fallback) {
   const number = Number(value);
@@ -371,6 +386,13 @@ const OWNER = String(cfg.ownerQQ ?? [...OWNERS][0] ?? ''); // 兼容旧引用
 // 生图待发队列落盘位置（私聊生成统一发主人私聊；群聊仍发回发起群）。
 const PENDING_SEND_PATH = defaultPendingSendPath();
 const BOT_SELF = cfg.selfQQ ? String(cfg.selfQQ) : null; // 机器人自身账号：用于过滤自己发出的回显
+// 投递路径不吃启动快照：每次现读 config.json 的 owner/self。
+function liveOwnerQQ() {
+  return String(readLiveConfig()?.ownerQQ ?? '').trim() || String(OWNER || '').trim();
+}
+function liveSelfQQ() {
+  return String(readLiveConfig()?.selfQQ ?? '').trim() || (BOT_SELF ? String(BOT_SELF) : '');
+}
 const PROTECTED_OWNER_QQS = protectedOwnerQQs(cfg);
 const ALLOW_PRIVATE = new Set((cfg.allow?.private ?? []).map(String));
 const ALLOW_GROUPS = new Set((cfg.allow?.groups ?? []).map(String));
@@ -845,7 +867,8 @@ async function sendText(target, text, isGroup) {
 }
 
 function imageGenConfig() {
-  return normalizeImageGenConfig({ ...(cfg.imageGen || {}), ...(settingsDocument.settings.imageGen || {}) });
+  const live = readLiveConfig();
+  return normalizeImageGenConfig({ ...(live.imageGen || {}), ...(settingsDocument.settings.imageGen || {}) });
 }
 
 function imageGenFailureLine(result) {
@@ -901,10 +924,11 @@ async function drawAndSendImage({ description, target, isGroup, trigger = 'comma
   if (!ownerRequest) return { ok: false, reason: 'owner-only', attempts: [] };
   const result = await generateImage({ ...request, config }, dependencies);
   if (!result.ok) return result;
-  // 默认投递：群聊仍发回发起的群；私聊生成一律发主人私聊。
-  const deliverIsGroup = isGroup;
-  const deliverTarget = isGroup ? String(target) : String(OWNER || target);
-  const deliverKey = `${deliverIsGroup ? 'group' : 'private'}:${deliverTarget}`;
+  // 投递目标绑会话：私聊就发当前会话的 id，不再从 config 推导 owner；
+  // 只有群聊触发才映射到主人私聊。owner 每次现读，不吃启动快照。
+  const deliverKey = resolveImageDeliverKey({ isGroup, sessionKey: chatKey, ownerQQ: liveOwnerQQ() });
+  const deliverIsGroup = deliverKey.startsWith('group:');
+  const deliverTarget = deliverKey.slice(deliverKey.indexOf(':') + 1);
   try {
     const sent = await sendSegments(deliverTarget, [toImageSegment(result.buffer)], deliverIsGroup);
     const messageId = String(sent?.message_id ?? '');
@@ -916,7 +940,8 @@ async function drawAndSendImage({ description, target, isGroup, trigger = 'comma
       filePath: result.filePath,
       target: deliverKey,
       sha256: result.meta?.sha256 || '',
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      lastError: String(error?.message ?? error ?? '').slice(0, 160)
     }, PENDING_SEND_PATH);
     log(`[imagegen] deliver failed target=${deliverKey} ${queued.added ? 'queued' : `skip(${queued.reason})`} detail=${String(error?.message ?? error).slice(0, 120)}`);
   }
@@ -927,6 +952,30 @@ async function drawAndSendImage({ description, target, isGroup, trigger = 'comma
   return result;
 }
 
+/**
+ * 非主人要图：不生图，从已生成的库存里挑一张发出去。
+ * 规则只对群聊给库存图；私聊非主人只说明，不投图。
+ */
+async function sendStockImage({ target, isGroup, sender, description }) {
+  const chatKey = `${isGroup ? 'group' : 'private'}:${target}`;
+  if (!isGroup) return '现在只有主人能点新图，我这边就不新画啦。';
+  try {
+    const picked = pickStockImageForRequest({ request: description, chatKey, isGroup: true });
+    if (!picked) {
+      log(`[imagegen] stock empty chat=${chatKey}`);
+      return '现在只有主人能点新图，我手头也没攒下现成的图，等我画几张再给你～';
+    }
+    const buffer = readFileSync(picked.path);
+    await sendSegments(String(target), [toImageSegment(buffer)], true);
+    recordStockSend({ fileKey: picked.key, chatKey, senderId: String(sender) });
+    log(`[imagegen] stock sent chat=${chatKey} file=${picked.key} score=${picked.score} no-provider`);
+    return '现在只有主人能点新图，我先给你找一张之前画好的～';
+  } catch (error) {
+    log(`[imagegen] stock failed chat=${chatKey} ${String(error?.message ?? error).slice(0, 120)}`);
+    return '现在只有主人能点新图，我翻了翻没找着合适的，下次再补你。';
+  }
+}
+
 /** 登录成功后补发待发队列（幂等：已发/已失败的不再重发）。 */
 function flushPendingImageSends() {
   void flushPendingSends((item) => {
@@ -935,10 +984,16 @@ function flushPendingImageSends() {
     const buffer = readFileSync(item.filePath);
     return sendSegments(id, [toImageSegment(buffer)], kind === 'group')
       .then((sent) => String(sent?.message_id ?? ''));
-  }, { statePath: PENDING_SEND_PATH })
+  }, {
+    statePath: PENDING_SEND_PATH,
+    // 自发目标改投主人私聊；改不了就标 failed，绝不把「发给自己」当成功。
+    selfId: liveSelfQQ(),
+    ownerId: liveOwnerQQ(),
+    log: (line) => log(line)
+  })
     .then((summary) => {
-      if (summary.sent || summary.failed || summary.pending) {
-        log(`[imagegen] pending flush sent=${summary.sent} failed=${summary.failed} pending=${summary.pending}`);
+      if (summary.sent || summary.failed || summary.pending || summary.retargeted) {
+        log(`[imagegen] pending flush sent=${summary.sent} failed=${summary.failed} pending=${summary.pending} retargeted=${summary.retargeted}`);
       }
     })
     .catch((error) => log('[imagegen] pending flush error', String(error?.message ?? error).slice(0, 120)));
@@ -1126,7 +1181,7 @@ function ownerPrivateMemoryForPrompt(ownerId, { includeDouyinWatch = true } = {}
   try {
     const state = JSON.parse(readFileSync(new URL('../state/social-v2.json', import.meta.url), 'utf8'));
     const impressions = state.conversations?.[`private:${ownerId}`]?.memberImpressions ?? {};
-    const facts = ['主人', 'Komorebi'].flatMap((name) => impressions[name]?.traits ?? [])
+    const facts = [String(ownerId), '主人', 'Komorebi'].flatMap((name) => impressions[name]?.traits ?? [])
       .filter((item) => typeof item === 'string')
       .map((item) => item.replace(/[\r\n]+/g, ' ').trim().slice(0, 160))
       .filter(Boolean).slice(0, 8);
@@ -1620,13 +1675,15 @@ setInterval(() => {
   });
 }, 15_000).unref?.();
 
-async function sessionFor(key) {
+async function sessionFor(key, senderId = '') {
   const existing = sessions.get(key);
   if (existing && existing.turns < 8 && existing.contextTokens < 24_000) return existing;
   if (existing) {
     try {
       const harvested = harvestBeforeRotation({
         chatKey: key,
+        isGroup: String(key).startsWith('g'),
+        senderId: senderId == null ? '' : String(senderId),
         recentExchanges: existing.recentExchanges ?? []
       });
       if (harvested.loops || harvested.recent || harvested.facts) {
@@ -1801,7 +1858,7 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
     return liveSearch.directReply;
   }
   refreshPersonas();
-  const rec = await sessionFor(key);
+  const rec = await sessionFor(key, sender);
   const toolsBefore = await toolSession(key);
   // 首次对话时把角色卡作为系统前缀一起投递（只投一次，之后靠会话记忆维持）
   const ownerPrivateTurn = key.startsWith('p') && isOwner(key.slice(1))
@@ -1908,7 +1965,7 @@ async function ask(key, text, media = [], sender = null, messageContext = '', gr
       // 只注入“今天最近 2 条 + 昨天最后 1 条”，总量 ≤450 字。
       if (DIARY.enabled) {
         try {
-          promptText += `${diaryInjectionText({ dir: DIARY.dir })}\n\n`;
+          promptText += `${diaryInjectionText({ dir: DIARY.dir, gap: diaryState.diaryGap })}\n\n`;
         } catch (error) {
           log('[diary] prompt injection skipped:', error?.message ?? error);
         }
@@ -2903,7 +2960,11 @@ async function handleCommand(text, sender, isGroup, target, senderName = '', men
     const access = decideImageAccess({
       isGroup, isOwner: isOwner(sender), mentioned, target, sender, config, quota: imageGenQuota
     });
-    if (!access.allowed) return access.reply;
+    if (!access.allowed) {
+      // 非主人要图：不触发新生成，走库存图；主人被拦（额度/冷却）仍用自己的提示。
+      if (!isOwner(sender)) return sendStockImage({ target, isGroup, sender, description: imageRequest.description });
+      return access.reply;
+    }
     if (imageGenBusy) return '上一张还在画，稍等。';
     imageGenBusy = true;
     // 只有主人能走到这里，配额统一记在主人名下。
@@ -3297,6 +3358,12 @@ async function handleCommand(text, sender, isGroup, target, senderName = '', men
 // ---- 群聊回复频率控制 ----
 // 目标：被点名必回，没点名时按同群冷却控制频率。
 const lastGroupReply = new Map(); // groupId -> timestamp
+const lastGroupReplyBySender = new Map(); // `${groupId}:${senderId}` -> timestamp，用于“正在被对话”判定
+
+function noteGroupReplyTo(groupId, senderId) {
+  if (!groupId || !senderId) return;
+  lastGroupReplyBySender.set(`${groupId}:${senderId}`, Date.now());
+}
 
 const MUST_REPLY_WORDS = [
   '小鲸鱼', '大肥鱼', '鲸鱼', 'deepseek', 'd指导', 'd老师', 'ds', '深度求索'
@@ -3346,34 +3413,42 @@ function shouldReplyInGroup(ev, text, groupId, messageReferences = {}) {
     selfNickname: botNickname, selfQQ: BOT_SELF, hasBotMention: messageReferences.hasBotMention
   });
   const songRoute = groupSongRouteDecision(ev, text, groupId, messageReferences);
-  if (songRoute) return songRoute.allowed;
-  if (isSongLibraryCommand(normalizedText) || parseGroupAffinityQuery(normalizedText) !== null) return true;
+  if (songRoute) return { allow: songRoute.allowed, reason: songRoute.allowed ? 'song' : 'song-denied' };
+  if (isSongLibraryCommand(normalizedText) || parseGroupAffinityQuery(normalizedText) !== null) {
+    return { allow: true, reason: 'command' };
+  }
   if (settingsDocument.settings.groupMuteEnabled
       && /^(?:闭嘴|闭嘴吧|别说话|不许说话|不要说话|可以讲话|可以说话|能说话|解除禁言|你可以说了|开口|解禁)[。！!…]*$|^\/(?:闭嘴|mute|解禁|unmute|开口)$/i.test(String(text ?? '').trim())) {
-    return true;
+    return { allow: true, reason: 'command' };
   }
+  const senderId = String(ev.user_id ?? ev.sender?.user_id ?? '');
   const directed = explicitGroupReplyDecision({
     botSelf: BOT_SELF ?? ev.self_id,
     text,
     references: messageReferences,
-    isOwner: isOwner(String(ev.user_id ?? ev.sender?.user_id ?? '')),
+    isOwner: isOwner(senderId),
     keywords: MUST_REPLY_WORDS,
+    recentReplyAt: lastGroupReplyBySender.get(`${groupId}:${senderId}`) ?? 0,
   });
-  if (directed !== null) return directed;
+  if (directed !== null) {
+    // 明确被点名/被接话也算一次回复，冷却统计要一起更新。
+    if (directed) lastGroupReply.set(groupId, Date.now());
+    return { allow: directed, reason: directed ? 'directed' : 'not-directed' };
+  }
 
-  if (!isGroupInterjectionEnabled(groupId)) return false;
+  if (!isGroupInterjectionEnabled(groupId)) return { allow: false, reason: 'interjection-off' };
 
   // 其他情况：同一群冷却时间（默认 20 秒），避免连续刷
   const cooldown = settingsDocument.settings.groupReplyCooldownMs;
   const last = lastGroupReply.get(groupId) ?? 0;
-  if (Date.now() - last < cooldown) return false;
+  if (Date.now() - last < cooldown) return { allow: false, reason: 'cooldown' };
 
   // 主动插话：只在 persona-config.json 显式配置的测试群生效；未配置的群保持原行为。
   const proactive = proactiveGroupDecision(groupId, Date.now());
-  if (!proactive.allow) return false;
+  if (!proactive.allow) return { allow: false, reason: 'proactive-denied' };
 
   lastGroupReply.set(groupId, Date.now());
-  return true;
+  return { allow: true, reason: 'interjection' };
 }
 
 /** 是否主人（有命令/管理权限） */
@@ -4466,8 +4541,11 @@ async function processMessage(ev) {
   // 否则会被下面的群频率控制静默丢弃（主人反馈“群里画图没反应”就是这个原因）。
   const groupImageCommand = isGroup ? parseImageCommand(text) : null;
   const imageCommandAddressed = Boolean(groupImageCommand) && (isOwner(sender) || atMe);
-  if (isGroup && !isAffinityCommand && !imageCommandAddressed && !shouldReplyInGroup(ev, text, target, messageReferences) && affinityChange?.delta !== -1) {
-    log(`[turn:${traceId}] skipped reason=group-frequency-control target=${target}`);
+  const groupGate = isGroup && !isAffinityCommand && !imageCommandAddressed
+    ? shouldReplyInGroup(ev, text, target, messageReferences)
+    : null;
+  if (groupGate && !groupGate.allow && affinityChange?.delta !== -1) {
+    log(`[turn:${traceId}] skipped reason=${groupGate.reason} target=${target}`);
     return;
   }
 
@@ -4619,6 +4697,7 @@ async function processMessage(ev) {
       const replyToMessageId = groupAdvanced && groupSpeaker?.directed
         ? ev.message_id ?? ev.msg_id ?? null : null;
       const sent = await sendReply(target, reply, isGroup, wantsVoiceReply(text, voiceMode, settingsDocument.settings.voiceReplyProbability), groupSpeaker?.mentionableIds ?? [], traceId, replyToMessageId);
+      if (sent && isGroup) noteGroupReplyTo(target, sender);
       log(sent
         ? `[turn:${traceId}] sent target=${target} chars=${reply.length}`
         : `[turn:${traceId}] skipped reason=unsafe-reply target=${target}`);
@@ -5231,6 +5310,32 @@ async function handlePokeNotice(event) {
   log('[poke] replied', chatKey, `from=${poke.senderId}`, poke.targetIsSelf ? 'target=self' : 'target=other');
 }
 
+/**
+ * 收到 group_decrease：只有机器人自己退群/被踢才删该群记忆。
+ * 普通群友退群不影响机器人对群的认识，忽略。
+ * 事件可能漏（掉线期间），另有 6 小时一次的群列表对账兜底。
+ */
+async function handleGroupDecreaseNotice(ev) {
+  try {
+    const groupId = String(ev.group_id ?? '').trim();
+    const selfId = String(BOT_SELF ?? '').trim();
+    const selfLeft = ev.sub_type === 'kick_me' || (selfId && String(ev.user_id ?? '') === selfId);
+    if (!groupId || !selfLeft) return;
+    const bridgeRunning = await isBridgeRunning();
+    const result = deleteGroupMemory({
+      groupId,
+      reason: ev.sub_type === 'kick_me' ? 'kick' : 'leave',
+      now: Date.now(),
+      apply: true,
+      bridgeRunning,
+      log
+    });
+    if (!result.applied) log('[persona-maint] group delete skipped', groupId);
+  } catch (error) {
+    log('[persona-maint] group_decrease handler failed:', error?.message ?? error);
+  }
+}
+
 function connect() {
   const ws = new WebSocket(WS_URL, { headers: WS_TOKEN ? { authorization: `Bearer ${WS_TOKEN}` } : {} });
   ws.addEventListener('open', () => log('[ws] connected', WS_URL));
@@ -5243,6 +5348,9 @@ function connect() {
       syncFriendAllowlist().catch((e) => log('[allowlist] friend-add sync failed:', e.message));
     } else if (ev.post_type === 'notice' && ev.sub_type === 'poke') {
       handlePokeNotice(ev).catch((e) => log('[poke] handler failed:', e.message));
+    } else if (ev.post_type === 'notice' && ev.notice_type === 'group_decrease') {
+      // 只有机器人自己退群/被踢才删这个群的记忆；普通群成员退群不触发。
+      void handleGroupDecreaseNotice(ev);
     } else if (ev.post_type === 'notice' && ev.notice_type === 'qzone_like') {
       handleQzoneLikeNotice(ev).catch((e) => log('[qzone-like] handler failed:', e.message));
     }
@@ -5275,10 +5383,24 @@ async function waitForOnebot(timeoutMs = 60_000) {
 
 const onebotReady = waitForOnebot();
 connect();
+logImageGenModuleFingerprint('qq-bot', { logger: log });
 log('[bridge] running. owners =', [...OWNERS].join(', '), '| self =', BOT_SELF ?? '(unknown)');
 onebotReady.then((ready) => {
-  if (!ready) log('[warn] OneBot HTTP did not respond during startup; WebSocket remains active');
-  else void syncFriendAllowlist();
+  if (!ready) {
+    log('[warn] OneBot HTTP did not respond during startup; WebSocket remains active');
+    return;
+  }
+  void syncFriendAllowlist();
+  // 人格记忆维护：启动后 30 秒首次检查，之后每 6 小时一次；退群对账依赖真实群列表。
+  startPersonaMaintenance({
+    fetchGroupIds: async () => {
+      const list = await onebot('get_group_list');
+      return (Array.isArray(list) ? list : [])
+        .map((item) => String(item?.group_id ?? item?.groupId ?? '')).filter(Boolean);
+    },
+    ownerQQs: [...OWNERS],
+    logger: log
+  });
 });
 setInterval(() => { void syncFriendAllowlist(); }, 5 * 60_000).unref?.();
 
@@ -5906,6 +6028,7 @@ async function attemptDiaryEntry({ dayKey, now, facts, manual = false, tail = fa
   diaryState.lastEntryAt = now.getTime();
   diaryState.entries = [...diaryState.entries, { time, chars: [...body].length }].slice(-20);
   diaryState.lastFile = result.file;
+  diaryState.lastWrittenDayKey = dayKey;
   diaryState.chatTurns = 0;
   diaryState.lastError = '';
   if (!manual) diaryState.autoCount += 1;
@@ -5959,6 +6082,42 @@ async function maybePushDiary(now) {
   }
 }
 
+/** 断档检测：只比较“最后写过的那天”文件是否还在，一次 existsSync。 */
+function refreshDiaryGap(dayKey) {
+  const detected = detectDiaryGap({
+    dir: DIARY.dir,
+    dayKey,
+    lastWrittenDayKey: diaryState.lastWrittenDayKey,
+    lastFile: diaryState.lastFile
+  });
+  const prev = diaryState.diaryGap;
+  if (detected) {
+    if (prev?.kind === detected.kind && prev?.dayKey === detected.dayKey) return;
+    diaryState.diaryGap = detected;
+    saveDiaryState();
+    log(`[diary] gap detected: ${detected.dayKey} (${detected.kind})`);
+    return;
+  }
+  if (!prev) return;
+  // 补写不会恢复丢掉的原文，所以当天/前一天丢的继续提醒；过了两天再收掉。
+  const ageDays = Math.round((Date.parse(dayKey) - Date.parse(prev.dayKey)) / 86_400_000);
+  if (ageDays <= 1) return;
+  diaryState.diaryGap = null;
+  saveDiaryState();
+  log('[diary] gap cleared');
+}
+
+/** 启动自检：日记目录、推送仓库的 .git、断档，各报一次，不阻塞启动。 */
+function diarySelfCheck() {
+  if (!DIARY.enabled) return;
+  if (!existsSync(DIARY.dir)) {
+    log(`[diary] self-check: 日记目录不存在 ${DIARY.dir}，下次写入会自动重建，旧内容无法恢复`);
+  } else if (!existsSync(join(DIARY.dir, '.git'))) {
+    log(`[diary] self-check: 日记仓库缺少 .git，${DIARY.pushTime} 的推送会一直 not-a-repo，需要手动 git init`);
+  }
+  refreshDiaryGap(localDayKey(new Date()));
+}
+
 /** 60s tick：事件触发为主 + 60 分钟兜底扫描 + 主人手动“记一下”；23:30 只补 0 条。 */
 function scheduleDiary() {
   if (!DIARY.enabled) {
@@ -5972,6 +6131,7 @@ function scheduleDiary() {
     if (diaryState.dayKey !== dayKey) resetDiaryDay(now);
     void maybePushDiary(now);
     const day = syncDiaryDay(dayKey);
+    refreshDiaryGap(dayKey);
     const total = day.entries.length;
     const affinityNow = OWNER_DM_TARGET ? getAffinity(OWNER_DM_TARGET).score : null;
     const affinityChanged = diaryState.affinityBaseline != null && affinityNow != null
@@ -6070,4 +6230,5 @@ function scheduleDiary() {
   log(`[diary] armed: on-event + ${Math.round(DIARY_SCAN_INTERVAL_MS / 60_000)}min fallback, tail=${DIARY.tailTime}, push=${DIARY.pushTime}, dir=${DIARY.dir}`);
 }
 
+diarySelfCheck();
 scheduleDiary();

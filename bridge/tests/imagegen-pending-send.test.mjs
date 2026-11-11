@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { enqueuePendingSend, flushPendingSends, loadPendingSend, pendingSendSummary } from '../src/imagegen-pending-send.mjs';
+import { enqueuePendingSend, flushPendingSends, loadPendingSend, pendingSendSummary, resolveImageDeliverKey } from '../src/imagegen-pending-send.mjs';
 
 function tempState() {
   const dir = mkdtempSync(join(tmpdir(), 'pending-send-'));
@@ -44,11 +44,75 @@ test('待发队列：入队去重、补发幂等、失败重试到上限', async
     assert.equal(pendingSendSummary(second.statePath).pending.length, 0);
     rmSync(second.dir, { recursive: true, force: true });
 
+    // 入队时就带上真实失败原因，避免 lastError 留空。
+    const third = tempState();
+    enqueuePendingSend({ filePath: third.image, target: 'private:3', lastError: 'agent token 无效' }, third.statePath);
+    assert.equal(loadPendingSend(third.statePath).items[0].lastError, 'agent token 无效');
+    rmSync(third.dir, { recursive: true, force: true });
+
     // 文件丢了直接标失败，不无限挂起。
     const lost = join(dir, 'missing.jpg');
     enqueuePendingSend({ filePath: lost, target: 'private:1' }, statePath);
     const afterLost = await flushPendingSends(async () => 'x', { statePath });
     assert.equal(afterLost.failed, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('投递目标解析：谁要的图回谁所在的会话', () => {
+  // 私聊回私聊，不再从 config 推导 owner。
+  assert.equal(resolveImageDeliverKey({ isGroup: false, sessionKey: 'private:1668389572', ownerQQ: '1668389572' }), 'private:1668389572');
+  assert.equal(resolveImageDeliverKey({ isGroup: false, sessionKey: 'private:1668389572', ownerQQ: '999' }), 'private:1668389572');
+  // 群里触发的图回到原来的群，不再转私聊。
+  assert.equal(resolveImageDeliverKey({ isGroup: true, sessionKey: 'group:839367702', ownerQQ: '1668389572' }), 'group:839367702');
+  // 会话 key 缺失时才退回主人私聊。
+  assert.equal(resolveImageDeliverKey({ isGroup: false, sessionKey: '', ownerQQ: '1668389572' }), 'private:1668389572');
+  assert.equal(resolveImageDeliverKey({ sessionKey: '' }), '');
+});
+
+test('待发队列：自发目标改投主人，不把发给自己当成功', async () => {
+  const { dir, image, statePath } = tempState();
+  const self = '2427256325';
+  const owner = '1668389572';
+  const logs = [];
+  try {
+    enqueuePendingSend({ filePath: image, target: `private:${self}`, createdAt: 1 }, statePath);
+    const delivered = [];
+    const summary = await flushPendingSends(async (item) => {
+      delivered.push(item.target);
+      return 'msg-owner';
+    }, { statePath, selfId: self, ownerId: owner, log: (line) => logs.push(line), now: () => 5 });
+
+    assert.equal(summary.retargeted, 1);
+    assert.equal(summary.sent, 1);
+    assert.deepEqual(delivered, [`private:${owner}`]);
+    const item = loadPendingSend(statePath).items[0];
+    assert.equal(item.target, `private:${owner}`);
+    assert.equal(item.retarget.from, `private:${self}`);
+    assert.equal(item.status, 'sent');
+    assert.ok(logs.some((line) => line.includes('retarget')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('待发队列：无法改投时标 failed(target-invalid)，绝不记 sent', async () => {
+  const { dir, image, statePath } = tempState();
+  const self = '2427256325';
+  try {
+    enqueuePendingSend({ filePath: image, target: `private:${self}` }, statePath);
+    let called = 0;
+    const summary = await flushPendingSends(async () => { called += 1; return 'msg-self'; }, {
+      statePath, selfId: self, ownerId: '', now: () => 7
+    });
+    assert.equal(called, 0);
+    assert.equal(summary.sent, 0);
+    assert.equal(summary.failed, 1);
+    const item = loadPendingSend(statePath).items[0];
+    assert.equal(item.status, 'failed');
+    assert.match(item.lastError, /target-invalid/);
+    assert.equal(item.sentAt, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

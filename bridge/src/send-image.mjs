@@ -18,8 +18,14 @@ export function parseSendKey(value) {
  */
 export function decideImageSendAccess({
   mode = '', token = '', tokenValid = false, toolEnabled = true,
-  silentBlocked = false, targetAllowed = true
+  silentBlocked = false, targetAllowed = true, targetKey = '', selfId = ''
 } = {}) {
+  // 最先判自发目标：否则会先撞 token/白名单，返回和真实原因无关的 403。
+  const self = String(selfId ?? '').trim();
+  const target = String(targetKey ?? '').trim();
+  if (self && target === `private:${self}`) {
+    return { ok: false, status: 400, error: '目标不能是机器人自己' };
+  }
   if (mode === 'chat' || mode === 'reserved') {
     return { ok: false, status: 403, error: '图片发送仅限 closed-agent / reserved2 模式使用' };
   }

@@ -21,6 +21,7 @@ import { callOnebotApi } from './onebot-api.mjs';
 import { decideImageSendAccess, loadImagePayload, parseSendKey } from './send-image.mjs';
 import { listArchived } from './image-archive.mjs';
 import { readImageAnalyses } from './image-analysis-store.mjs';
+import { imageGenModuleFingerprint, logImageGenModuleFingerprint } from './image-gen.mjs';
 import { makePaidSongPreview, makePaidFullSong } from './paid-song-producer.mjs';
 import { isMuted, groupKey, privateKey } from './mute.mjs';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
@@ -2009,6 +2010,7 @@ async function main() {
             heartbeatAt: bridgeStatus.heartbeatAt,
             lastInboundAt: bridgeStatus.lastInboundAt,
             lastOutboundAt: bridgeStatus.lastOutboundAt,
+            imagegenModule: imageGenModuleFingerprint(),
             activity: readActivityTail(100)
           });
           return;
@@ -4949,15 +4951,24 @@ async function main() {
           const id = parsedKey.id;
           if (!imageInput) { sendJson({ ok: false, error: 'image 不能为空（base64 或 state/imagegen/ 下的路径）' }, 400); return; }
           const flag = kind === 'private' ? 'sendPrivate' : 'sendGroup';
+          // 每次现读 selfQQ：不在启动时快照，config 改号后立刻生效。
+          const liveSelfQQ = String(loadConfig().selfQQ ?? '').trim();
           const guard = decideImageSendAccess({
             mode: currentMode,
             token,
             tokenValid: token ? agentTokenOk(key, token) : false,
             toolEnabled: token ? v2ToolEnabled(flag) : true,
             silentBlocked: shouldBlockSilentReply(key),
-            targetAllowed: Number.isFinite(id) && id > 0 && modeAllowed(key, kind, id, cfg, currentMode)
+            targetAllowed: Number.isFinite(id) && id > 0 && modeAllowed(key, kind, id, cfg, currentMode),
+            targetKey: key,
+            selfId: liveSelfQQ
           });
-          if (!guard.ok) { sendJson({ ok: false, error: guard.error }, guard.status); return; }
+          if (!guard.ok) {
+            // 拒绝必须落日志：key/target/原因，保证下次 30 秒内可定位（token 不落盘）。
+            log(`[send-image] reject key=${key || '-'} target=${id || '-'} status=${guard.status} error=${guard.error}`);
+            sendJson({ ok: false, error: guard.error }, guard.status);
+            return;
+          }
           if (socialV2.paused && token) {
             sendJson({ ok: false, error: 'AI 已暂停，当前不允许执行发送工具' }, 403);
             return;
@@ -9293,6 +9304,7 @@ async function main() {
       }
     } catch {}
     log('桥接已启动。按 Ctrl+C 退出。');
+    logImageGenModuleFingerprint('bridge', { logger: log });
     // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
     if (cfg.socialV2?.sticker?.enabled !== false) {
       syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));

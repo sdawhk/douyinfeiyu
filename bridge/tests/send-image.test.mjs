@@ -47,6 +47,22 @@ test('send/image：非主人会话拒绝（目标白名单），主人放行', (
   }).ok, true);
 });
 
+test('send/image：拒绝把图发给机器人自己', () => {
+  const self = '2427256325';
+  const rejected = decideImageSendAccess({
+    mode: 'closed-agent', targetKey: `private:${self}`, selfId: self
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.error, '目标不能是机器人自己');
+
+  // 发给别人照常放行；群聊里自己也是成员，不能误拦。
+  assert.equal(decideImageSendAccess({ mode: 'closed-agent', targetKey: 'private:1668389572', selfId: self }).ok, true);
+  assert.equal(decideImageSendAccess({ mode: 'closed-agent', targetKey: 'group:839367702', selfId: self }).ok, true);
+  // 没传 selfId 时保持旧行为（不做自发判定）。
+  assert.equal(decideImageSendAccess({ mode: 'closed-agent', targetKey: `private:${self}` }).ok, true);
+});
+
 test('send/image：base64 载荷（data URI 与纯 base64）', () => {
   const raw = PNG_BYTES.toString('base64');
   const fromBare = loadImagePayload(raw, { rootDir: tmpdir() });
