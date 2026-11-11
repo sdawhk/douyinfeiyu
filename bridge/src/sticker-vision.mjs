@@ -1,10 +1,14 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+// 顺序即优先级：kimi 是稳定直出 JSON 的视觉模型（约 2–3 秒）；
+// nemotron 是推理模型，会把 max_tokens 全烧在 reasoning 上、content 返回 null，只留作兜底。
 const DEFAULT_MODELS = [
-  'nvidia/nemotron-3.5-super-vl:free',
-  'trae/multimodal_image_kimi-k2.5'
+  'trae/multimodal_image_kimi-k2.5',
+  'nvidia/nemotron-3.5-super-vl:free'
 ];
+// 单次调用超时：50 秒时推理型模型在高峰期会被 abort，抬到 75 秒留余量。
+const VISION_TIMEOUT_MS = 75_000;
 const modelCooldownUntil = new Map();
 const modelCooldownReason = new Map();
 const UNSUPPORTED_CACHE = process.env.VISION_MODEL_COOLDOWN_PATH || 'D:\\deepseek\\state\\vision-model-cooldowns.json';
@@ -122,7 +126,7 @@ export async function inspectStickerImage(b64, mime, options = {}) {
             { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } }
           ] }]
         }),
-        signal: AbortSignal.timeout(50_000)
+        signal: AbortSignal.timeout(VISION_TIMEOUT_MS)
       });
       const data = await responseData(response);
       if (!response.ok) {
@@ -139,14 +143,23 @@ export async function inspectStickerImage(b64, mime, options = {}) {
         continue;
       }
       clearModelCooldown(model);
+      const finishReason = String(data.choices?.[0]?.finish_reason || '');
       const content = data.choices?.[0]?.message?.content;
       const answer = typeof content === 'string' ? content
         : Array.isArray(content) ? content.map((part) => part.text || '').join('') : '';
+      // 推理型模型会把 max_tokens 全花在 reasoning 上，正文为 null、finish_reason=length。
+      // 这不是“图片不合格”，按空响应处理并短时冷却，别当成 30 分钟的坏图。
+      if (!answer.trim()) {
+        lastFailure = `${model}: empty content${finishReason ? ` (finish_reason=${finishReason})` : ''}`;
+        modelCooldownUntil.set(model, Date.now() + 3 * 60_000);
+        modelCooldownReason.set(model, 'empty content; cooling down');
+        continue;
+      }
       const json = answer.match(/\{[\s\S]*\}/)?.[0];
       const result = json ? JSON.parse(json) : null;
       if (typeof result?.sticker !== 'boolean' || typeof result?.caption !== 'string') {
         lastFailure = `${model}: invalid vision response`;
-        modelCooldownUntil.set(model, Date.now() + 30_000);
+        modelCooldownUntil.set(model, Date.now() + 3 * 60_000);
         modelCooldownReason.set(model, 'invalid vision response; cooling down');
         continue;
       }
