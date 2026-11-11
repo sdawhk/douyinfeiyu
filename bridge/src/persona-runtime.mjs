@@ -19,6 +19,61 @@ const SELF_NOTE_TTL_MS = 6 * 60 * 60_000;
 const SELF_NOTE_MAX = 3;
 const FOCUS_TTL_MS = 6 * 60 * 60_000;
 const RECENT_RELATION_MAX = 6;
+const TOPIC_TTL_MS = 30 * 60_000;
+
+// 话题名词只收机器人能实际处理的“对象”，用于给“能换吗/试试”这类省略句补回主语。
+const TOPIC_NOUNS = ['表情包', '头像', '图片', '照片', '壁纸', '表情', '翻唱', '动态', '昵称', '签名', '视频', '语音', '文件', '歌曲', '歌', '画'];
+const TOPIC_RE = new RegExp(`(${TOPIC_NOUNS.join('|')})`, 'u');
+// 配额类未收尾事项：只在配额策略变化后失效，避免“次数用完了/明天再换”这类旧台词继续注入。
+const QUOTA_LOOP_RE = /头像(?:次数|配额|限额)|次数(?:已经)?用完|换满了|今天换不了|明天[^。；\n]{0,6}换[^。；\n]{0,6}(?:头像|更大|一张|个)/u;
+
+function avatarQuotaFingerprint(policy = {}) {
+  const daily = Math.max(0, Math.floor(Number(policy?.dailyLimit) || 0));
+  const interval = Math.max(0, Math.floor(Number(policy?.minIntervalMs) || 0));
+  return `daily=${daily};interval=${interval}`;
+}
+
+let currentQuotaFingerprint = '';
+
+/** 启动或热读配置时写入当前头像配额策略；fingerprint 变化后旧的配额类 openLoop 自动失效。 */
+export function setAvatarQuotaPolicy(policy = {}) {
+  currentQuotaFingerprint = avatarQuotaFingerprint(policy);
+  return currentQuotaFingerprint;
+}
+
+/** 从一段话里取话题名词；取不到返回空串。 */
+export function detectTopicNoun(value) {
+  const match = String(value ?? '').match(TOPIC_RE);
+  return match ? match[1] : '';
+}
+
+/** 读当前 scope 仍在有效期内的最近话题，供会话摘要/关系记忆补主语。 */
+export function currentTopicFor(scope, now = Date.now()) {
+  if (!scope) return '';
+  const topic = focusForScope(readState(now).topic, 0, scope);
+  return topic && now - topic.at <= TOPIC_TTL_MS ? topic.text : '';
+}
+
+/** 会话摘要的一行：省略句前补回话题名词，避免“能换吗？”脱离上下文。 */
+export function exchangeSummaryLine(item) {
+  const input = cleanSnippet(item?.input, 200);
+  const topic = cleanSnippet(item?.topic, 20);
+  return `对方：${topic ? `（${topic}）` : ''}${input}`;
+}
+
+function quotaLoopExpired(state) {
+  return Boolean(state.avatarQuota && currentQuotaFingerprint && state.avatarQuota !== currentQuotaFingerprint);
+}
+
+function dropQuotaLoops(raw) {
+  const buckets = scopedBuckets(raw);
+  const out = {};
+  for (const [scopeKey, list] of Object.entries(buckets)) {
+    out[scopeKey] = (Array.isArray(list) ? list : [])
+      .filter((item) => !QUOTA_LOOP_RE.test(String(item?.text ?? '')));
+  }
+  return out;
+}
 
 const stateDir = () => process.env.DSH_PERSONA_STATE_DIR || DEFAULT_STATE_DIR;
 const roleDir = () => process.env.DSH_PERSONA_ROLE_DIR || DEFAULT_ROLE_DIR;
@@ -178,6 +233,8 @@ function readState(now = Date.now()) {
     focusAt: Number(raw.focusAt) || 0,
     openLoops: raw.openLoops,
     selfNotes: raw.selfNotes,
+    topic: raw.topic,
+    avatarQuota: typeof raw.avatarQuota === 'string' ? raw.avatarQuota : '',
     updatedAt: Number(raw.updatedAt) || 0
   };
 }
@@ -226,20 +283,23 @@ function loadRelation(key) {
     bits: strings(raw.bits, 5),
     boundaries: strings(raw.boundaries, 5),
     recent: (Array.isArray(raw.recent) ? raw.recent : [])
-      .map((item) => ({ at: Number(item?.at) || 0, text: cleanSnippet(item?.text, 80) }))
+      .map((item) => ({ at: Number(item?.at) || 0, text: cleanSnippet(item?.text, 80), topic: cleanSnippet(item?.topic, 20) }))
       .filter((item) => item.text)
       .slice(-RECENT_RELATION_MAX)
   };
 }
 
 function activeOpenLoops(scope, now) {
-  return listForScope(readState().openLoops, scope)
+  const state = readState();
+  const expired = quotaLoopExpired(state);
+  return listForScope(state.openLoops, scope)
     .map((item) => ({
       text: cleanSnippet(item?.text, 80),
       at: Number(item?.at) || 0,
       important: item?.important === true
     }))
     .filter((item) => item.text && !isPromptNoise(item.text) && now - item.at <= OPEN_LOOP_TTL_MS)
+    .filter((item) => !(expired && QUOTA_LOOP_RE.test(item.text)))
     .sort((a, b) => Number(b.important) - Number(a.important) || b.at - a.at)
     .slice(0, OPEN_LOOP_MAX);
 }
@@ -301,7 +361,10 @@ export function buildPersonaContext({
   const relationLines = [];
   if (relation.traits.length) relationLines.push(`印象：${relation.traits.slice(0, 3).join('；')}`);
   if (relation.bits.length) relationLines.push(`你们之间的梗：${relation.bits.slice(0, 2).join('；')}`);
-  if (relation.recent.length) relationLines.push(`上次聊到：${relation.recent[relation.recent.length - 1].text}`);
+  if (relation.recent.length) {
+    const last = relation.recent[relation.recent.length - 1];
+    relationLines.push(`上次聊到：${last.topic ? `（${last.topic}）` : ''}${last.text}`);
+  }
   if (relationLines.length) {
     const who = isOwner ? '主人' : (senderName || (isGroup ? '这位群友' : '对方'));
     lines.push(`【你对${who}的记忆】${relationLines.join('；')}。只在心里用，不要复述这些备注。`);
@@ -428,6 +491,13 @@ export function observePersonaTurn({
   const scope = personaScope({ chatKey, isGroup, senderId });
   const user = String(userText ?? '');
   const answer = String(reply ?? '');
+  const priorTopic = focusForScope(state.topic, 0, scope);
+  let topicText = detectTopicNoun(user) || detectTopicNoun(answer);
+  let topicAt = now;
+  if (!topicText && priorTopic && now - priorTopic.at <= TOPIC_TTL_MS) {
+    topicText = priorTopic.text;
+    topicAt = priorTopic.at;
+  }
   const next = applyMood(state, user, now, scope);
   next.openLoops = withScopedList(
     state.openLoops, scope,
@@ -437,6 +507,12 @@ export function observePersonaTurn({
     state.selfNotes, scope,
     updateSelfNotes(listForScope(state.selfNotes, scope), { userText: user, reply: answer, now })
   );
+  if (scope) next.topic = withFocus(state.topic, 0, scope, topicText, topicAt);
+  // 配额策略变了：清掉所有 scope 里的旧配额台词，并记下当前指纹。
+  if (currentQuotaFingerprint && state.avatarQuota !== currentQuotaFingerprint) {
+    if (quotaLoopExpired(state)) next.openLoops = dropQuotaLoops(state.openLoops);
+    next.avatarQuota = currentQuotaFingerprint;
+  }
   next.updatedAt = now;
   writeJson(join(stateDir(), STATE_FILE), next);
 
@@ -444,7 +520,8 @@ export function observePersonaTurn({
     const relation = loadRelation(scope);
     const snippet = cleanSnippet(user || answer, 60);
     if (snippet) {
-      relation.recent.push({ at: now, text: snippet });
+      const snippetTopic = topicText && !snippet.includes(topicText) ? topicText : '';
+      relation.recent.push({ at: now, text: snippet, ...(snippetTopic ? { topic: snippetTopic } : {}) });
       relation.recent = relation.recent.slice(-RECENT_RELATION_MAX);
       writeJson(relationPath(scope), relation);
     }
@@ -475,6 +552,8 @@ export function harvestBeforeRotation({ chatKey = '', isGroup = false, senderId 
   if (!exchanges.length) return result;
 
   const state = readState();
+  const conversationTopic = exchanges.map((item) => detectTopicNoun(item.input)).filter(Boolean).at(-1)
+    || (focusForScope(state.topic, 0, scope)?.text || '');
   const loops = listForScope(state.openLoops, scope)
     .map((item) => ({
       text: cleanSnippet(item?.text, 80),
@@ -490,8 +569,16 @@ export function harvestBeforeRotation({ chatKey = '', isGroup = false, senderId 
     loops.push({ text: snippet, at: now, important: true });
     result.loops += 1;
   }
+  let stateDirty = false;
   if (result.loops) {
     state.openLoops = withScopedList(state.openLoops, scope, loops.slice(-OPEN_LOOP_MAX));
+    stateDirty = true;
+  }
+  if (conversationTopic) {
+    state.topic = withFocus(state.topic, 0, scope, conversationTopic, now);
+    stateDirty = true;
+  }
+  if (stateDirty) {
     state.updatedAt = now;
     writeJson(join(stateDir(), STATE_FILE), state);
   }
@@ -500,7 +587,8 @@ export function harvestBeforeRotation({ chatKey = '', isGroup = false, senderId 
   for (const { input } of exchanges.slice(-2)) {
     const text = cleanSnippet(input, 60);
     if (!text || isPromptNoise(text) || relation.recent.some((item) => item.text === text)) continue;
-    relation.recent.push({ at: now, text });
+    const inputTopic = detectTopicNoun(input) || conversationTopic;
+    relation.recent.push({ at: now, text, ...(inputTopic && !text.includes(inputTopic) ? { topic: inputTopic } : {}) });
     result.recent += 1;
   }
   for (const { input } of exchanges) {

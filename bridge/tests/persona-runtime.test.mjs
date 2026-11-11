@@ -51,7 +51,7 @@ writeState('persona-config.json', {
 });
 
 const {
-  buildPersonaContext, groupMemberImpressions, harvestBeforeRotation, observePersonaTurn, proactiveGroupDecision, selectTop, timeOfDay
+  buildPersonaContext, currentTopicFor, detectTopicNoun, exchangeSummaryLine, groupMemberImpressions, harvestBeforeRotation, observePersonaTurn, proactiveGroupDecision, selectTop, setAvatarQuotaPolicy, timeOfDay
 } = await import('../src/persona-runtime.mjs');
 
 test('timeOfDay covers the day segments used in the prompt', () => {
@@ -247,4 +247,51 @@ test('legacy unscoped persona state is readable but never shared across scopes',
   assert.doesNotMatch(context, /明天再聊/);
   assert.doesNotMatch(context, /主动私聊主人/);
   assert.doesNotMatch(context, /刚才在摸鱼/);
+});
+
+test('topic noun survives elliptical follow-ups in recent memory', () => {
+  const now = new Date(2026, 10, 8, 12, 0).getTime();
+  observePersonaTurn({
+    chatKey: 'p20', isOwner: true,
+    userText: '那你换这个吧', reply: '换好啦，这个头像挺可爱', now
+  });
+  observePersonaTurn({
+    chatKey: 'p20', isOwner: true,
+    userText: '能换吗？', reply: '能，等一下', now: now + 60_000
+  });
+
+  assert.equal(detectTopicNoun('能换吗？'), '');
+  assert.equal(currentTopicFor('p20', now + 61_000), '头像');
+  const context = buildPersonaContext({ chatKey: 'p20', isOwner: true, text: '继续', now: now + 62_000 });
+  assert.match(context, /上次聊到：（头像）能换吗？/);
+  assert.equal(exchangeSummaryLine({ input: '能换吗？', reply: '换啥呀？', topic: '头像' }), '对方：（头像）能换吗？');
+});
+
+test('quota loops expire when avatar quota policy changes, real loops stay', () => {
+  const now = new Date(2026, 10, 8, 12, 0).getTime();
+  setAvatarQuotaPolicy({ dailyLimit: 1, minIntervalMs: 21_600_000 });
+  observePersonaTurn({
+    chatKey: 'p30', isOwner: true,
+    userText: '换好了吗', reply: '头像次数已经用完了，明天再换', now
+  });
+  observePersonaTurn({
+    chatKey: 'p30', isOwner: true,
+    userText: '明天把画发我', reply: '好', now
+  });
+
+  let context = buildPersonaContext({ chatKey: 'p30', isOwner: true, text: '在吗', now: now + 1_000 });
+  assert.match(context, /明天再换/);
+  assert.match(context, /明天把画发我/);
+
+  setAvatarQuotaPolicy({ dailyLimit: 0, minIntervalMs: 0 });
+  context = buildPersonaContext({ chatKey: 'p30', isOwner: true, text: '在吗', now: now + 2_000 });
+  assert.doesNotMatch(context, /明天再换/);
+  assert.match(context, /明天把画发我/);
+
+  observePersonaTurn({ chatKey: 'p30', isOwner: true, userText: '在吗', reply: '在', now: now + 3_000 });
+  const stored = JSON.parse(readFileSync(join(stateDir, 'persona-state.json'), 'utf8'));
+  const loops = stored.openLoops.p30 ?? [];
+  assert.equal(loops.some((item) => /明天再换/.test(item.text)), false);
+  assert.equal(loops.some((item) => /明天把画发我/.test(item.text)), true);
+  assert.equal(stored.avatarQuota, 'daily=0;interval=0');
 });
