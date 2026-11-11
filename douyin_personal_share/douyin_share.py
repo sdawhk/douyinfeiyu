@@ -84,6 +84,22 @@ USER_PATH = re.compile(r"^/user/([A-Za-z0-9_-]+)")
 BLOCKED_TEXT = re.compile(r"扫码登录|验证码|安全验证|访问过于频繁|操作频繁|登录后.*继续", re.I)
 VIDEO_FOLLOWUP_TEXT = re.compile(r"(?:视频|抖音|分享|刚才|刚刚).{0,24}(?:看|看到|看见|收到|打开|刷|了吗|没有)|(?:看|看到|看见|收到|打开).{0,24}(?:视频|抖音|分享|了吗|没有)")
 VIDEO_CONTEXT_TTL = timedelta(minutes=15)
+# Inbox identity/batching policy. The page index must never take part in a message key:
+# Douyin re-renders rows and trims the visible window, so an index-derived key changes
+# while the message stays the same, which is what made the bot answer one message twice.
+INBOUND_ID_SCHEME = "stable-v2"
+INBOUND_MERGE_WINDOW_SECONDS = 30
+INBOUND_BATCH_MAX_MESSAGES = 4
+INBOUND_BATCH_MAX_CHARS = 2000
+INBOUND_MIN_SEND_GAP_SECONDS = 20
+INBOUND_MAX_REPLY_ATTEMPTS = 3
+INBOUND_RETRY_DELAYS = (60, 180)
+INBOUND_STATE_MAX_IDS = 4000
+INBOUND_ROW_SNAPSHOT_MAX = 200
+# The conversation panel does not reliably push new rows into an already-open page, so the
+# listener re-opens the chat on this cadence. Detection latency is bounded by this value.
+INBOUND_REFRESH_SECONDS = 60
+LISTENER_HEARTBEAT_STALE_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -327,39 +343,43 @@ def extract_inbound_messages(rows: list[dict], consumed_ids: set[str], limit: in
     return found
 
 
+def build_inbound_event(row: dict) -> dict | None:
+    """Turn one scraped row into an event; returns None for blank or malformed rows."""
+    message_id = str(row.get("id", "")).strip()
+    if not re.fullmatch(r"[A-Za-z0-9:_-]{1,160}", message_id):
+        return None
+    text = re.sub(r"[\r\n\t]+", " ", str(row.get("text", ""))).strip()[:4000]
+    links = row.get("links", []) if isinstance(row.get("links"), list) else []
+    links = [str(link) for link in links[:8]]
+    links.extend(re.findall(r"https://(?:www\.)?(?:v\.)?douyin\.com/[^\s<>]+", text))
+    video_url = next((canonical_video_url(link.rstrip(".,;，。；）》")) for link in links
+                      if canonical_video_url(link.rstrip(".,;，。；）》"))), None)
+    share_url = next((safe_share_url(link.rstrip(".,;，。；）》")) for link in links
+                      if safe_share_url(link.rstrip(".,;，。；）》"))), None)
+    aweme_ids = row.get("aweme_ids", []) if isinstance(row.get("aweme_ids"), list) else []
+    if not video_url:
+        item_id = next((str(value) for value in aweme_ids if re.fullmatch(r"\d{10,24}", str(value))), "")
+        if item_id:
+            video_url = f"https://www.douyin.com/video/{item_id}"
+    video_hint = row.get("video_hint") is True
+    is_video = bool(video_url or share_url or video_hint)
+    card_text = re.sub(r"[\r\n\t]+", " ", str(row.get("card_text", ""))).strip()[:500]
+    if not text and not is_video:
+        return None
+    if not text and not card_text and not video_url and not share_url:
+        text = "爸分享了一条视频，但目前无法从私信卡片读取视频链接。"
+    return {"id": message_id, "text": text, "videoUrl": video_url,
+            "shareUrl": share_url, "cardText": card_text, "isVideo": is_video}
+
+
 def extract_inbound_events(rows: list[dict], consumed_ids: set[str], limit: int = 20) -> list[dict]:
     found = []
     for row in rows:
-        message_id = str(row.get("id", "")).strip()
-        text = re.sub(r"[\r\n\t]+", " ", str(row.get("text", ""))).strip()[:4000]
-        links = row.get("links", []) if isinstance(row.get("links"), list) else []
-        links = [str(link) for link in links[:8]]
-        links.extend(re.findall(r"https://(?:www\.)?(?:v\.)?douyin\.com/[^\s<>]+", text))
-        video_url = next((canonical_video_url(link.rstrip(".,;，。；）》")) for link in links
-                          if canonical_video_url(link.rstrip(".,;，。；）》"))), None)
-        share_url = next((safe_share_url(link.rstrip(".,;，。；）》")) for link in links
-                          if safe_share_url(link.rstrip(".,;，。；）》"))), None)
-        aweme_ids = row.get("aweme_ids", []) if isinstance(row.get("aweme_ids"), list) else []
-        if not video_url:
-            item_id = next((str(value) for value in aweme_ids if re.fullmatch(r"\d{10,24}", str(value))), "")
-            if item_id:
-                video_url = f"https://www.douyin.com/video/{item_id}"
-        video_hint = row.get("video_hint") is True
-        is_video = bool(video_url or share_url or video_hint)
-        card_text = re.sub(r"[\r\n\t]+", " ", str(row.get("card_text", ""))).strip()[:500]
-        if not text and not is_video:
+        event = build_inbound_event(row)
+        if not event or event["id"] in consumed_ids:
             continue
-        if not text and not card_text and not video_url and not share_url:
-            text = "爸分享了一条视频，但目前无法从私信卡片读取视频链接。"
-        if not message_id:
-            fingerprint = video_url or share_url or text or card_text
-            digest = hashlib.sha256(f"{row.get('index', 0)}\0{fingerprint}".encode("utf-8")).hexdigest()[:32]
-            message_id = f"dom:{row.get('index', 0)}:{digest}"
-        if not re.fullmatch(r"[A-Za-z0-9:_-]{1,160}", message_id) or message_id in consumed_ids:
-            continue
-        consumed_ids.add(message_id)
-        found.append({"id": message_id, "text": text, "videoUrl": video_url,
-                      "shareUrl": share_url, "cardText": card_text, "isVideo": is_video})
+        consumed_ids.add(event["id"])
+        found.append(event)
         if len(found) >= limit:
             break
     return found
@@ -405,7 +425,9 @@ def write_inbound_state(path: Path, state: dict) -> None:
 
 def log_inbound_diagnostic(event: dict, video_context: dict | None, context_source: str,
                            outcome: str, context_source_key: str = "",
-                           path: Path = INBOUND_DIAGNOSTICS_PATH) -> None:
+                           path: Path = INBOUND_DIAGNOSTICS_PATH,
+                           batch_size: int = 1, attempt: int = 0,
+                           latency_seconds: float | None = None) -> None:
     """Record message handling metadata without storing private message text or video content."""
     identity = str(event.get("id", ""))
     video_id = str((video_context or {}).get("url", "")).rsplit("/", 1)[-1]
@@ -418,8 +440,12 @@ def log_inbound_diagnostic(event: dict, video_context: dict | None, context_sour
         "videoStatus": str((video_context or {}).get("status", "none")),
         "contextSource": context_source,
         "contextAttached": bool(video_context),
+        "batchSize": max(1, int(batch_size)),
+        "attempt": max(0, int(attempt)),
         "outcome": outcome,
     }
+    if latency_seconds is not None:
+        row["latencySeconds"] = round(float(latency_seconds), 1)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as stream:
@@ -481,6 +507,13 @@ def load_config() -> dict:
             raise RuntimeError(f"daily_browse.{flag} must be true or false")
     if not isinstance(daily["token_file"], str) or not daily["token_file"].strip():
         raise RuntimeError("daily_browse.token_file must be a path")
+    inbound = cfg.setdefault("inbound", {})
+    inbound.setdefault("merge_window_seconds", INBOUND_MERGE_WINDOW_SECONDS)
+    inbound.setdefault("min_send_gap_seconds", INBOUND_MIN_SEND_GAP_SECONDS)
+    if not isinstance(inbound["merge_window_seconds"], int) or not 0 <= inbound["merge_window_seconds"] <= 120:
+        raise RuntimeError("inbound.merge_window_seconds must be between 0 and 120")
+    if not isinstance(inbound["min_send_gap_seconds"], int) or not 0 <= inbound["min_send_gap_seconds"] <= 300:
+        raise RuntimeError("inbound.min_send_gap_seconds must be between 0 and 300")
     endpoint = urlparse(str(daily["report_url"]))
     if endpoint.scheme != "http" or endpoint.hostname not in {"127.0.0.1", "localhost"}:
         raise RuntimeError("daily_browse.report_url must use loopback HTTP")
@@ -534,10 +567,15 @@ def sanitize_outbound_text(value: object) -> str:
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
-def request_inbound_reply(cfg: dict, state: dict, sender_handle: str, message_id: str,
-                          text: str, state_path: Path | None = INBOUND_STATE_PATH,
-                          opener=urllib.request.urlopen, video_context: dict | None = None) -> str | None:
-    """Ask the local bridge for one owner-only reply; consume IDs before network/model work."""
+def request_inbound_reply(cfg: dict, sender_handle: str, message_id: str, text: str,
+                          opener=urllib.request.urlopen, video_context: dict | None = None,
+                          attempt: int = 0) -> str | None:
+    """Ask the local bridge for one owner-only reply.
+
+    This function never mutates inbound state: the caller marks a message consumed only
+    after the reply was really delivered to the conversation. Retries pass a suffixed
+    message id because the bridge deliberately de-duplicates ids it has already seen.
+    """
     backend = cfg.get("reply_backend") or {}
     if not backend.get("enabled"):
         return None
@@ -545,16 +583,12 @@ def request_inbound_reply(cfg: dict, state: dict, sender_handle: str, message_id
     if not expected or str(sender_handle).strip().lstrip("@") != expected:
         return None
     identity = str(message_id).strip()
+    if attempt:
+        identity = f"{identity}:r{int(attempt)}"
     content = str(text).strip()
     safe_video = sanitize_inbound_video_context(video_context)
     if not re.fullmatch(r"[A-Za-z0-9:_-]{1,160}", identity) or (not content and not safe_video) or len(content) > 4000:
         return None
-    seen = state.setdefault("inbound_reply_attempts", [])
-    if identity in seen:
-        return None
-    seen.append(identity)
-    if state_path:
-        write_inbound_state(state_path, state)
 
     endpoint = str(backend.get("url", "http://127.0.0.1:3101/douyin/reply"))
     parsed = urlparse(endpoint)
@@ -576,11 +610,11 @@ def request_inbound_reply(cfg: dict, state: dict, sender_handle: str, message_id
         with opener(request, timeout=260) as response:
             result = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError("Local model reply failed; inbound message was consumed and will not be retried automatically") from exc
+        raise RuntimeError("Local model reply failed; the message stays pending for a retry") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Local model reply was malformed; inbound message was consumed and will not be retried automatically") from exc
+        raise RuntimeError("Local model reply was malformed; the message stays pending for a retry") from exc
     if not isinstance(result, dict):
-        raise RuntimeError("Local model reply was malformed; inbound message was consumed and will not be retried automatically")
+        raise RuntimeError("Local model reply was malformed; the message stays pending for a retry")
     if not result.get("ok") or result.get("duplicate"):
         return None
     reply_text = sanitize_outbound_text(result.get("reply", ""))
@@ -767,6 +801,28 @@ def inbound_selectors(cfg: dict) -> dict:
     return selectors
 
 
+def scroll_inbox_to_bottom(page, selectors: dict) -> None:
+    """Park the conversation panel on its newest row before reading.
+
+    The panel keeps its own scroll position (a freshly opened chat sits at scrollTop 0
+    with the newest rows ~7000px below), and only rows near that position are mounted.
+    Reading without this saw the oldest visible messages and reported "no new message".
+    """
+    page.evaluate("""s => {
+      const rows = Array.from(document.querySelectorAll(s.message_selector));
+      const visible = rows.filter(node => node.getBoundingClientRect().width > 0);
+      const first = visible[0] || rows[0];
+      for (let el = first && first.parentElement; el; el = el.parentElement) {
+        if (el.scrollHeight > el.clientHeight + 8) {
+          el.scrollTop = el.scrollHeight;
+          return;
+        }
+      }
+    }""", selectors)
+    # The list is virtualised: give it a frame to mount the rows around the new position.
+    page.wait_for_timeout(300)
+
+
 def read_inbound_rows(page, selectors: dict) -> list[dict]:
     rows = page.evaluate("""s => Array.from(document.querySelectorAll(s.message_selector))
       .filter(node => node.getBoundingClientRect().width > 0 && node.matches(s.incoming_selector))
@@ -790,6 +846,10 @@ def read_inbound_rows(page, selectors: dict) -> list[dict]:
           const propsKey = Object.keys(current).find(key => key.startsWith('__reactProps$'));
           if (propsKey) parsed = findParsedContent(current[propsKey]);
         }
+        // A single chat bubble can hold several text paragraphs; reading only the first
+        // node is what made long messages look like they were "half read".
+        const textNodes = Array.from(node.querySelectorAll(s.text_selector));
+        const text = textNodes.map(el => el.innerText || '').join('\\n').trim();
         const links = Array.from(node.querySelectorAll('a[href]')).map(link => link.href).slice(0, 8);
         const awemeIds = Array.from(node.querySelectorAll('[data-aweme-id]'))
           .map(el => el.getAttribute('data-aweme-id') || '').filter(Boolean).slice(0, 4);
@@ -807,10 +867,27 @@ def read_inbound_rows(page, selectors: dict) -> list[dict]:
         });
         const shareCard = Boolean(node.querySelector('.MessageItemShareAwemeawemeContainer')) || parsed?.aweType === 800;
         const videoHint = videoLink || awemeIds.length > 0 || Boolean(node.querySelector('video')) || shareCard;
+        // Platform ids are the only truly stable key; record where it was found so the
+        // runtime probe can confirm which node carries data-message-id.
+        const identity = (() => {
+          const own = node.getAttribute(s.message_id_attribute);
+          if (own) return {value: own, source: 'row'};
+          const inner = node.querySelector('[' + s.message_id_attribute + ']');
+          const innerValue = inner ? inner.getAttribute(s.message_id_attribute) : '';
+          if (innerValue) return {value: innerValue, source: 'descendant'};
+          let parent = node.parentElement;
+          for (let depth = 1; parent && depth <= 3; parent = parent.parentElement, depth++) {
+            const value = parent.getAttribute(s.message_id_attribute);
+            if (value) return {value, source: 'ancestor' + depth};
+          }
+          return {value: '', source: 'none'};
+        })();
         return {
-          id: node.getAttribute(s.message_id_attribute) || '',
+          id: identity.value || '',
+          platform_id: identity.value || '',
+          platform_source: identity.source,
           index,
-          text: (node.querySelector(s.text_selector)?.innerText || '').trim(),
+          text,
           card_text: videoHint ? String(parsed?.content_title || node.innerText || '').trim().slice(0, 500) : '',
           links,
           aweme_ids: awemeIds,
@@ -818,15 +895,75 @@ def read_inbound_rows(page, selectors: dict) -> list[dict]:
         };
       })""", selectors)
     for row in rows:
-        text = str(row.get("text", "")).strip()
-        fingerprint = str(row.get("aweme_ids", [""])[0] if row.get("aweme_ids") else "")
-        if not fingerprint:
-            fingerprint = next((link for link in row.get("links", [])
-                                if canonical_video_url(link) or safe_share_url(link)), text)
-        if not row["id"] and (text or row.get("video_hint")):
-            digest = hashlib.sha256(f"{row['index']}\0{fingerprint or text or row.get('card_text', '')}".encode("utf-8")).hexdigest()[:32]
-            row["id"] = f"dom:{row['index']}:{digest}"
+        row["id"] = str(row.get("platform_id", "")).strip()
+        row["text"] = str(row.get("text", "")).strip()
     return rows
+
+
+def inbound_row_fingerprint(row: dict) -> str:
+    """Direction + content + video identity; never the page index."""
+    aweme = next((str(value) for value in row.get("aweme_ids", [])
+                  if re.fullmatch(r"\d{10,24}", str(value))), "")
+    if aweme:
+        return f"v:{aweme}"
+    link = next((str(item) for item in row.get("links", [])
+                 if canonical_video_url(str(item)) or safe_share_url(str(item))), "")
+    if link:
+        return "l:" + (canonical_video_url(link) or safe_share_url(link) or link)
+    text = re.sub(r"\s+", " ", str(row.get("text", ""))).strip()
+    if text:
+        return "t:" + text
+    return "c:" + re.sub(r"\s+", " ", str(row.get("card_text", ""))).strip()
+
+
+def assign_stable_message_ids(rows: list[dict], snapshot: object) -> tuple[list[dict], list[dict], int]:
+    """Attach ids that survive re-rendering, window trimming, and restarts.
+
+    Rows are aligned against the previous snapshot so an already-known message keeps its
+    id even when new rows append or old ones scroll out. Rows that appear *above* every
+    known row are older history revealed by scrolling, and are flagged so they are
+    consumed silently instead of being answered.
+    """
+    previous = [item for item in (snapshot or [])
+                if isinstance(item, dict) and item.get("k") and item.get("id")]
+    previous = previous[-INBOUND_ROW_SNAPSHOT_MAX:]
+    assigned: list[dict] = []
+    pointer = 0
+    last_match = -1
+    matched = 0
+    for row in rows:
+        key = inbound_row_fingerprint(row)
+        index = int(row.get("index", 0) or 0)
+        match = None
+        # Scan the whole remaining snapshot, not a fixed +6 window: a fresh page load can
+        # reveal more history above the known rows, and missing the anchor would make the
+        # new message look like history.
+        for candidate in range(pointer, len(previous)):
+            if previous[candidate]["k"] == key:
+                match = candidate
+                break
+        platform_id = re.sub(r"[^A-Za-z0-9:_-]", "", str(row.get("platform_id", "")))[:120]
+        if match is not None:
+            message_id = str(previous[match]["id"])
+            pointer = match + 1
+            last_match = index
+            matched += 1
+        elif platform_id:
+            message_id = f"pid:{platform_id}"
+        else:
+            message_id = ""
+        assigned.append({"row": row, "key": key, "id": message_id,
+                         "after_known": last_match >= 0})
+    counts: dict[str, int] = {}
+    for item in reversed(assigned):
+        if item["id"]:
+            continue
+        occurrence = counts.get(item["key"], 0)
+        counts[item["key"]] = occurrence + 1
+        digest = hashlib.sha256(item["key"].encode("utf-8")).hexdigest()[:32]
+        item["id"] = f"msg:{digest}:{occurrence}"
+    new_snapshot = [{"k": item["key"], "id": item["id"]} for item in assigned][-INBOUND_ROW_SNAPSHOT_MAX:]
+    return assigned, new_snapshot, matched
 
 
 def inspect_inbox_shape(page) -> dict:
@@ -2240,55 +2377,256 @@ def run_scheduled(poll_inbox: bool = True) -> int:
         return fail_slot(str(exc) or exc.__class__.__name__)
 
 
-def process_inbox_page(page, editor, cfg: dict, selectors: dict, state: dict) -> int:
-    consumed = set(state.get("inbound_reply_attempts", []))
+def parse_inbound_time(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=SINGAPORE)
+
+
+def inbound_pending_batch(pending: list[dict], now: datetime, window_seconds: int,
+                          max_messages: int = INBOUND_BATCH_MAX_MESSAGES,
+                          max_chars: int = INBOUND_BATCH_MAX_CHARS) -> list[dict]:
+    """Pick the oldest matured message plus the burst that arrived right after it."""
+    ready = [item for item in pending
+             if (now - item["firstSeen"]).total_seconds() >= window_seconds]
+    if not ready:
+        return []
+    anchor = ready[0]["firstSeen"]
+    batch: list[dict] = []
+    chars = 0
+    for item in ready:
+        if (item["firstSeen"] - anchor).total_seconds() > window_seconds:
+            break
+        length = len(str(item["row"].get("text", "")))
+        if batch and chars + length > max_chars:
+            break
+        batch.append(item)
+        chars += length
+        if len(batch) >= max_messages:
+            break
+    return batch
+
+
+def consume_inbound_ids(state: dict, ids: list[str], now: datetime) -> None:
+    attempts = state.setdefault("inbound_reply_attempts", [])
+    for message_id in ids:
+        if message_id and message_id not in attempts:
+            attempts.append(message_id)
+    if len(attempts) > INBOUND_STATE_MAX_IDS:
+        state["inbound_reply_attempts"] = attempts[-INBOUND_STATE_MAX_IDS:]
+    seen = state.get("inbound_seen")
+    if isinstance(seen, dict):
+        for message_id in ids:
+            seen.pop(message_id, None)
+    state["inbound_last_reply_at"] = now.isoformat(timespec="seconds")
+    drop = set(ids)
+    state["inbound_retry_queue"] = [entry for entry in state.get("inbound_retry_queue", [])
+                                    if isinstance(entry, dict) and entry.get("messageId") not in drop]
+
+
+def schedule_inbound_retry(state: dict, batch: dict, video_context: dict | None,
+                           context_source: str, source_message_key: str, attempt: int) -> None:
+    attempts = attempt + 1
+    ids = [str(value) for value in batch["ids"]]
+    primary = batch["primary"]
+    if attempts >= INBOUND_MAX_REPLY_ATTEMPTS:
+        consume_inbound_ids(state, ids, datetime.now(SINGAPORE))
+        log_inbound_diagnostic(primary, video_context, context_source, "retry_exhausted",
+                               source_message_key, batch_size=len(ids), attempt=attempts)
+        print(f"Inbound batch dropped after {attempts} attempts; the watchdog will report it.",
+              file=sys.stderr)
+        return
+    delay = INBOUND_RETRY_DELAYS[min(attempts - 1, len(INBOUND_RETRY_DELAYS) - 1)]
+    now = datetime.now(SINGAPORE)
+    entry = {
+        "messageId": primary["id"],
+        "ids": ids,
+        "text": batch["text"],
+        "attempt": attempts,
+        "nextAt": (now + timedelta(seconds=delay)).isoformat(timespec="seconds"),
+        "firstSeenAt": batch["firstSeen"].isoformat(timespec="seconds") if batch.get("firstSeen") else "",
+        "isVideo": bool(primary.get("isVideo")),
+        "videoContext": video_context,
+        "contextSource": context_source,
+        "sourceMessageKey": source_message_key,
+    }
+    queue = [item for item in state.get("inbound_retry_queue", []) if isinstance(item, dict)]
+    queue = [item for item in queue if item.get("messageId") != primary["id"]]
+    queue.append(entry)
+    state["inbound_retry_queue"] = queue[-10:]
+
+
+def deliver_inbound_batch(page, editor, cfg: dict, state: dict, batch: dict,
+                          attempt: int = 0, prepared: bool = False) -> int:
+    """Ask for one reply for the whole batch, then send it; consume only after success."""
+    now = datetime.now(SINGAPORE)
+    primary = batch["primary"]
+    batch_size = len(batch["ids"])
+    video_context = sanitize_inbound_video_context(batch.get("videoContext")) if prepared else None
+    context_source = str(batch.get("contextSource", "none")) if prepared else "none"
+    source_message_key = str(batch.get("sourceMessageKey", "")) if prepared else ""
+    if not prepared:
+        if primary.get("isVideo"):
+            video_context = analyze_shared_video(page, primary)
+            source_message_key = hashlib.sha256(primary["id"].encode("utf-8")).hexdigest()[:12]
+            state["pending_shared_video_context"] = {
+                "at": now.isoformat(timespec="seconds"),
+                "sourceMessageKey": source_message_key,
+                "videoContext": video_context,
+            }
+            context_source = "current_video_message"
+        else:
+            previous_video = state.get("pending_shared_video_context")
+            video_context, context_source = recent_shared_video_context(state, primary)
+            source_message_key = str(previous_video.get("sourceMessageKey", "")) if (
+                context_source == "recent_shared_video" and isinstance(previous_video, dict)) else ""
+    log_inbound_diagnostic(primary, video_context, context_source, "reply_requested",
+                           source_message_key, batch_size=batch_size, attempt=attempt)
+    try:
+        reply_text = request_inbound_reply(cfg, cfg["recipient_handle"], primary["id"],
+                                           batch["text"], video_context=video_context, attempt=attempt)
+    except RuntimeError as exc:
+        log_inbound_diagnostic(primary, video_context, context_source, "reply_backend_failed",
+                               source_message_key, batch_size=batch_size, attempt=attempt)
+        schedule_inbound_retry(state, batch, video_context, context_source, source_message_key, attempt)
+        write_inbound_state(INBOUND_STATE_PATH, state)
+        print(f"Inbound reply failed; retry queued: {exc}", file=sys.stderr)
+        return 2
+    if not reply_text:
+        consume_inbound_ids(state, batch["ids"], now)
+        log_inbound_diagnostic(primary, video_context, context_source, "duplicate_or_empty_reply",
+                               source_message_key, batch_size=batch_size, attempt=attempt)
+        write_inbound_state(INBOUND_STATE_PATH, state)
+        print("Inbound batch produced no new reply text; marked consumed without sending.")
+        return 0
+    if primary.get("isVideo"):
+        editor = open_recipient_chat(page, cfg)
+    try:
+        send_text_in_open_chat(page, editor, reply_text)
+    except (RuntimeError, PlaywrightTimeout) as exc:
+        log_inbound_diagnostic(primary, video_context, context_source, "send_failed",
+                               source_message_key, batch_size=batch_size, attempt=attempt)
+        schedule_inbound_retry(state, batch, video_context, context_source, source_message_key, attempt)
+        write_inbound_state(INBOUND_STATE_PATH, state)
+        print(f"Inbound reply send failed; retry queued: {exc}", file=sys.stderr)
+        return 2
+    consume_inbound_ids(state, batch["ids"], now)
+    latency = (now - batch["firstSeen"]).total_seconds() if batch.get("firstSeen") else None
+    log_inbound_diagnostic(primary, video_context, context_source, "reply_sent", source_message_key,
+                           batch_size=batch_size, attempt=attempt, latency_seconds=latency)
+    write_inbound_state(INBOUND_STATE_PATH, state)
+    print(f"Replied to {batch_size} inbound message(s).")
+    return 0
+
+
+def process_inbox_page(page, editor, cfg: dict, selectors: dict, state: dict,
+                       merge_window: int = INBOUND_MERGE_WINDOW_SECONDS) -> int:
+    now = datetime.now(SINGAPORE)
+    scroll_inbox_to_bottom(page, selectors)
     rows = read_inbound_rows(page, selectors)
-    if not state.get("inbound_baseline_initialized"):
-        baseline = extract_inbound_events(rows, set(), limit=200)
-        state["inbound_reply_attempts"] = [event["id"] for event in baseline]
+    cached_snapshot = state.get("inbound_row_snapshot")
+    assigned, new_snapshot, matched = assign_stable_message_ids(rows, cached_snapshot)
+    if state.get("inbound_id_scheme") != INBOUND_ID_SCHEME:
+        # One-time migration: `dom:<page-index>` keys cannot be compared with stable keys.
+        # The baseline is rebuilt from the currently visible rows. Consequence: messages the
+        # old bug already dropped stay unanswered, and history is never replayed.
+        state["inbound_reply_attempts"] = []
+        state["inbound_baseline_initialized"] = False
+        state["inbound_id_scheme"] = INBOUND_ID_SCHEME
+        state.pop("inbound_seen", None)
+        state.pop("inbound_retry_queue", None)
+        print("Inbound id scheme migrated; rebuilding the baseline without replying.")
+    # A transient empty render (chat refresh) must not erase the alignment snapshot, and an
+    # empty read must not become an empty baseline: both would make the next new message
+    # look like history and get consumed without any reply.
+    if rows:
+        state["inbound_row_snapshot"] = new_snapshot
+    if not state.get("inbound_baseline_initialized") and rows:
+        baseline = [item["id"] for item in assigned if item["id"]]
+        state["inbound_reply_attempts"] = baseline[-INBOUND_STATE_MAX_IDS:]
         state["inbound_baseline_initialized"] = True
         write_inbound_state(INBOUND_STATE_PATH, state)
         print(f"Saved an initial baseline of {len(baseline)} existing message IDs; no reply sent.")
         return 0
-    pending = extract_inbound_events(list(reversed(rows)), consumed, limit=1)
-    if not pending:
-        return 0
-    event = pending[0]
-    if event["isVideo"]:
-        video_context = analyze_shared_video(page, event)
-        source_message_key = hashlib.sha256(event["id"].encode("utf-8")).hexdigest()[:12]
-        state["pending_shared_video_context"] = {
-            "at": datetime.now(SINGAPORE).isoformat(timespec="seconds"),
-            "sourceMessageKey": source_message_key,
-            "videoContext": video_context,
+    if rows and cached_snapshot and matched == 0:
+        # The panel is showing a slice that shares nothing with the previous snapshot (it was
+        # parked at the top of the history before the scroll fix). Those rows are history, but
+        # the newest visible incoming row may still be unanswered, so it must not be swallowed
+        # by a silent "rebuild the baseline" path.
+        assigned[-1]["after_known"] = True
+
+    consumed = set(state.get("inbound_reply_attempts", []))
+    seen = state.get("inbound_seen") if isinstance(state.get("inbound_seen"), dict) else {}
+    live_ids = {item["id"] for item in assigned if item["id"]}
+    state["inbound_seen"] = {key: value for key, value in seen.items() if key in live_ids}
+    previous_ids = {str(item.get("id")) for item in (cached_snapshot or []) if isinstance(item, dict)}
+
+    pending: list[dict] = []
+    for item in assigned:
+        message_id = item["id"]
+        if not message_id or message_id in consumed:
+            continue
+        if not item["after_known"]:
+            consumed.add(message_id)
+            state["inbound_reply_attempts"].append(message_id)
+            continue
+        first_seen = parse_inbound_time(state["inbound_seen"].get(message_id))
+        if first_seen is None or first_seen > now:
+            first_seen = now
+            state["inbound_seen"][message_id] = now.isoformat(timespec="seconds")
+        pending.append({"row": item["row"], "id": message_id, "firstSeen": first_seen})
+    if len(state["inbound_reply_attempts"]) > INBOUND_STATE_MAX_IDS:
+        state["inbound_reply_attempts"] = state["inbound_reply_attempts"][-INBOUND_STATE_MAX_IDS:]
+    lost = [message_id for message_id in previous_ids
+            if message_id and message_id not in live_ids and message_id not in consumed]
+    for message_id in lost[:5]:
+        log_inbound_diagnostic({"id": message_id, "isVideo": False}, None, "none", "dropped_out_of_view")
+
+    retry = next((entry for entry in state.get("inbound_retry_queue", [])
+                  if isinstance(entry, dict)
+                  and (parse_inbound_time(entry.get("nextAt")) or now) <= now), None)
+    if retry:
+        batch = {
+            "ids": [str(value) for value in retry.get("ids", []) if value],
+            "text": str(retry.get("text", "")),
+            "primary": {"id": str(retry.get("messageId", "")), "text": str(retry.get("text", "")),
+                        "isVideo": bool(retry.get("isVideo")), "videoUrl": "", "shareUrl": "",
+                        "cardText": ""},
+            "firstSeen": parse_inbound_time(retry.get("firstSeenAt")) or now,
+            "videoContext": retry.get("videoContext"),
+            "contextSource": str(retry.get("contextSource", "none")),
+            "sourceMessageKey": str(retry.get("sourceMessageKey", "")),
         }
-        context_source = "current_video_message"
-    else:
-        previous_video = state.get("pending_shared_video_context")
-        source_message_key = str(previous_video.get("sourceMessageKey", "")) if isinstance(previous_video, dict) else ""
-        video_context, context_source = recent_shared_video_context(state, event)
-        if context_source != "recent_shared_video":
-            source_message_key = ""
-    write_inbound_state(INBOUND_STATE_PATH, state)
-    log_inbound_diagnostic(event, video_context, context_source, "reply_requested", source_message_key)
-    try:
-        reply_text = request_inbound_reply(cfg, state, cfg["recipient_handle"], event["id"],
-                                           event["text"], INBOUND_STATE_PATH,
-                                           video_context=video_context)
-    except RuntimeError as exc:
-        log_inbound_diagnostic(event, video_context, context_source, "reply_backend_failed", source_message_key)
-        print(f"Inbound message consumed; model reply unavailable: {exc}", file=sys.stderr)
-        return 2
-    if not reply_text:
-        log_inbound_diagnostic(event, video_context, context_source, "duplicate_or_empty_reply", source_message_key)
-        print("Inbound message was already consumed by the local reply backend; no send attempted.")
+        return deliver_inbound_batch(page, editor, cfg, state, batch,
+                                     attempt=int(retry.get("attempt", 1) or 1), prepared=True)
+
+    if not pending:
+        write_inbound_state(INBOUND_STATE_PATH, state)
         return 0
-    if event["isVideo"]:
-        editor = open_recipient_chat(page, cfg)
-    send_text_in_open_chat(page, editor, reply_text)
-    log_inbound_diagnostic(event, video_context, context_source, "reply_sent", source_message_key)
-    print("Replied once to the newest inbound message in the verified conversation.")
-    return 0
+    last_reply = parse_inbound_time(state.get("inbound_last_reply_at"))
+    send_gap = int((cfg.get("inbound") or {}).get("min_send_gap_seconds", INBOUND_MIN_SEND_GAP_SECONDS))
+    if last_reply and (now - last_reply).total_seconds() < send_gap:
+        write_inbound_state(INBOUND_STATE_PATH, state)
+        return 0
+    batch_items = inbound_pending_batch(pending, now, merge_window)
+    if not batch_items:
+        write_inbound_state(INBOUND_STATE_PATH, state)
+        return 0
+    events = [event for event in (build_inbound_event(item["row"]) for item in batch_items) if event]
+    if not events:
+        return 0
+    primary = events[-1]
+    batch = {
+        "ids": [event["id"] for event in events],
+        "text": "\n".join(event["text"] for event in events if event["text"])[:INBOUND_BATCH_MAX_CHARS],
+        "primary": primary,
+        "firstSeen": batch_items[0]["firstSeen"],
+    }
+    if not batch["text"]:
+        batch["text"] = primary["text"]
+    return deliver_inbound_batch(page, editor, cfg, state, batch)
 
 
 def arm_inbox_mutation_observer(page, row_selector: str) -> None:
@@ -2406,7 +2744,9 @@ def run_inbox(inspect_only: bool) -> int:
                 return 0
 
             state = read_json(INBOUND_STATE_PATH, {"inbound_reply_attempts": []})
-            return process_inbox_page(page, editor, cfg, selectors, state)
+            # A one-shot poll runs every 15 minutes, so waiting for a burst window would
+            # only add latency; the listener keeps the 30-second merge window instead.
+            return process_inbox_page(page, editor, cfg, selectors, state, merge_window=0)
         finally:
             context.close()
 
@@ -2449,7 +2789,12 @@ def run_inbox_listener() -> int:
                 conversation_url = page.url
                 arm_inbox_mutation_observer(page, selectors["message_selector"])
                 state = read_json(INBOUND_STATE_PATH, {"inbound_reply_attempts": []})
-                process_inbox_page(page, editor, cfg, selectors, state)
+                merge_window = int((cfg.get("inbound") or {}).get(
+                    "merge_window_seconds", INBOUND_MERGE_WINDOW_SECONDS))
+                write_listener_heartbeat(busy=False, force=True)
+                process_inbox_page(page, editor, cfg, selectors, state, merge_window=merge_window)
+                next_inbox_check = time_module.monotonic() + 5
+                next_inbox_refresh = time_module.monotonic() + INBOUND_REFRESH_SECONDS
                 print("Persistent Douyin inbox listener is active.")
                 while True:
                     write_listener_heartbeat(busy=False)
@@ -2463,17 +2808,44 @@ def run_inbox_listener() -> int:
                     browse_session_result = service_browse_request(page, cfg, selectors)
                     if browse_session_result:
                         editor, conversation_url = browse_session_result
+                        next_inbox_refresh = time_module.monotonic() + INBOUND_REFRESH_SECONDS
                         continue
+                    # An already-open conversation does not reliably receive newly pushed rows, so
+                    # re-open it on a timer: this is what actually pulls the message in. Without it
+                    # the only path that fetched new messages was the 15-minute scheduled run,
+                    # which run_daily.ps1 now short-circuits whenever this listener is alive.
+                    if time_module.monotonic() >= next_inbox_refresh:
+                        next_inbox_refresh = time_module.monotonic() + INBOUND_REFRESH_SECONDS
+                        try:
+                            editor = open_recipient_chat(page, cfg)
+                            conversation_url = page.url
+                            arm_inbox_mutation_observer(page, selectors["message_selector"])
+                            next_inbox_check = 0
+                        except (RuntimeError, PlaywrightTimeout) as exc:
+                            print(f"Inbox refresh failed this round: {exc}", file=sys.stderr)
+                            continue
                     version = page.evaluate("() => window.__daFeiYuInboxMutationVersion || 0")
+                    mutated = True
                     try:
                         page.wait_for_function(
                             "version => (window.__daFeiYuInboxMutationVersion || 0) > version",
                             arg=version, timeout=1000
                         )
                     except PlaywrightTimeout:
+                        mutated = False
+                    # Even with no DOM change we re-check periodically: a burst has to
+                    # mature for the merge window before it is answered as one round.
+                    if not mutated and time_module.monotonic() < next_inbox_check:
                         continue
+                    next_inbox_check = time_module.monotonic() + 5
                     state = read_json(INBOUND_STATE_PATH, {"inbound_reply_attempts": []})
-                    process_inbox_page(page, editor, cfg, selectors, state)
+                    try:
+                        process_inbox_page(page, editor, cfg, selectors, state, merge_window=merge_window)
+                    except (RuntimeError, PlaywrightTimeout) as exc:
+                        print(f"Inbound processing stopped this round: {exc}", file=sys.stderr)
+                    except Exception as exc:
+                        print(f"Inbound processing crashed this round ({exc.__class__.__name__}): {exc}",
+                              file=sys.stderr)
                     if page.url != conversation_url:
                         editor = open_recipient_chat(page, cfg)
                         conversation_url = page.url
