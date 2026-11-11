@@ -30,6 +30,36 @@ test('the bot still answers its own QQ mention and a separate nickname call', ()
   assert.equal(decision([{ type: 'text', data: { text: '小鲸鱼你怎么看' } }], '小鲸鱼你怎么看'), true);
 });
 
+function followUp(text, { references = {}, at = 10_000 } = {}) {
+  const now = Date.parse('2026-11-08T08:48:51Z');
+  return explicitGroupReplyDecision({
+    botSelf, text, keywords, now,
+    references: describeMessageReferences(references, botSelf),
+    recentReplyAt: now - at
+  });
+}
+
+test('someone the bot just answered can continue with a short line', () => {
+  assert.equal(followUp('你试试'), true);
+  assert.equal(followUp('那你倒是说啊'), true);
+  assert.equal(followUp('其他的呢'), true);
+});
+
+test('the follow-up rule stays narrow: window, length and third person', () => {
+  assert.equal(followUp('你试试', { at: 100_000 }), null);
+  assert.equal(followUp('一二三四五六七八九十一二三四五'), true);
+  assert.equal(followUp('一二三四五六七八九十一二三四五六'), null);
+  assert.equal(followUp('他说你试试'), null);
+  assert.equal(followUp('那她呢'), null);
+  assert.equal(explicitGroupReplyDecision({ botSelf, text: '你试试', keywords, references: {} }), null);
+});
+
+test('an @ of a third person still wins over the follow-up rule', () => {
+  const otherAt = [{ type: 'at', data: { qq: '1581449421', text: '@黑糖' } },
+    { type: 'text', data: { text: ' 你试试' } }];
+  assert.equal(followUp('你试试', { references: otherAt }), false);
+});
+
 test('group turns identify each speaker and keep self-descriptions with that speaker', () => {
   const first = groupTurnPrompt({ groupId: '123', botSelf, senderId: '456',
     senderName: '群友甲', text: '真好，看的叔叔骨架都暖暖的' });

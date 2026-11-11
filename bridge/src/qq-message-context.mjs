@@ -117,7 +117,12 @@ export function shouldSkipUnaddressedGroupMedia({ isGroup, text, mediaCount, ref
   return !(references.replyId && references.quotedUserId === String(botSelf));
 }
 
-export function explicitGroupReplyDecision({ botSelf, text, references = {}, isOwner = false, keywords = [] }) {
+const RECENT_REPLY_WINDOW_MS = 90_000;
+const RECENT_REPLY_MAX_CHARS = 15;
+// “别人”的第三人称指代：出现就不算在跟机器人说话（“其他”除外）。
+const THIRD_PERSON_RE = /(?<!其)(?:他|她|它|他们|她们|它们)/u;
+
+export function explicitGroupReplyDecision({ botSelf, text, references = {}, isOwner = false, keywords = [], recentReplyAt = 0, now = Date.now() }) {
   if (references.hasBotMention) return true;
   if (references.replyId && references.quotedUserId === String(botSelf)) return true;
 
@@ -132,5 +137,14 @@ export function explicitGroupReplyDecision({ botSelf, text, references = {}, isO
   const namedBot = keywords.some((word) => lower.includes(String(word).toLowerCase()));
   if (references.replyId || textWithoutDisplayMentions !== originalText) return namedBot;
   if (namedBot) return true;
+  // 承接上一轮：刚被机器人回过的人紧接着说的短句，当作在跟机器人说话。
+  // 收得很窄：90 秒内、≤15 字、没有任何 @、不出现第三人称，宁可少判。
+  if (recentReplyAt && now - recentReplyAt <= RECENT_REPLY_WINDOW_MS) {
+    const plain = textWithoutDisplayMentions.trim();
+    if (plain === originalText.trim()
+        && [...plain].length > 0
+        && [...plain].length <= RECENT_REPLY_MAX_CHARS
+        && !THIRD_PERSON_RE.test(plain)) return true;
+  }
   return null;
 }
