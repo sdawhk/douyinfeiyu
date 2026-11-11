@@ -14,6 +14,7 @@ import {
   HAIRSTYLES, HAIRSTYLE_NAMES, DEFAULT_HAIRSTYLE, normalizeHairstyle, pickHairstyle, pickHairstyleForChat, resolveHairstyle, hairstyleLayerFor, PROMPT_LAYER_ORDER,
   FABRICS, clothingLayerFor, mergeNegativeTerms, DEFAULT_NEGATIVE_PROMPT,
   FRAMINGS, FRAMING_NAMES, DEFAULT_FRAMING, normalizeFraming, resolveFraming, framingLayerFor,
+  normalizeReferenceImagesByFraming, pickReferenceImages, applyRequestOverrides, resolveDrawPlan,
   PROMPT_BUDGET, measurePromptChars, assertPromptBudget, strengthenProportionPrompt, normalizeProportionCheckConfig,
   FACE_STYLE_NAMES, FACE_STYLES, DEFAULT_FACE_STYLE, FACE_STYLE_PRIORITY, faceStyleLayerFor, resolveFaceStyle,
   SCENE_FRAMING_NAMES, SCENE_FRAMINGS, BACKGROUND_DETAIL_NAMES, BACKGROUND_DETAILS,
@@ -191,15 +192,16 @@ test('提示词锚定成人比例日系立绘并写死负向禁忌', () => {
   const prompt = buildPrompt('蓝发少女');
   assert.match(prompt, /蓝发少女/);
   assert.match(prompt, /画质与风格/);
+  assert.match(prompt, /成人比例日系立绘|画质与风格/);
   assert.match(prompt, /头高占全身 1\/6\.5–1\/7/);
-  assert.match(prompt, /腰线在全高 33%–35%/);
-  assert.match(prompt, /膝在 72%–74%/);
-  assert.match(prompt, /腿长（胯到脚底）占 43%–46%/);
+  assert.match(prompt, /头身比6\.5–7/);
+  // 腰线/膝位/腿长改由全身锚点负责，正文不再重复占预算。
+  assert.doesNotMatch(prompt, /腰线在全高|膝在 72%–74%|腿长（胯到脚底）/);
   assert.doesNotMatch(prompt, /略高于中点|略低于中点/);
   assert.doesNotMatch(prompt, /约七头身/);
   assert.match(prompt, /肩宽 1\.9 头宽、胯宽 1\.5 头宽/);
   assert.doesNotMatch(prompt, /肩宽胯宽各约 2 头宽/);
-  assert.match(prompt, /赛璐璐上色与厚涂混合/);
+  assert.match(prompt, /半厚涂插画/);
   assert.match(prompt, /严格禁止/);
   assert.match(prompt, /Q版/);
   assert.match(prompt, /三头身/);
@@ -242,7 +244,8 @@ test('画风预设：五档可切换，默认成人比例立绘', () => {
   assert.equal(normalizeImageGenConfig({}).stylePreset, 'keyvisual');
   assert.equal(normalizeImageGenConfig({ stylePreset: 'maid' }).stylePreset, 'maid');
   assert.equal(normalizeImageGenConfig({ stylePreset: 'nope' }).stylePreset, 'keyvisual');
-  const closeup = normalizeImageGenConfig({ stylePreset: 'closeup' });
+  // preset 的构图句只在景别允许时保留：closeup 档 + closeup preset 才带「半身特写」。
+  const closeup = normalizeImageGenConfig({ stylePreset: 'closeup', framing: 'closeup' });
   assert.match(closeup.stylePrompt, /半身特写/);
   assert.match(closeup.negativePrompt, /Q版/);
   const maid = normalizeImageGenConfig({ stylePreset: 'maid', outfit: 'none' });
@@ -264,7 +267,7 @@ test('服装池：六套可切换，换装不改脸与发型', () => {
   assert.deepEqual(OUTFIT_NAMES, ['maid', 'jk', 'hoodie', 'knit', 'yukata', 'shirt', 'swim', 'dress', 'bikini', 'nightgown']);
   const knit = normalizeImageGenConfig({ outfit: 'knit' });
   assert.equal(knit.outfit, 'knit');
-  assert.match(knit.stylePrompt, /针织开衫/);
+  assert.match(knit.stylePrompt, /细针织薄开衫/);
   // 服装不再绑定鲸鱼图案，默认是纯色/无图案。
   assert.doesNotMatch(knit.promptLayers.clothing, /鲸鱼|刺绣|印花/);
   assert.match(knit.stylePrompt, /五官发色瞳色不变/);
@@ -285,7 +288,7 @@ test('服装池：六套可切换，换装不改脸与发型', () => {
   // 泳装与连衣裙：保守款，三档气质通用。
   const swim = normalizeImageGenConfig({ outfit: 'swim' });
   assert.match(swim.stylePrompt, /连体运动泳装/);
-  assert.match(swim.stylePrompt, /不透光/);
+  assert.match(swim.stylePrompt, /不透明/);
   // 服装类负向词已按放宽规则整体移除，不再自相矛盾。
   assert.doesNotMatch(swim.negativePrompt, /比基尼/);
   assert.doesNotMatch(swim.negativePrompt, /高叉泳装/);
@@ -302,28 +305,31 @@ test('服装池：六套可切换，换装不改脸与发型', () => {
 test('布料质感：按款式声明材质，描述拼接进服装层', () => {
   assert.equal(FABRICS.cotton.label, '棉麻');
   assert.equal(FABRICS.stiff.label, '制服呢');
-  // JK 走硬挺面料：褶裥立得住、有厚度，并保持版型挺括。
+  // JK 走薄呢混纺：挺括但不靠厚度堆，褶裥利落。
   const jk = clothingLayerFor('jk');
-  assert.match(jk, /制服呢硬挺有骨架/);
-  assert.match(jk, /褶裥挺括有厚度/);
-  assert.match(jk, /受光边留窄缎面微光/);
-  // 睡裙走雪纺：层叠透感但轮廓完整，且内衬不透明。
+  assert.match(jk, /薄呢挺括有厚度/);
+  assert.match(jk, /褶裥利落/);
+  assert.match(jk, /硬边高光/);
+  // 睡裙改单层不透明厚棉：不再写外层薄纱，明确排除透明与轮廓透出。
   const nightgown = clothingLayerFor('nightgown');
-  assert.match(nightgown, /外层雪纺轻薄有层次/);
-  assert.match(nightgown, /内衬不透明有投影/);
-  assert.match(nightgown, /内衬不透明/);
-  // 连衣裙走丝绸：柔和方向性高光，不是整块平涂。
+  assert.match(nightgown, /棉质睡裙/);
+  assert.match(nightgown, /厚实棉布/);
+  assert.match(nightgown, /不透轮廓/);
+  assert.match(nightgown, /赤足/);
+  assert.doesNotMatch(nightgown, /薄纱|外层雪纺/);
+  // 连衣裙走丝绸：重量感与柔和反光，不是整块平涂。
   const dress = clothingLayerFor('dress');
-  assert.match(dress, /丝绸轻薄却有垂坠/);
-  assert.match(dress, /方向性光泽/);
-  // 针织走粗针织：罗纹与针脚立体感。
+  assert.match(dress, /真丝有重量不贴身/);
+  assert.match(dress, /褶脊柔和反光/);
+  // 针织走细针织：厚度靠罗纹堆叠。
   const knit = clothingLayerFor('knit');
-  assert.match(knit, /罗纹与针脚立体/);
+  assert.match(knit, /细针织罗纹有厚度/);
+  assert.match(knit, /针脚凸起/);
   assert.match(knit, /柔和高光/);
   // 泳装走高弹锦纶：贴身张力与压痕。
   const swim = clothingLayerFor('swim');
   assert.match(swim, /贴身有张力/);
-  assert.match(swim, /肩带侧缝有压痕/);
+  assert.match(swim, /肩带侧缝压痕/);
   // 布料描述与身份锁、图案入口互不覆盖。
   const fabricTexts = Object.values(FABRICS).map((fabric) => fabric.text);
   for (const name of OUTFIT_NAMES) {
@@ -334,7 +340,8 @@ test('布料质感：按款式声明材质，描述拼接进服装层', () => {
   }
   // quality 层不被服装层覆盖。
   const quality = normalizeImageGenConfig({ outfit: 'jk' }).promptLayers.quality;
-  assert.match(quality, /赛璐璐上色与厚涂混合/);
+  assert.match(quality, /半厚涂插画/);
+  assert.match(quality, /暗部偏冷/);
   assert.doesNotMatch(quality, /细节丰富/, '画质同义词已删，给头身比约束腾预算');
 });
 
@@ -371,6 +378,8 @@ test('提示词预算：正向 700–780、负向 450–480，超限断言报错
         const chars = assertPromptBudget(parts);
         assert.ok(chars.positive <= PROMPT_BUDGET.positive.max, `${outfit}/${vibe}/${framing} 正向 ${chars.positive}`);
         assert.ok(chars.negative <= PROMPT_BUDGET.negative.max, `${outfit}/${vibe}/${framing} 负向 ${chars.negative}`);
+        // 背景/光影/验收不能再被降级链挤掉（2026-11-10 背景层被丢导致过曝）。
+        assert.deepEqual(parts.droppedLayers, [], `${outfit}/${vibe}/${framing} 不应丢层`);
       }
     }
   }
@@ -413,28 +422,73 @@ test('提示词预算：正向 700–780、负向 450–480，超限断言报错
   assert.match(long.positive, /从头到脚完整入画/);
 });
 
+test('提示词超限降级：先丢背景、再丢光影，身份/比例/表情/服装一字不动', () => {
+  // A）只丢背景即可落回预算内：身份层、比例句、表情、服装、光影全部保留。
+  // 2026-11-10 正文缩到 732 后不再天然超限，这里用一段构图层自定义文本把总量顶回 780 以上。
+  const one = normalizeImageGenConfig({
+    outfit: 'maid', vibe: 'cute', expression: 'gentle', faceStyle: 'grad_soft',
+    hairstyle: 'bun', backgroundDetail: 'mid', tail: 'optional', framing: 'full/eye',
+    promptLayers: { composition: '人物位于画面正中，左右对称，四周留出空白，前景地面有柔和反光与浅影，镜头略微放低，环境干净不抢主体，画面层次清楚' }
+  });
+  assert.ok(measurePromptChars({ positive: one.stylePrompt }).positive > PROMPT_BUDGET.positive.max);
+  const logsA = [];
+  const partsA = buildPromptParts('', one.stylePrompt, one.negativePrompt, one.characterPrompt,
+    { logger: (line) => logsA.push(line) });
+  assert.deepEqual(partsA.droppedLayers, ['background']);
+  assert.ok(measurePromptChars(partsA).positive <= PROMPT_BUDGET.positive.max);
+  assert.match(partsA.positive, /固定人物，不可替换/);
+  assert.match(partsA.positive, /头高占全身 1\/6\.5–1\/7/);
+  assert.match(partsA.positive, /温柔浅笑/);
+  assert.match(partsA.positive, /女仆装/);
+  assert.doesNotMatch(partsA.positive, /【背景与氛围】/);
+  assert.match(partsA.positive, /【光影】/);
+  assert.match(logsA.join('\n'), /drop-layer=背景与氛围/);
+  assert.equal(logsA.length, 1);
+  assert.ok(!partsA.descriptionTrimmed);
+
+  // B）最坏组合：连丢背景/光影/验收三层仍超，此时才开始裁描述句；身份/表情/服装依旧完整。
+  const two = normalizeImageGenConfig({
+    outfit: 'swim', vibe: 'mature', expression: 'pout', faceStyle: 'cel_clean',
+    hairstyle: 'shoulder_straight', backgroundDetail: 'mid', tail: 'required', framing: 'full/eye',
+    promptLayers: { composition: '人物位于画面正中，左右对称，四周留出空白，前景地面有柔和反光与浅影，镜头略微放低，环境干净不抢主体，画面层次清楚' }
+  });
+  const logsB = [];
+  const partsB = buildPromptParts('海边散步'.repeat(40), two.stylePrompt, two.negativePrompt, two.characterPrompt,
+    { logger: (line) => logsB.push(line) });
+  assert.deepEqual(partsB.droppedLayers, ['background', 'lighting', 'acceptance']);
+  assert.equal(partsB.descriptionTrimmed, true);
+  assert.ok(measurePromptChars(partsB).positive <= PROMPT_BUDGET.positive.max);
+  assert.match(partsB.positive, /固定人物，不可替换/);
+  assert.match(partsB.positive, /委屈撅嘴/);
+  assert.match(partsB.positive, /连体运动泳装/);
+  assert.match(partsB.positive, /【保持不变】/);
+  assert.doesNotMatch(partsB.positive, /【背景与氛围】|【光影】|【验收条件】/);
+  assert.equal(logsB.length, 3);
+});
+
 test('景别：默认全身/七分身，写进构图层并调整画幅', () => {
-  assert.deepEqual(FRAMING_NAMES, ['full', 'medium', 'closeup']);
+  assert.deepEqual(FRAMING_NAMES, ['full/eye', 'full/high', 'full/low', 'medium', 'closeup', 'bust']);
   assert.equal(normalizeFraming('auto'), 'auto');
-  assert.equal(normalizeFraming('全身'), 'full');
+  assert.equal(normalizeFraming('全身'), 'full/eye');
+  // 旧口径 full 仍然可用，等价于平视档。
+  assert.equal(normalizeFraming('full'), 'full/eye');
   assert.equal(normalizeFraming('bad'), 'auto');
-  assert.equal(resolveFraming('auto', 'dress').name, 'full');
+  assert.equal(resolveFraming('auto', 'dress').name, 'full/eye');
   assert.equal(resolveFraming('auto', 'swim').name, 'medium');
   assert.equal(resolveFraming('closeup', 'swim').name, 'closeup');
 
   // 默认不再贴脸：auto + 普通服装 → 全身，人物占比与留白都写清楚。
   const config = normalizeImageGenConfig({ outfit: 'dress', framing: 'auto', tail: 'off' });
-  assert.equal(config.framing, 'full');
+  assert.equal(config.framing, 'full/eye');
   assert.equal(config.framingSource, 'auto');
   const composition = config.promptLayers.composition;
   assert.match(composition, /从头到脚完整入画/);
   assert.match(composition, /65%–72%/);
   // 口径：头顶 12%–15%、脚底 15%–20%，不再写 9%/7%。
   assert.match(composition, /头顶留白 12%–15%/);
-  assert.match(composition, /15%–20% 落地空间/);
+  assert.match(composition, /脚下留 15%–20%/);
   assert.doesNotMatch(composition, /头顶留白 9%/);
-  assert.match(composition, /落地空间/);
-  assert.match(composition, /双脚踩地/);
+  assert.match(composition, /平视/);
   // 方形画幅塞不下全身，自动改竖幅。
   assert.equal(config.size, '1024x1536');
   assert.equal(config.width, 1024);
@@ -466,11 +520,180 @@ test('景别：默认全身/七分身，写进构图层并调整画幅', () => {
   assert.match(framingLayerFor('closeup'), /半身景别/);
 });
 
+test('近景档：胸像构图、脸部细节、负向替换、不丢层，且全身三档不回归', () => {
+  const config = normalizeImageGenConfig({ outfit: 'dress', vibe: 'youth', framing: 'bust', expression: 'gentle', hairstyle: 'half_up' });
+  assert.equal(config.framing, 'bust');
+  assert.equal(normalizeFraming('胸像'), 'bust');
+  assert.equal(config.size, '1024x1536');
+  const layers = config.promptLayers;
+  // 构图：明确胸部以上，全身口径（完整入画、占比、脚下留白）一个都不许留。
+  assert.match(layers.composition, /胸部以上近景/);
+  assert.match(layers.composition, /脸占画幅一半以上/);
+  assert.doesNotMatch(layers.composition, /从头到脚|65%–72%|脚下留|占比 70%/);
+  // 人物层不再写头身比、肩胯宽与尾巴。
+  assert.doesNotMatch(layers.character, /头高占全身|肩宽|胯宽|鲸尾|尾巴/);
+  // 脸部层接管近景细节：逐条抽查，防止压缩时丢项。
+  for (const phrase of [
+    '脸长宽1.25–1.3', '下颌线柔', '下巴小圆', '下颌角不方',
+    '眼距一个眼宽', '纵向开大', '宽:高2:1', '上睑压虹膜1/4',
+    '浅宽双眼皮褶与睫毛线留缝', '外眼角不被眼线盖',
+    '虹膜外环细', '亮蓝中段占半', '月牙反光', '两微星',
+    '卧蚕在下睑下', '眉可见、蓝灰、细、尾略下弯', '无鼻梁线',
+    '冷粉低饱和唇', '唇线细淡融肤', '下唇厚',
+    '皮肤冷白偏粉', '暖光只落鼻尖颧骨', '线稿1px深蓝', '腮红横跨鼻梁连片'
+  ]) {
+    assert.ok(layers.faceStyle.includes(phrase), `近景脸部层缺少「${phrase}」`);
+  }
+  // 负向：换成就近景真会出的问题，头身比/腿长类词剔除，尾巴负向不再追加。
+  for (const word of ['全身构图', '远景', '人物过小', '脸被裁', '下巴被裁']) {
+    assert.match(config.negativePrompt, new RegExp(`(^|、)${word}(、|$)`));
+  }
+  assert.doesNotMatch(config.negativePrompt, /八头身|九头身|超长腿|筷子腿|腿长超过三个半头高/);
+  // 不丢层：背景、光影、验收必须都送达。
+  const parts = buildPromptParts('窗边回头', config.stylePrompt, config.negativePrompt, config.characterPrompt);
+  assert.deepEqual(parts.droppedLayers, []);
+  assert.match(parts.positive, /【背景与氛围】/);
+  assert.match(parts.positive, /【光影】/);
+  assert.match(parts.positive, /【验收条件】/);
+  // 全身三档不回归：构图口径、人物层比例、负向词都还是原来那一套。
+  const full = normalizeImageGenConfig({ outfit: 'dress', vibe: 'youth', framing: 'full/eye', tail: 'required' });
+  assert.match(full.promptLayers.composition, /从头到脚完整入画/);
+  assert.match(full.promptLayers.composition, /65%–72%/);
+  assert.match(full.promptLayers.character, /头高占全身 1\/6\.5–1\/7/);
+  assert.match(full.negativePrompt, /八头身|九头身/);
+  assert.doesNotMatch(full.negativePrompt, /全身构图/);
+  const fullParts = buildPromptParts('海边散步', full.stylePrompt, full.negativePrompt, full.characterPrompt);
+  assert.deepEqual(fullParts.droppedLayers, []);
+});
+
+test('请求级覆盖：framing/outfit/size 合进配置，空值与 auto 视为未传', () => {
+  const base = { provider: 'pollinations', framing: 'auto', outfit: 'dress', stylePreset: 'keyvisual' };
+  const merged = applyRequestOverrides(base, { framing: '胸像', size: '864x1152', outfit: '', stylePreset: 'auto' });
+  assert.equal(merged.framing, '胸像');
+  assert.equal(merged.framingSource, 'explicit');
+  assert.equal(merged.width, 864);
+  assert.equal(merged.height, 1152);
+  assert.equal(merged.outfit, 'dress');
+  assert.equal(merged.stylePreset, 'keyvisual');
+
+  const plan = resolveDrawPlan({ request: {}, config: normalizeImageGenConfig(merged) });
+  assert.equal(plan.framing, 'bust');
+  assert.equal(plan.framingSource, 'explicit');
+  assert.equal(plan.size, '864x1152');
+
+  // 服装字段与服装层必须来自同一次归一化。
+  const jk = normalizeImageGenConfig(applyRequestOverrides({ provider: 'pollinations', outfit: 'dress' }, { outfit: 'jk' }));
+  assert.equal(jk.outfit, 'jk');
+  assert.match(jk.promptLayers.clothing, /水手服/);
+});
+
+test('framingSource 继承：二次归一化不把 auto 标成 explicit', () => {
+  const once = normalizeImageGenConfig({ provider: 'pollinations', outfit: 'dress', framing: 'auto' });
+  assert.equal(once.framing, 'full/eye');
+  assert.equal(once.framingSource, 'auto');
+  const twice = normalizeImageGenConfig({ ...once, promptLayers: once.promptLayers });
+  assert.equal(twice.framing, 'full/eye');
+  assert.equal(twice.framingSource, 'auto');
+  const explicit = normalizeImageGenConfig({ provider: 'pollinations', framing: 'bust' });
+  assert.equal(explicit.framingSource, 'explicit');
+});
+
+test('近景不被 preset 构图句拉回：bust + 任一 preset 都必须剔除冲突景别句', () => {
+  for (const presetName of STYLE_PRESET_NAMES) {
+    const config = normalizeImageGenConfig({ provider: 'pollinations', outfit: 'dress', vibe: 'youth', framing: 'bust', stylePreset: presetName });
+    assert.match(config.promptLayers.composition, /胸部以上近景/, presetName);
+    assert.doesNotMatch(
+      config.promptLayers.composition,
+      /全身构图|七分身构图|三分之二身构图|半身特写构图/,
+      `${presetName} 的 preset 景别句未被剔除：${config.promptLayers.composition}`
+    );
+  }
+});
+
+test('参考图按景别单选：bust 只拿胸像锚点，full 拿默认两张', () => {
+  const dir = tempState();
+  try {
+    const bustAnchor = join(dir, 'dafish-anchor-bust-v1.png');
+    const standing = join(dir, 'dafish-anchor-standing-padded-v3.png');
+    const face = join(dir, 'dafish-anchor-face-v3.png');
+    for (const file of [bustAnchor, standing, face]) writeFileSync(file, pngWithSize(512, 512));
+    const config = normalizeImageGenConfig({
+      provider: 'pollinations', outfit: 'dress', framing: 'auto',
+      defaultReferenceImages: [standing, face],
+      referenceImagesByFraming: { bust: bustAnchor, closeup: face }
+    });
+
+    const bustPlan = resolveDrawPlan({
+      request: { framing: '胸像' },
+      config: normalizeImageGenConfig(applyRequestOverrides(config, { framing: '胸像' }))
+    });
+    assert.equal(bustPlan.framing, 'bust');
+    assert.equal(bustPlan.referenceOrigin, 'anchor');
+    assert.deepEqual(bustPlan.referenceFiles, ['dafish-anchor-bust-v1.png']);
+    assert.equal(bustPlan.referenceImages.length, 1);
+
+    const fullPlan = resolveDrawPlan({ request: {}, config });
+    assert.equal(fullPlan.framing, 'full/eye');
+    assert.deepEqual(fullPlan.referenceFiles, ['dafish-anchor-standing-padded-v3.png', 'dafish-anchor-face-v3.png']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('胸像请求走 generateImage：构图、负向、参考图、meta 与 plan 日志一致', async () => {
+  const dir = tempState();
+  try {
+    const bustAnchor = join(dir, 'dafish-anchor-bust-v1.png');
+    const standing = join(dir, 'dafish-anchor-standing-padded-v3.png');
+    const face = join(dir, 'dafish-anchor-face-v3.png');
+    for (const file of [bustAnchor, standing, face]) writeFileSync(file, pngWithSize(512, 512));
+    const logs = [];
+    const result = await generateImage({
+      description: '窗边回头，午后阳光',
+      config: {
+        provider: 'dashscope', apiKey: 'k', baseUrl: 'https://dashscope.example/api/v1',
+        model: 'qwen-image-edit', maxRetries: 0,
+        outfit: 'dress', vibe: 'youth', framing: 'auto',
+        defaultReferenceImages: [standing, face],
+        referenceImagesByFraming: { bust: bustAnchor, closeup: face }
+      },
+      target: '1', isGroup: false, chatKey: 'private:1', trigger: 'tool', framing: '胸像'
+    }, {
+      stateDir: dir,
+      logger: (line) => logs.push(line),
+      inspectImage: async () => ({ appropriate: true, confidence: 0.95, caption: '成年女性胸像' }),
+      fetchImpl: async (url) => {
+        if (String(url).includes('multimodal-generation')) {
+          return {
+            ok: true, status: 200,
+            json: async () => ({ request_id: 'req-bust', output: { choices: [{ message: { content: [{ image: 'https://cdn.example/out.png' }] } }] } })
+          };
+        }
+        return okResponse();
+      }
+    });
+    assert.equal(result.ok, true);
+    const meta = JSON.parse(readFileSync(result.metaPath, 'utf8'));
+    assert.equal(meta.framing, 'bust');
+    assert.equal(meta.framingSource, 'explicit');
+    assert.deepEqual(meta.referenceFiles, ['dafish-anchor-bust-v1.png']);
+    assert.equal(meta.references.length, 1);
+    assert.equal(result.references.length, 1);
+    assert.match(meta.prompt, /胸部以上近景/);
+    assert.match(meta.prompt, /脸占画幅一半以上/);
+    assert.match(meta.negativePrompt, /(^|、)全身构图(、|$)/);
+    const planLine = logs.find((line) => line.includes('[imagegen] plan '));
+    assert.ok(planLine, `缺少 plan 日志：${logs.join('\n')}`);
+    assert.match(planLine, /framing=bust\(explicit\)/);
+    assert.match(planLine, /files=\[dafish-anchor-bust-v1\.png\]/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('景别命令解析：/画图 景别=全身 与 framing=medium', () => {
-  assert.deepEqual(parseImageCommand('画图 景别=全身 海边'), { description: '海边', framing: 'full' });
+  assert.deepEqual(parseImageCommand('画图 景别=全身 海边'), { description: '海边', framing: 'full/eye' });
+  assert.deepEqual(parseImageCommand('画图 景别=全身·俯拍 海边'), { description: '海边', framing: 'full/high' });
   assert.deepEqual(parseImageCommand('画图 framing=medium 在图书馆看书'), { description: '在图书馆看书', framing: 'medium' });
   assert.deepEqual(parseImageCommand('画图 景别=半身，kitchen'), { description: 'kitchen', framing: 'closeup' });
-  assert.deepEqual(parseImageCommand('画图 景别=全身 发型=丸子头 海边'), { description: '海边', framing: 'full', hairstyle: 'bun' });
+  assert.deepEqual(parseImageCommand('画图 景别=胸像，窗边回头'), { description: '窗边回头', framing: 'bust' });
+  assert.deepEqual(parseImageCommand('画图 景别=全身 发型=丸子头 海边'), { description: '海边', framing: 'full/eye', hairstyle: 'bun' });
   assert.deepEqual(parseImageCommand('画图 景别=不存在 海边'), { description: '景别=不存在 海边' });
 });
 
@@ -519,7 +742,7 @@ test('表情层：八种表情独立成层，换表情不改脸与发型', () =>
   }
   // 画法归属：渐变柔光脸提供高光/空气刷，且两层职责写死。
   assert.match(faceStyleLayerFor('grad_soft'), /多层高光/);
-  assert.match(faceStyleLayerFor('grad_soft'), /表情动作优先，脸部画法只决定表现方式/);
+  assert.match(faceStyleLayerFor('grad_soft'), /只改画法不改骨相/);
   assert.doesNotMatch(expressionLayerFor('gentle'), /高光/);
   const happy = normalizeImageGenConfig({ expression: 'happy' });
   assert.match(happy.stylePrompt, /开心大笑/);
@@ -537,7 +760,7 @@ test('表情层：八种表情独立成层，换表情不改脸与发型', () =>
 test('脸部画法层：六档均有词条，位置在人物之后表情之前', () => {
   assert.equal(DEFAULT_FACE_STYLE, 'grad_soft');
   assert.deepEqual(FACE_STYLE_NAMES, ['grad_soft', 'closed_arc', 'cel_clean', 'sharp_mature', 'round_sweet', 'ink_minimal', 'film_natural']);
-  assert.equal(FACE_STYLE_PRIORITY, '表情动作优先，脸部画法只决定表现方式');
+  assert.equal(FACE_STYLE_PRIORITY, '只改画法不改骨相');
   for (const name of FACE_STYLE_NAMES) {
     assert.ok(FACE_STYLES[name].text, `${name} 应有词条`);
     const resolved = resolveFaceStyle(name);
@@ -580,18 +803,18 @@ test('画幅与背景密度：wide_scene 走 16:9，rich 只虚化最远层且�
   // 显式非方形尺寸不被 wide_scene 改写。
   assert.equal(normalizeImageGenConfig({ sceneFraming: 'wide_scene', width: 864, height: 1152 }).size, '864x1152');
 
-  // rich：高密度实景，只虚化最远一层；重复归一化不叠加。
+  // rich：实景道具，只虚化最远一层；重复归一化不叠加。
   const rich = normalizeImageGenConfig({ backgroundDetail: 'rich' });
   assert.equal(rich.backgroundDetail, 'rich');
-  assert.match(rich.promptLayers.background, /高密度实景背景/);
-  assert.match(rich.promptLayers.background, /只虚化最远一层/);
+  assert.match(rich.promptLayers.background, /实景道具/);
+  assert.match(rich.promptLayers.background, /仅远层虚化/);
   assert.doesNotMatch(rich.promptLayers.background, /三层纵深/);
   const twice = normalizeImageGenConfig({ backgroundDetail: 'rich', promptLayers: rich.promptLayers });
   assert.equal(measurePromptChars({ positive: twice.promptLayers.background }).positive,
     measurePromptChars({ positive: rich.promptLayers.background }).positive);
   const minimal = normalizeImageGenConfig({ backgroundDetail: 'minimal' });
-  assert.match(minimal.promptLayers.background, /大面积纯色与强虚化/);
-  assert.doesNotMatch(minimal.promptLayers.background, /高密度实景/);
+  assert.match(minimal.promptLayers.background, /纯色强虚化/);
+  assert.doesNotMatch(minimal.promptLayers.background, /实景道具/);
 
   // 默认仍是竖幅 + 三层纵深。
   const normal = normalizeImageGenConfig({ outfit: 'dress', framing: 'full' });
@@ -604,13 +827,13 @@ test('发型层：九款可切换，层级在人物之后，换发型不改脸�
   assert.deepEqual(HAIRSTYLE_NAMES, ['bun', 'high_ponytail', 'low_ponytail', 'twintails', 'half_up', 'side_braid', 'low_updo', 'short_bob', 'shoulder_straight']);
   assert.equal(DEFAULT_HAIRSTYLE, 'auto');
   // 层级顺序：构图前置到第 3 位，发型与其余层相对顺序不变
-  assert.deepEqual(PROMPT_LAYER_ORDER, ['quality', 'character', 'faceStyle', 'composition', 'hairstyle', 'vibe', 'expression', 'clothing', 'lighting', 'background']);
+  assert.deepEqual(PROMPT_LAYER_ORDER, ['quality', 'character', 'faceStyle', 'composition', 'hairstyle', 'vibe', 'expression', 'clothing', 'lighting', 'background', 'keepUnchanged', 'acceptance']);
 
   const bun = normalizeImageGenConfig({ hairstyle: 'bun' });
   assert.equal(bun.hairstyle, 'bun');
   assert.equal(bun.hairstyleMode, 'explicit');
   assert.match(bun.promptLayers.hairstyle, /丸子头/);
-  assert.match(bun.promptLayers.hairstyle, /小鲸鱼发夹/);
+  assert.match(bun.promptLayers.hairstyle, /鲸鱼发夹/);
   // 发型层不碰人物层：发色、瞳色、鳍耳仍在
   assert.match(bun.stylePrompt, /宝蓝/);
   assert.match(bun.stylePrompt, /深海蓝/);
@@ -621,8 +844,7 @@ test('发型层：九款可切换，层级在人物之后，换发型不改脸�
   assert.equal(normalizeImageGenConfig({ hairstyle: 'high_ponytail' }).promptLayers.hairstyle.includes('高马尾'), true);
   // 齐肩直发必须带可判定的长度上限，否则会被画成过腰长发。
   const shoulder = normalizeImageGenConfig({ hairstyle: 'shoulder_straight' }).promptLayers.hairstyle;
-  assert.match(shoulder, /发尾止于肩线/);
-  assert.match(shoulder, /不超过肩线/);
+  assert.match(shoulder, /发尾不超过肩线/);
 });
 
 test('发型选型：会话内去重、显式覆盖、关闭开关回落固定长发', () => {
@@ -729,7 +951,7 @@ test('比基尼：仅主人私聊可用，群聊直接拒绝且不放行负向�
   });
   assert.equal(config.outfit, 'bikini');
   assert.match(config.stylePrompt, /两件式泳装/);
-  assert.match(config.stylePrompt, /面料厚实不透明/);
+  assert.match(config.stylePrompt, /不透明/);
   assert.match(config.stylePrompt, /年龄外观必须明确成年/);
   // 服装类负向词已整体移除，配置里不再压这些词。
   assert.doesNotMatch(config.negativePrompt, /(^|、)比基尼(、|$)/);
@@ -753,15 +975,15 @@ test('比基尼：仅主人私聊可用，群聊直接拒绝且不放行负向�
   assert.equal(stranger.reason, 'outfit-private-only');
 });
 
-test('薄纱睡裙：不透明内衬 + 仅主人私聊，群聊拒绝且负向词补齐', async () => {
+test('棉质睡裙：单层不透明 + 仅主人私聊，群聊拒绝且负向词补齐', async () => {
   assert.deepEqual(PRIVATE_ONLY_OUTFITS, ['bikini', 'nightgown']);
   const config = normalizeImageGenConfig({
     provider: 'pollinations', model: 'flux', outfit: 'nightgown', vibe: 'youth', tail: 'optional', width: 256, height: 256
   });
   assert.equal(config.outfit, 'nightgown');
-  assert.match(config.stylePrompt, /薄纱/);
-  assert.match(config.stylePrompt, /内层不透明纯白棉衬/);
-  assert.doesNotMatch(config.promptLayers.clothing, /鲸鱼|刺绣|印花/);
+  assert.match(config.stylePrompt, /棉质睡裙/);
+  assert.match(config.stylePrompt, /不透轮廓/);
+  assert.doesNotMatch(config.promptLayers.clothing, /薄纱|外层雪纺/);
   assert.match(config.stylePrompt, /年龄外观必须明确成年/);
   // 服装类负向词已移除，睡裙只保留未成年与风格类约束。
   for (const term of ['薄纱透肉', '内衬透明', '高叉', '内衣外露', '透视', '湿身', '走光']) {
@@ -1343,6 +1565,8 @@ test('dashscope 返回：解析多模态 choices 并下载，meta 记录 request
       referenceImage: pngWithSize(768, 1024).toString('base64'),
       config: {
         provider: 'dashscope', apiKey: 'k', baseUrl: 'https://dashscope.example/api/v1',
+        // 服装/气质固定：auto 会随机抽到泳装 → 落到七分身档，负向首词断言随机失败。
+        outfit: 'dress', vibe: 'youth', framing: 'full/eye',
         model: 'qwen-image-edit', maxRetries: 0, stylePrompt: '立绘', negativePrompt: 'Q版'
       }
     }, {
@@ -1507,4 +1731,50 @@ test('最近图片上下文：自绘图注入来源标记', () => {
   assert.ok(!plain.includes('我自己画的图'));
   assert.equal(selfDrawnImageDescription('一个蓝发少女', meta).startsWith('[我自己画的图｜'), true);
   assert.equal(selfDrawnImageDescription('一个蓝发少女', null), '一个蓝发少女');
+});
+
+test('参考图按景别绑定：六档映射、单值/数组兼容、auto 按实际景别、未配置回退默认', () => {
+  const FULL = ['stand.png', 'face.png'];
+  const raw = {
+    provider: 'ark',
+    defaultReferenceImages: FULL,
+    referenceImagesByFraming: {
+      'full/eye': FULL,
+      'full/high': ['stand.png', 'face.png'],
+      'full/low': ['stand.png', 'face.png'],
+      medium: 'bust.png',
+      bust: ['bust.png'],
+      closeup: 'face.png'
+    }
+  };
+  const expected = {
+    'full/eye': ['stand.png', 'face.png'],
+    'full/high': ['stand.png', 'face.png'],
+    'full/low': ['stand.png', 'face.png'],
+    medium: ['bust.png'],
+    bust: ['bust.png'],
+    closeup: ['face.png']
+  };
+  for (const [framing, refs] of Object.entries(expected)) {
+    const config = normalizeImageGenConfig({ ...raw, framing });
+    assert.equal(config.framing, framing);
+    assert.deepEqual(pickReferenceImages(config, config.framing), refs, `${framing} 参考图不对`);
+  }
+  // auto：按解析后的实际景别取值。
+  const autoFull = normalizeImageGenConfig({ ...raw, framing: 'auto', outfit: 'dress' });
+  assert.equal(autoFull.framing, 'full/eye');
+  assert.deepEqual(pickReferenceImages(autoFull, autoFull.framing), ['stand.png', 'face.png']);
+  const autoMedium = normalizeImageGenConfig({ ...raw, framing: 'auto', outfit: 'swim' });
+  assert.equal(autoMedium.framing, 'medium');
+  assert.deepEqual(pickReferenceImages(autoMedium, autoMedium.framing), ['bust.png']);
+  // 没配到的景别回落到 defaultReferenceImages，向后兼容。
+  const bare = normalizeImageGenConfig({ provider: 'ark', framing: 'bust', outfit: 'dress', defaultReferenceImages: ['only.png'] });
+  assert.deepEqual(pickReferenceImages(bare, bare.framing), ['only.png']);
+  const single = normalizeImageGenConfig({ provider: 'ark', framing: 'bust', outfit: 'dress', defaultReferenceImage: 'single.png' });
+  assert.deepEqual(pickReferenceImages(single, single.framing), ['single.png']);
+  // 键名归一：中文档名与旧 shorthand 都能落到标准景别；auto 键不单独存。
+  assert.deepEqual(normalizeReferenceImagesByFraming({ 胸像: 'b.png', full: 'f.png', auto: 'x.png' }), {
+    bust: ['b.png'],
+    'full/eye': ['f.png']
+  });
 });

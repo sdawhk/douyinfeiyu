@@ -1,9 +1,9 @@
 // 画图：provider 抽象 + 冷却/限额 + 内容审核 + 本地落盘 + base64 发送段。
 // 默认走 pollinations（免 Key）；provider 字段可切到 openai 兼容接口（如智谱）。
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { inspectDrawPrompt, shouldBlockImageStorage } from './image-content-policy.mjs';
 import { sha256Of, writeImageMeta } from './image-gen-meta.mjs';
 import { measureComposition, measureHeadBodyRatio, planOutpaintOffsets } from './image-composition.mjs';
@@ -15,7 +15,7 @@ import { outpaintImage, OUTPAINT_MODEL, OUTPAINT_COST_CNY } from './image-outpai
 // faceStyle 紧跟身份层：先锁“脸怎么画”，再谈构图；表情层只负责动作。
 // 构图第 4 位：画质、身份与脸部画法之后立刻给景别/机位/占比/留白，确保不被截断；
 // 背景、光影放在最后，被压缩时优先牺牲它们。
-export const PROMPT_LAYER_ORDER = ['quality', 'character', 'faceStyle', 'composition', 'hairstyle', 'vibe', 'expression', 'clothing', 'lighting', 'background'];
+export const PROMPT_LAYER_ORDER = ['quality', 'character', 'faceStyle', 'composition', 'hairstyle', 'vibe', 'expression', 'clothing', 'lighting', 'background', 'keepUnchanged', 'acceptance'];
 
 // 字符预算：qwen-image 正向 800 Token、负向 500 字符，超出会被接口静默截断。
 // 这里按“宁可留余量”取 780 / 480，并作为硬断言；超限直接报错，不再悄悄截。
@@ -82,19 +82,21 @@ export const PROMPT_LAYER_LABELS = {
   clothing: '服装',
   composition: '构图与视角',
   lighting: '光影',
-  background: '背景与氛围'
+  background: '背景与氛围',
+  keepUnchanged: '保持不变',
+  acceptance: '验收条件'
 };
 
 // 固定人物：DeepSeek 女化形象的身份特征（发色/眼型/脸型/耳饰/体型）。
 // 2026-11 按主人给的新锚点图重写：宝蓝长发、半杏眼、鹅蛋脸、蓝鳍耳饰，不再有呆毛。
 // 服装（outfit）、尾巴（tail）与表情（expression）都是可切换字段，都不得改变这里的脸与发型。
-// 比例全部写成占全高的百分比：腰线 33%–35%、膝 72%–74%、肩 1.9 / 胯 1.5 头宽，
-// 不再用“略高于中点/略低于中点”这种和中点绑定的含糊说法（中点=50% 会把躯干拉长）。
+// 比例口径（腰线/膝位/腿长）交给全身锚点负责，正文只留头身比与肩胯宽：
+// 2026-11-10 实测 12 层拼完已顶到 780，再写腰线/膝位会把【背景与氛围】挤掉。
 const CHARACTER_BASE_CLAUSES = [
   'DeepSeek 女化形象，禁止替换',
-  '成年女性，鹅蛋脸带婴儿肥，头高占全身 1/6.5–1/7，腰线在全高 33%–35%，膝在 72%–74%，腿长（胯到脚底）占 43%–46%',
+  '成年女性，鹅蛋脸带婴儿肥，头高占全身 1/6.5–1/7',
   '肩宽 1.9 头宽、胯宽 1.5 头宽',
-  '纯宝蓝长发，发型见发型层',
+  '纯宝蓝长发',
   '细长半杏眼、眼尾微垂，深海蓝瞳',
   '鲸鳍状耳，外深蓝内白褶',
   '鲸鱼造型发饰至少两处',
@@ -245,12 +247,12 @@ export function expressionLayerFor(name) {
 // ── 脸部画法层 ─────────────────────────────────────────────────────────────
 // 只决定“脸怎么画”，不改身份、不改表情动作；表情层永远优先于脸部画法。
 // 只落有两批样张支撑的两档，其余先留名字占位（词条为空），避免没样本也硬写。
-export const FACE_STYLE_PRIORITY = '表情动作优先，脸部画法只决定表现方式';
+export const FACE_STYLE_PRIORITY = '只改画法不改骨相';
 
 export const FACE_STYLES = {
   grad_soft: {
     label: '渐变柔光脸',
-    text: '瞳色柔和渐变、多层高光，皮肤空气刷，腮红虚化'
+    text: '瞳色多层高光，皮肤空气刷，腮红淡'
   },
   closed_arc: {
     label: '闭眼弧线',
@@ -259,7 +261,7 @@ export const FACE_STYLES = {
   // 每档只改画法，不改骨相；档内自带锚点句，防止换画法时把瞳色/鳍耳/脸型带跑。
   cel_clean: {
     label: '赛璐璐干净脸',
-    text: '赛璐璐平涂上色，瞳孔单高光平涂、眼线细且加深，鼻一个阴影点、嘴一条短线，腮红块面轻扫；眼型与瞳色不变'
+    text: '赛璐璐平涂上色，瞳孔单高光平涂、眼线细加深，鼻一阴影点，腮红轻扫；眼型与瞳色不变'
   },
   sharp_mature: {
     label: '锐利御姐脸',
@@ -315,18 +317,18 @@ const ADULT_HARD_LOCK = '年龄外观必须明确成年，不画萝莉或儿童�
 export const VIBES = {
   cute: {
     label: '萌系',
-    text: '脸部更圆、脸颊饱满，眼睛大而亮，姿态轻快，气质软萌亲和',
+    text: '姿态轻快，气质软萌亲和',
     faceHint: 'soft round face, bright eyes, cute but adult woman'
   },
   youth: {
     label: '青春少女',
-    text: '脸颊饱满、气色明亮，眼神清亮，站姿轻快，气质干净有活力',
+    text: '气质干净有活力',
     faceHint: 'youthful adult woman, bright complexion, lively'
   },
   mature: {
     label: '成熟御姐',
     // 不写“脸部修长”：那会被模型读成“把脸画窄再把身体拉长”，头高必须保持不变。
-    text: '下颌清晰但头高不变，眼神沉静内敛，姿态舒展，气质成熟从容',
+    text: '下颌清晰但头高不变，气质成熟从容',
     faceHint: 'mature adult woman, elegant, composed'
   }
 };
@@ -378,45 +380,45 @@ export function vibeLayerFor(name) {
 
 // ── 发型层 ─────────────────────────────────────────────────────────────────
 // 只改头发形态：发色、发质、五官、瞳色、鳍耳与鲸鱼发饰一律不动，保证“换了发型还是同一个人”。
-const HAIR_FIXED_TEXT = '宝蓝、钴蓝色长发自然披落，发丝细密、发梢自然散开，耳侧一枚小鲸鱼发饰';
+const HAIR_FIXED_TEXT = '宝蓝长发自然披落，耳侧鲸鱼发饰';
 
 export const HAIRSTYLES = {
   bun: {
     label: '丸子头',
-    text: '宝蓝长发在头顶盘成一个圆润的高丸子，鬓角留少量碎发，后颈清爽露出，耳侧别一枚小鲸鱼发夹'
+    text: '头顶高丸子，鬓角碎发，鲸鱼发夹'
   },
   high_ponytail: {
     label: '高马尾',
-    text: '宝蓝长发在头顶偏后位置扎成高马尾，发尾自然垂落过肩，额前留少许碎发，发圈是一只小鲸鱼'
+    text: '头顶偏后高马尾，鲸鱼发圈'
   },
   low_ponytail: {
     label: '低马尾',
-    text: '宝蓝长发在颈后低低扎成一束马尾，发尾垂到肩胛，两侧鬓发柔软，发绳上挂着小小的鲸鱼挂坠'
+    text: '颈后低马尾垂到肩胛，鲸鱼挂坠'
   },
   twintails: {
     label: '双马尾',
-    text: '宝蓝长发在两侧耳后各扎一束双马尾，发梢自然外翘，刘海轻柔，两侧各一枚鲸鱼造型发饰'
+    text: '两侧双马尾，各一枚鲸鱼发饰'
   },
   half_up: {
     label: '半披长发',
-    text: '宝蓝长发上半部分在脑后松松扎起一个小髻，下半部分自然披落，发丝柔软，髻侧一枚小鲸鱼发饰'
+    text: '上半扎小髻，下半披落，鲸鱼发饰'
   },
   side_braid: {
     label: '侧编麻花辫',
-    text: '宝蓝长发编成一条松散的侧麻花辫垂在左肩前，辫尾用小鲸鱼发圈固定，额前留几缕碎发'
+    text: '左侧麻花辫垂在肩前，鲸鱼发圈'
   },
   low_updo: {
     label: '低盘发',
-    text: '宝蓝长发在颈后盘成低低的发髻，鬓角留出柔和碎发修饰脸型，发髻侧边别一枚小鲸鱼发针'
+    text: '颈后低盘发，鬓角碎发，鲸鱼发针'
   },
   short_bob: {
     label: '短内扣',
-    text: '宝蓝头发剪成齐下巴的短发，发尾内扣贴住下颌，刘海轻薄，耳侧戴一枚小鲸鱼耳夹'
+    text: '齐下巴短发内扣，鲸鱼耳夹'
   },
   shoulder_straight: {
     label: '齐肩直发',
     // 只写“齐肩”会被画成过腰长发：加可判定的长度上限。
-    text: '宝蓝头发垂到肩线，发尾止于肩线、不超过肩线，不垂到胸前，发尾内收，刘海轻柔，耳侧别一枚小鲸鱼发夹'
+    text: '及肩直发，发尾不超过肩线，鲸鱼发夹'
   }
 };
 
@@ -500,8 +502,9 @@ export function hairstyleLayerFor(name) {
 
 function stripFramingClauses(text) {
   let out = String(text ?? '');
-  // 重复归一化（MCP 合并配置）时先去掉参考图语义句，避免同一句叠加两次。
+  // 重复归一化（MCP 合并配置）时先去掉参考图语义句与视线句，避免同一句叠加两次。
   out = out.split(REFERENCE_IDENTITY_ONLY).join('');
+  out = out.split(GAZE_CLAUSE).join('');
   for (const key of FRAMING_NAMES) {
     out = out.split(`${FRAMINGS[key].label}，${FRAMINGS[key].text}`).join('');
     out = out.split(FRAMINGS[key].text).join('');
@@ -509,54 +512,221 @@ function stripFramingClauses(text) {
   return out.replace(/[，；]{2,}/g, '，').replace(/^[，；\s]+/, '').trim();
 }
 
+// preset 层自带景别句（如「三分之二身构图」「半身特写」），和最终景别冲突时会把近景拉回全身。
+// 必须在 preset 合并之后再按分句剔除，顺序反过来等于没剔除。
+const SHOT_SCALE_WORDS = ['全身', '七分身', '三分之二身', '半身', '胸像', '胸部以上'];
+const SHOT_SCALE_ALLOWED = {
+  'full/eye': ['全身', '从头到脚'],
+  'full/high': ['全身', '从头到脚'],
+  'full/low': ['全身', '从头到脚'],
+  medium: ['七分身', '三分之二身'],
+  closeup: ['半身', '三分之二身', '胸部以上'],
+  bust: ['胸像', '胸部以上']
+};
+
+function stripOpposingScaleClauses(text, framing) {
+  const allowed = SHOT_SCALE_ALLOWED[normalizeFraming(framing)] || [];
+  return String(text ?? '')
+    .split(/[，；]/)
+    .filter((segment) => {
+      const words = SHOT_SCALE_WORDS.filter((word) => segment.includes(word));
+      if (!words.length) return true;
+      return words.every((word) => allowed.includes(word));
+    })
+    .join('，')
+    .replace(/^[，；\s]+|[，；\s]+$/g, '');
+}
+
 // ── 景别层（写进构图层，不新增层） ─────────────────────────────────────────
 // 三档都明确写清：人物占画幅比例、头顶留空、脚下落脚点、视线高度与镜头距离，
 // 避免模型把人怼满画面、背景被挤没。
 export const FRAMINGS = {
-  full: {
-    label: '全身',
+  'full/eye': {
+    label: '全身·平视',
     // 口径：人物 65%–72% + 头顶 12%–15% + 脚底 15%–20%，三者以合计 100% 为约束。
-    text: 'full body shot, from a distance，从头到脚完整入画，人物占画幅 65%–72%，头顶留白 12%–15%，脚下留出 15%–20% 落地空间、脚尖不裁切；平视，双脚踩地'
+    // 机位只在景别句里给一次，不再另开 camera 层，避免两处各说一套。
+    text: '从头到脚完整入画，占画幅 65%–72%，头顶留白 12%–15%，脚下留 15%–20%；平视'
+  },
+  'full/high': {
+    label: '全身·俯拍',
+    text: '从头到脚完整入画，占画幅 65%–72%，头顶留白 12%–15%，脚下留 15%–20%；俯拍'
+  },
+  'full/low': {
+    label: '全身·仰拍',
+    text: '从头到脚完整入画，占画幅 65%–72%，头顶留白 12%–15%，脚下留 15%–20%；仰拍'
   },
   medium: {
     label: '七分身',
-    text: '七分身景别，人物头顶到大腿以上入画，人物高度约占画幅 65%–80%，头顶留白约 8%，画面下缘落在大腿、不切断膝盖；平视机位，中景距离'
+    text: '七分身景别，头顶到大腿以上入画，占画幅 65%–80%，头顶留白约 8%，下缘落在大腿不切膝；平视中景'
   },
   closeup: {
     label: '半身',
-    text: '半身景别，人物头顶到腰部以上入画，人物高度约占画幅 70%–85%，头顶留白约 5%；平视机位，半身距离'
+    text: '半身景别，头顶到腰以上入画，占画幅 70%–85%，头顶留白约 5%；平视半身'
+  },
+  // 近景档：真正的脸部特写口径，全身比例约束全部撤掉，字数让给脸部细节。
+  bust: {
+    label: '胸像',
+    text: '胸部以上近景，头顶留白6%，脸占画幅一半以上，平视'
   }
 };
 
 export const FRAMING_NAMES = Object.keys(FRAMINGS);
 // 景别负向词：全身最容易被模型裁掉脚，单独补几条。
+const FULL_NEGATIVE = ['裁切脚部', '脚部出画', '脚尖被裁', '半身构图', '七分身构图', '头顶贴边', '人物占满画面'];
+// 近景档的负向换成就近景会出的问题：模型容易退回全身、远景、人物过小。
+const BUST_NEGATIVE = ['全身构图', '七分身构图', '远景', '人物过小', '头顶贴边', '脸被裁', '下巴被裁'];
 const FRAMING_NEGATIVE = {
-  full: ['裁切脚部', '脚部出画', '脚尖被裁', '半身构图', '七分身构图', '头顶贴边', '人物占满画面'],
+  'full/eye': FULL_NEGATIVE,
+  'full/high': FULL_NEGATIVE,
+  'full/low': FULL_NEGATIVE,
   medium: [],
-  closeup: []
+  closeup: [],
+  bust: BUST_NEGATIVE
 };
+
+// ── 近景档专用分层文本（只在 bust 生效，全身三档与本段无关）────────────────
+// 脸部细节全部写成可判定短语，来源是 2026-11-10 参考图与出图逐项对照的差值。
+export const NEAR_SHOT_FACE_STYLE = '脸长宽1.25–1.3，下颌线柔，下巴小圆，下颌角不方；眼距一个眼宽，纵向开大，宽:高2:1；上睑压虹膜1/4；浅宽双眼皮褶与睫毛线留缝，外眼角不被眼线盖；虹膜外环细，亮蓝中段占半，下缘月牙反光，左上大方高光、右下小点、两微星；卧蚕在下睑下，有宽，边柔，上缘淡影；眉可见、蓝灰、细、尾略下弯；鼻尖圆润高光，下方淡影，无鼻梁线；冷粉低饱和唇，唇线细淡融肤，唇峰柔，下唇厚；皮肤冷白偏粉，暖光只落鼻尖颧骨，过渡柔；线稿1px深蓝，只在眼线眼尾下巴；腮红横跨鼻梁连片';
+export const NEAR_SHOT_ACCEPTANCE = '单一主光、脸未被裁、五官清晰、衣缘不悬浮';
+// 近景档只挂一张胸像锚点，参考图语义按单张写。
+export const NEAR_SHOT_REFERENCE = '参考图只取脸型、五官间距、画法与肤色，不取姿态背景表情';
+// 近景里没有意义的头身比/腿长负向词，出图前剔除，腾出负向预算。
+export const NEAR_SHOT_DROP_NEGATIVE = new Set([
+  '八头身', '九头身', '超长腿', '筷子腿', '腿长超过三个半头高',
+  '躯干过长', '腰线过低', '腰线过高', '膝盖过低', '头小身大'
+]);
 // auto：泳装/比基尼带环境与站姿，默认七分身；其余默认全身，不默认贴脸。
 export const DEFAULT_FRAMING = 'auto';
 const FRAMING_BY_OUTFIT = { swim: 'medium', bikini: 'medium' };
 
 export function normalizeFraming(value) {
-  const key = String(value ?? '').trim().toLowerCase();
+  const raw = String(value ?? '').trim();
+  const key = raw.toLowerCase();
   if (key === 'auto' || key === '') return DEFAULT_FRAMING;
+  // 旧口径 full / 全身 统一落到平视档，避免历史配置失效。
+  if (key === 'full' || raw === '全身') return 'full/eye';
   if (FRAMING_NAMES.includes(key)) return key;
-  const byLabel = FRAMING_NAMES.find((name) => FRAMINGS[name].label === String(value ?? '').trim());
+  const byLabel = FRAMING_NAMES.find((name) => FRAMINGS[name].label === raw);
   return byLabel || DEFAULT_FRAMING;
 }
 
 export function resolveFraming(value, outfit = '') {
   const normalized = normalizeFraming(value);
   if (normalized !== DEFAULT_FRAMING) return { name: normalized, source: 'explicit' };
-  return { name: FRAMING_BY_OUTFIT[outfit] || 'full', source: 'auto' };
+  return { name: FRAMING_BY_OUTFIT[outfit] || 'full/eye', source: 'auto' };
 }
 
 export function framingLayerFor(name) {
-  const item = FRAMINGS[normalizeFraming(name)] || FRAMINGS.full;
+  const item = FRAMINGS[normalizeFraming(name)] || FRAMINGS['full/eye'];
   // 景别名已经写在 text 开头，不再重复拼 label，省字符且避免“全身，……全身景别”这种叠词。
   return item.text;
+}
+
+// ── 参考图按景别绑定 ────────────────────────────────────────────────────────
+// 参考图是最强构图信号：全身锚点会把近景拉回全身，所以按景别分工。
+// 配置形如 { "bust": "state/anchors/xxx.png", "closeup": ["a.png"] }，单值/数组都收。
+export function normalizeReferenceImagesByFraming(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) {
+    // auto 在查找前已经被解析成实际景别，这里不单独存。
+    if (String(key).trim().toLowerCase() === 'auto') continue;
+    const framing = normalizeFraming(key);
+    const list = (Array.isArray(value) ? value : [value])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+    if (!list.length) continue;
+    out[framing] = list;
+  }
+  return out;
+}
+
+/** 取该景别实际要用的参考图：先查 referenceImagesByFraming，没配到再用 defaultReferenceImages 兜底。 */
+export function pickReferenceImages(config = {}, framing) {
+  const picked = config?.referenceImagesByFraming?.[framing];
+  if (Array.isArray(picked) && picked.length) return picked;
+  const fallback = config?.defaultReferenceImages;
+  if (Array.isArray(fallback) && fallback.length) return fallback;
+  return config?.defaultReferenceImage ? [config.defaultReferenceImage] : [];
+}
+
+// ── 出图决策：景别/参考图/分层/负向只在一个地方定稿 ────────────────────────
+// 调用方只交原始参数，这里先把请求级覆盖合进配置再归一化一次；
+// 之后 provider 链、promptLayers、negative、参考图、meta 全部读同一份结果。
+const DRAW_OVERRIDE_FIELDS = ['framing', 'outfit', 'tail', 'expression', 'vibe', 'hairstyle', 'stylePreset'];
+
+/** '' 与 'auto' 都算未传，不能覆盖配置。 */
+function hasDrawOverride(value) {
+  if (value === undefined || value === null) return false;
+  const text = String(value).trim();
+  return text !== '' && text.toLowerCase() !== 'auto';
+}
+
+export function applyRequestOverrides(rawConfig = {}, request = {}) {
+  const raw = { ...(rawConfig && typeof rawConfig === 'object' ? rawConfig : {}) };
+  for (const field of DRAW_OVERRIDE_FIELDS) {
+    if (hasDrawOverride(request[field])) raw[field] = request[field];
+  }
+  // 显式换景别必须重新判定来源，不能继承上游配置里的 auto。
+  if (hasDrawOverride(request.framing)) raw.framingSource = 'explicit';
+  if (hasDrawOverride(request.size)) {
+    const match = /^(\d{2,4})\s*[x×]\s*(\d{2,4})$/i.exec(String(request.size).trim());
+    if (match) {
+      raw.width = Number(match[1]);
+      raw.height = Number(match[2]);
+    }
+  }
+  const styleNotes = String(request.style ?? '').trim();
+  if (styleNotes) raw.styleNotes = styleNotes;
+  return raw;
+}
+
+/** meta 里记的文件名：路径取 basename，内联图只标来源。 */
+function referenceLabel(item) {
+  if (Buffer.isBuffer(item)) return 'buffer';
+  if (item && typeof item === 'object') {
+    const value = String(item.path || item.dataUrl || item.base64 || '').trim();
+    return value ? referenceLabel(value) : 'buffer';
+  }
+  const text = String(item ?? '').trim();
+  if (!text) return 'unknown';
+  if (/^data:/i.test(text)) return 'inline-data-url';
+  if (/^[A-Za-z0-9+/=\s]{256,}$/.test(text)) return 'inline-base64';
+  return basename(text);
+}
+
+/**
+ * 唯一决策点：景别、来源、参考图、分层、负向、尺寸只算一次。
+ * referenceError 表示参考图校验失败，由 generateImage 映射成失败原因。
+ */
+export function resolveDrawPlan({ request = {}, config = {} } = {}) {
+  const framing = normalizeFraming(config.framing);
+  const plan = {
+    framing,
+    framingSource: config.framingSource === 'explicit' ? 'explicit' : 'auto',
+    referenceImages: [],
+    referenceFiles: [],
+    referenceOrigin: '',
+    referenceError: '',
+    promptLayers: config.promptLayers || {},
+    negativePrompt: String(config.negativePrompt ?? ''),
+    size: String(config.size ?? '')
+  };
+  const explicitRefs = request.referenceImages ?? request.referenceImage;
+  const useRequest = explicitRefs !== undefined && explicitRefs !== null
+    && !(typeof explicitRefs === 'string' && !explicitRefs.trim());
+  const input = useRequest ? explicitRefs : pickReferenceImages(config, framing);
+  const items = Array.isArray(input) ? input : (input ? [input] : []);
+  plan.referenceOrigin = useRequest ? 'request' : (items.length ? 'anchor' : '');
+  plan.referenceFiles = items.map(referenceLabel);
+  if (!items.length) return plan;
+  const normalized = normalizeReferenceImages(items);
+  if (!normalized.ok) {
+    plan.referenceError = normalized.error;
+    return plan;
+  }
+  plan.referenceImages = normalized.images;
+  return plan;
 }
 
 // ── 画幅取向：竖幅人像 / 横幅广角场景 ──────────────────────────────────────
@@ -580,9 +750,9 @@ export function normalizeSceneFraming(value) {
 // ── 背景密度 ───────────────────────────────────────────────────────────────
 // rich 只虚化最远一层，让货架/招牌/道具承担叙事；minimal 用于干净头像。
 export const BACKGROUND_DETAILS = {
-  minimal: { label: '极简', text: '背景极简，大面积纯色与强虚化，只保留光源方向' },
-  mid: { label: '标准', text: '三层纵深，人物在场景里，中景清晰、远景虚化' },
-  rich: { label: '高密度', text: '高密度实景背景，货架与道具细节可辨，只虚化最远一层' }
+  minimal: { label: '极简', text: '纯色强虚化' },
+  mid: { label: '标准', text: '三层纵深，人物在场景里' },
+  rich: { label: '高密度', text: '实景道具，仅远层虚化' }
 };
 export const BACKGROUND_DETAIL_NAMES = Object.keys(BACKGROUND_DETAILS);
 export const DEFAULT_BACKGROUND_DETAIL = 'mid';
@@ -600,6 +770,7 @@ function stripBackgroundDepth(text) {
   let out = String(text ?? '');
   for (const key of BACKGROUND_DETAIL_NAMES) out = out.split(BACKGROUND_DETAILS[key].text).join('');
   out = out.split(LEGACY_BACKGROUND_DEPTH).join('');
+  out = out.split(BACKGROUND_PHYSICS).join('');
   return out.replace(/[，；]{2,}/g, '，').replace(/^[，；\s]+/, '').replace(/[，；\s]+$/, '');
 }
 
@@ -621,35 +792,35 @@ export function normalizeClothingMotif(value) {
 export const FABRICS = {
   cotton: {
     label: '棉麻',
-    text: '棉麻偏哑光有纤维纹理，垂坠有重量，褶皱立体有体积，贴合处压出遮挡阴影，缝线纽扣清楚'
+    text: '棉麻哑光有斜纹织理，面料有重量不贴身，腰侧与膝上各 2–3 道真实折痕，褶脊柔光不发白'
   },
   stiff: {
     label: '制服呢',
-    text: '制服呢硬挺有骨架，褶裥挺括有厚度，贴合处压紧，明线与金属扣清楚，只在受光边留窄缎面微光'
+    text: '薄呢挺括有厚度，褶裥利落不塌，明线与金属扣有硬边高光，暗部保留面料本色'
   },
   jersey: {
     label: '卫衣抓绒',
-    text: '抓绒厚实柔软，落肩袖口有量感，褶皱圆润有重量，罗纹收口贴合，漫反射柔光'
+    text: '毛圈卫衣布柔软有绒感，落肩自然，肘窝堆 2–3 道圆褶，罗纹收口贴住，漫反射柔光'
   },
   knit: {
     label: '粗针织',
-    text: '粗针织罗纹与针脚立体，织物厚实，袖口下摆弹性收边，柔和高光'
+    text: '细针织罗纹有厚度，针脚凸起，肩肘处堆褶，受光面柔和高光、暗部留线迹'
   },
   linen: {
     label: '棉麻平织',
-    text: '棉麻平织哑光透气，腰带处压出放射褶皱，衣摆垂坠有重量，包边缝线清楚'
+    text: '棉麻平织哑光透气，腰带处放射褶，衣摆垂坠有重量，褶谷有厚度，包边缝线清楚'
   },
   silk: {
     label: '丝绸',
-    text: '丝绸轻薄却有垂坠，褶皱细长层叠，贴合处轻微拉伸，方向性光泽只在受光面'
+    text: '真丝有重量不贴身，褶皱细长层叠、褶脊柔和反光，暗部保留本色，裙摆边缘轻微透光'
   },
   swim: {
     label: '高弹锦纶',
-    text: '高弹锦纶贴身有张力，弧面紧绷平滑，肩带侧缝有压痕，接缝微皱，柔和微光'
+    text: '高弹锦纶贴身有张力，弧面紧绷平滑，肩带侧缝压痕，接缝微皱，微光只在受光面'
   },
   chiffon: {
     label: '雪纺',
-    text: '外层雪纺轻薄有层次，内衬不透明有投影，微透但轮廓完整，包边清楚'
+    text: '外层雪纺轻薄有垂坠，褶脊细碎柔光、褶谷透光但不透轮廓，内衬不透明有投影'
   }
 };
 
@@ -657,52 +828,54 @@ export const CLOTHING_POOL = {
   maid: {
     label: '女仆装',
     fabric: 'cotton',
-    clothing: '深海军蓝与纯白撞色的长袖女仆装，层叠荷叶边围裙，裙长过膝，围裙正面有简洁的贴袋，衣物整洁、褶皱自然'
+    clothing: '深海军蓝与纯白撞色的长袖女仆装，层叠荷叶边围裙，裙长过膝，围裙正面有简洁的贴袋，头戴白色蕾丝女仆头饰，脚穿黑色小皮鞋，褶皱自然'
   },
   jk: {
     label: 'JK 水手服',
     fabric: 'stiff',
-    clothing: '白底深蓝领的水手服上衣，深蓝色格纹及膝百褶裙，白色及膝袜与深蓝领结，版型挺括，衣摆与裙腰衔接整齐'
+    clothing: '白底深蓝领的水手服上衣，深蓝色格纹及膝百褶裙，白色及膝袜与深蓝领结，棕色乐福鞋，版型挺括，衣摆与裙腰衔接整齐'
   },
   hoodie: {
     label: '休闲卫衣+短裙',
     fabric: 'jersey',
-    clothing: 'oversize 浅蓝灰连帽卫衣配深色 A 字短裙，卫衣抽绳末端是简洁的金属头，裙摆到膝盖上方，衣着完整'
+    clothing: '薄款浅蓝灰连帽卫衣配深色 A 字短裙，白色运动鞋，卫衣抽绳末端是简洁的金属头，裙摆到膝盖上方，衣着完整'
   },
   knit: {
     label: '针织衫+百褶裙',
     fabric: 'knit',
-    clothing: '米白色粗针织开衫内搭白衬衫，深蓝百褶中长裙，开衫版型宽松、针脚整齐，衣物柔软整洁'
+    clothing: '米白色细针织薄开衫内搭白衬衫，深蓝百褶中长裙，浅口单鞋，开衫版型宽松、针脚整齐，衣物柔软整洁'
   },
   yukata: {
     label: '和风浴衣',
     fabric: 'linen',
-    clothing: '藏青色底白浪纹的和风浴衣，浅蓝腰带，袖口与衣摆留白干净，衣领整齐交叠、不露肩，衣着完整'
+    clothing: '藏青色底白浪纹的和风浴衣，浅蓝腰带，木屐，袖口与衣摆留白干净，衣领整齐交叠、不露肩，衣着完整'
   },
   shirt: {
     label: '简约白衬衫',
     fabric: 'cotton',
-    clothing: '简约白色衬衫配深蓝及膝半身裙，袖口卷起，衬衫有简洁的单口袋，领口扣好，衣物干净利落'
+    clothing: '简约白色衬衫配深蓝及膝半身裙，黑色低跟单鞋，袖口卷起，衬衫有简洁的单口袋，领口扣好，衣物干净利落'
   },
   swim: {
     label: '简约连体运动泳装',
     fabric: 'swim',
-    clothing: '深海军蓝拼纯白的连体运动泳装，宽肩带、平角下摆，覆盖锁骨下方到大腿根部，纯色无图案，厚实不透光，保守运动款'
+    clothing: '深海军蓝拼纯白的连体运动泳装，宽肩带、平角下摆，覆盖锁骨下方到大腿根部，纯色无图案，不透明，保守运动款'
   },
   dress: {
     label: '简约连衣裙',
     fabric: 'silk',
-    clothing: '简约的深蓝色（或白色）连衣裙，裙长及膝，圆领、短袖或无袖，裙摆自然垂落，纯色无图案，领口不低、裙长不过短'
+    clothing: '简约的深蓝色（或白色）连衣裙，裙长及膝，圆领、短袖或无袖，浅口单鞋，裙摆自然垂落，纯色无图案，领口不低、裙长不过短'
   },
   bikini: {
     label: '简约两件式泳装',
     fabric: 'swim',
-    clothing: '深海军蓝拼纯白的两件式泳装，宽肩带平角款，纯色无图案，面料厚实不透明，不透不露点、无湿身走光'
+    clothing: '深海军蓝拼纯白的两件式泳装，宽肩带平角款，纯色无图案，不透明，不透不露点、无湿身走光'
   },
   nightgown: {
-    label: '薄纱睡裙',
-    fabric: 'chiffon',
-    clothing: '及踝长袖长裙，外层薄纱、内层不透明纯白棉衬，覆盖到脚踝，领口扣合、裙摆不开叉，纯色无图案，不透视、无湿身走光'
+    label: '棉质睡裙',
+    fabric: 'cotton',
+    // 双层写法（外层薄纱 + 内层不透明）会被模型理解成“整件透”，实测画成全身透视。
+    // 改成单层不透明厚棉，并直接排除透明与轮廓透出，稳定性优先。
+    clothing: '及踝长袖纯白棉质睡裙，圆领扣合，厚实棉布不透轮廓、不走光，赤足，纯色无图案'
   }
 };
 
@@ -754,19 +927,37 @@ export function clothingLayerFor(outfit) {
 // 环境纵深：默认中等密度，任何背景层都补上，保证人物站在场景里而不是贴在背景板前。
 const BACKGROUND_DEPTH = BACKGROUND_DETAILS.mid.text;
 
-// 参考图语义固定句：qwen 带参考图时按“画布”处理，必须显式声明只取身份。
-const REFERENCE_IDENTITY_ONLY = '参考图只取身份与外观，不沿用其姿势与构图';
+// 固定画风块：位置固定在 quality 层，不随会话/气质/景别漂移。
+// 2026-11 重写：删掉「精细线稿 / 赛璐璐平涂与厚涂混合 / 边缘干净不糊边」三个把平涂写死、
+// 把氛围光封死的词；改成半厚涂 + 明暗塑形 + 织理褶厚 + 发丝分段高光 + 冷暗部。
+export const STYLE_BLOCK = '高质量日系半厚涂插画，明暗塑形不靠粗描边，笔触可见，皮肤有微弱受光高光，布料织理与褶厚清楚，发丝分层带分段高光，暗部偏冷';
+// 光影只写一个主光：来源/方向/色温/暗部冷暖，并把景深写成可执行的虚化句。
+// 高光落点与布料本色交给 STYLE_BLOCK，不再在两层里重复，省下的字留给描述句。
+export const PHYSICAL_LIGHTING = '单一暖色主光从左前上方 3200K 斜射，冷蓝暗部，浅景深背景虚化，无第二光源';
+// 背景压暗关系：比人物亮约一档形成空气透视，地面给柔和接触阴影。
+export const BACKGROUND_PHYSICS = '背景比人物亮约一档形成空气透视，地面有柔和接触阴影';
+// 参考图语义固定句：2026-11-10 起固定双锚点，按图分工写清楚。
+// 全身图只供比例与服装版型，特写只供脸型/五官间距/五官画法/肤色，两张都不供姿态背景表情。
+export const REFERENCE_IDENTITY_ONLY = '全身图只取身体比例与衣服版型，特写只取脸型、五官间距、五官画法与肤色，两张都不取姿态、背景、表情';
+// 脸部朝向与视线单独给一句：实测只写“3/4 侧向左”压不过参考图的正脸倾向，
+// 这里补上鼻尖朝向与视线落点，并明确排除“正面直对镜头”。
+export const GAZE_CLAUSE = '3/4 侧向左，鼻尖朝左外侧，视线落画面左侧，不正面直对镜头';
+// 可验收条件：全部是能一眼判定的硬条件，不写主观词。
+// 只留 4 条：去掉“背景亮一档”（背景层已自带，且降级时最先被丢），省下的字留给描述句。
+export const ACCEPTANCE_TEXT = '单一主光、脚未裁、头身比6.5–7、衣缘不悬浮';
 
 export const DEFAULT_PROMPT_LAYERS = {
-  quality: '高质量日系动漫插画，精细线稿，赛璐璐上色与厚涂混合',
+  quality: STYLE_BLOCK,
   character: CHARACTER_TEMPLATE,
   faceStyle: faceStyleLayerFor(DEFAULT_FACE_STYLE),
   vibe: vibeLayerFor('mature'),
   expression: expressionLayerFor(DEFAULT_EXPRESSION),
   clothing: '深蓝色旗袍式长裙，白色滚边与盘扣，纯色无图案，侧开摆便于行动，衣物整洁、褶皱自然',
-  composition: '人物为唯一主体',
-  lighting: '左前上方主光，轮廓光勾发丝肩线，冷蓝环境光',
-  background: BACKGROUND_DEPTH
+  composition: '',
+  lighting: PHYSICAL_LIGHTING,
+  background: BACKGROUND_DEPTH,
+  keepUnchanged: REFERENCE_IDENTITY_ONLY,
+  acceptance: ACCEPTANCE_TEXT
 };
 
 const NEGATIVE_CORE = [
@@ -837,6 +1028,21 @@ export function assemblePromptLayers(layers = {}, order = PROMPT_LAYER_ORDER) {
   return parts.join('；');
 }
 
+// 超限降级顺序：先丢最不承重的背景/光影，再丢验收段，最后才丢参考图约束；
+// 身份/比例/表情/服装/景别/视线永不丢。全部丢完仍超才裁用户描述句。
+export const PROMPT_DEGRADE_ORDER = Object.freeze(['background', 'lighting', 'acceptance', 'keepUnchanged']);
+
+/** 从已拼装的分层文本里整层摘掉指定层；非分层文本原样返回。 */
+export function stripPromptLayers(style, layerNames = []) {
+  const text = String(style ?? '');
+  if (!text || !layerNames.length) return text;
+  const prefixes = layerNames.map((name) => `【${PROMPT_LAYER_LABELS[name]}】`);
+  return text
+    .split('；')
+    .filter((segment) => !prefixes.some((prefix) => segment.startsWith(prefix)))
+    .join('；');
+}
+
 function definePreset(label, overrides = {}, extraNegative = []) {
   const layers = { ...DEFAULT_PROMPT_LAYERS, ...overrides };
   return {
@@ -850,37 +1056,32 @@ function definePreset(label, overrides = {}, extraNegative = []) {
 export const STYLE_PRESETS = {
   // 默认档：质量词给满，对应「成人比例日系立绘」。
   keyvisual: definePreset('成人比例日系立绘', {
-    composition: '人物为唯一主体',
-    background: '夜景散景背景，前后景有光影层次，灯牌与光斑虚化，不抢主体'
+    composition: '',
+    background: '夜景散景，光斑虚化'
   }),
-  // 番剧特写：半身、赛璐璐平光但保留手绘线稿。
+  // 番剧特写：半身、赛璐璐平光但保留手绘线稿；画风仍用固定 STYLE_BLOCK，不另起一套。
   closeup: definePreset('番剧半身特写', {
-    quality: '日系动画番剧截图质感，清晰手绘线稿，赛璐璐平光上色，边缘干净，高光简洁，画面通透',
     clothing: '白色荷叶边领口配蓝色蝴蝶结，领口与肩部完整遮挡，衣物整洁',
     composition: '半身特写构图，胸部以上占画面主体，轻微侧身，视线看向镜头',
-    lighting: '主光明确，面部受光均匀，发丝边缘有细轮廓光，浅景深',
-    background: '虚化的室内场景，前后景层次清楚'
+    background: '室内虚化背景'
   }, ['全身构图', '背景杂乱']),
   // 女仆装立绘：三分之二身、厚涂细节。
   maid: definePreset('女仆装三分之二身立绘', {
     clothing: '深海军蓝与纯白撞色的长袖女仆装，层叠荷叶边围裙，裙长过膝，衣物整洁、褶皱自然',
     composition: '三分之二身构图，双臂自然交叠，姿态舒展，人物为唯一主体',
-    lighting: '室内散景，主光源明确，冷暖对比打光，发丝有边缘轮廓光',
-    background: '室内散景背景，前后景层次清楚'
+    background: '室内散景'
   }, ['单调白底']),
   // JK 制服夜景。
   jk: definePreset('JK 制服夜景立绘', {
     clothing: '水手服制服：白色短袖水手服上衣，深蓝色格纹及膝百褶裙，白色及膝长袜，深蓝色领结；上衣完整覆盖肩部与胸口，衣摆与裙腰衔接整齐，衣着完整',
     composition: '成人比例立绘，三分之二身，自然坐姿，双臂自然安放，姿态舒展',
-    lighting: '窗边冷暖对比光，主光来自侧面，体积光与强透视层次',
-    background: '夜景室内散景，窗外城市灯光虚化'
+    background: '窗外城市灯光虚化'
   }, ['超短裙', '吊带', '露肩', '低胸']),
   // 旗袍夜景：坐姿/靠姿、侧开摆与白丝都允许，只守不露点。
   qipao: definePreset('旗袍夜景立绘', {
     clothing: '深蓝色旗袍式长裙，白色滚边与盘扣，纯色无图案，侧开摆便于行动，贴身剪裁曲线自然，白色丝袜，衣着完整',
     composition: '三分之二身坐姿或靠姿，姿态自然放松，人物为唯一主体',
-    lighting: '室内暖光夜景，主光源明确，冷暖对比光，画面有强透视层次',
-    background: '室内暖光夜景散景，窗边光斑虚化'
+    background: '暖光夜景散景'
   }, ['单调白底'])
 };
 
@@ -918,6 +1119,42 @@ export function sanitizeDrawDescription(value) {
 }
 
 export const IMAGE_STATE_DIR = fileURLToPath(new URL('../state/imagegen/', import.meta.url));
+
+// ── 模块指纹：确认三个进程加载的是同一份磁盘文件 ──────────────────────────
+// ESM 不热更，只重启一半进程时新旧逻辑会同时在线；每次启动打一行指纹，出问题一眼能对。
+const MODULE_FILE = fileURLToPath(import.meta.url);
+let moduleFingerprint = null;
+
+export function imageGenModuleFingerprint() {
+  if (moduleFingerprint) return moduleFingerprint;
+  try {
+    const stat = statSync(MODULE_FILE);
+    moduleFingerprint = {
+      file: basename(MODULE_FILE),
+      sha8: createHash('sha256').update(readFileSync(MODULE_FILE)).digest('hex').slice(0, 8),
+      mtime: new Date(stat.mtimeMs).toISOString(),
+      bytes: stat.size
+    };
+  } catch (error) {
+    moduleFingerprint = { file: basename(MODULE_FILE), sha8: 'unknown', mtime: 'unknown', error: String(error?.message ?? error) };
+  }
+  return moduleFingerprint;
+}
+
+/** 进程启动时调用一次：控制台一行 + 追加到 state/imagegen/module-fingerprint.log。 */
+export function logImageGenModuleFingerprint(processName = '', options = {}) {
+  const info = imageGenModuleFingerprint();
+  const line = `[imagegen] module=${info.file} sha8=${info.sha8} mtime=${info.mtime}`
+    + `${processName ? ` process=${processName}` : ''}`;
+  (options.logger || ((text) => console.log(text)))(line);
+  try {
+    mkdirSync(IMAGE_STATE_DIR, { recursive: true });
+    appendFileSync(join(IMAGE_STATE_DIR, 'module-fingerprint.log'), `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    // 指纹文件写不进去不影响出图，控制台那行已经打出来了。
+  }
+  return info;
+}
 
 const RANDOM_THEMES = [
   '蓝发少女在午后咖啡馆窗边整理白色蕾丝围裙，阳光落在长发上',
@@ -1099,7 +1336,8 @@ function shouldUseProvider(candidate, previous, index) {
  * 或 {ok:false, reason, error, attempts, ms}（reason: provider/rate-limit/moderation/moderation-unavailable/storage）
  */
 export async function generateImage(request = {}, dependencies = {}) {
-  const chain = normalizeImageGenChain(request.config || {});
+  // 请求级覆盖先合进原始配置，再归一化一次；此后所有环节读同一份结果。
+  const chain = normalizeImageGenChain(applyRequestOverrides(request.config || {}, request));
   const config = chain[0];
   const fetchImpl = dependencies.fetchImpl || globalThis.fetch;
   const sleep = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -1107,6 +1345,10 @@ export async function generateImage(request = {}, dependencies = {}) {
   const logger = dependencies.logger || ((line) => console.log(line));
   const stateDir = dependencies.stateDir || IMAGE_STATE_DIR;
   const now = dependencies.now ? dependencies.now() : Date.now();
+  // 唯一决策点：景别、参考图、分层、负向、尺寸只在这里算一次。
+  const plan = resolveDrawPlan({ request, config });
+  logger(`[imagegen] plan framing=${plan.framing}(${plan.framingSource}) refs=${plan.referenceImages.length}`
+    + ` files=[${plan.referenceFiles.join(',')}] outfit=${config.outfit} preset=${config.stylePreset} size=${plan.size}`);
   // 表情优先级：显式 request.expression → 对话语境 request.contextText → 配置（默认温柔浅笑）。
   const expressionChoice = resolveExpression({ expression: request.expression, context: request.contextText });
   // 调用方已自行判定来源（显式传参/语境推断/默认）时以调用方为准，仅用于元数据回看。
@@ -1124,15 +1366,16 @@ export async function generateImage(request = {}, dependencies = {}) {
     random: dependencies.random || Math.random
   });
   const hairLayer = hairstyleLayerFor(hairChoice.name);
-  const styleLayered = stylePrompt === assemblePromptLayers(config.promptLayers);
-  if (styleLayered && (hairLayer !== config.promptLayers.hairstyle || expressionChoice.name !== config.expression)) {
-    const layers = { ...config.promptLayers, hairstyle: hairLayer };
+  const styleLayered = stylePrompt === assemblePromptLayers(plan.promptLayers);
+  if (styleLayered && (hairLayer !== plan.promptLayers.hairstyle || expressionChoice.name !== config.expression)) {
+    const layers = { ...plan.promptLayers, hairstyle: hairLayer };
     if (expressionChoice.name !== config.expression) layers.expression = expressionLayerFor(expressionChoice.name);
     stylePrompt = assemblePromptLayers(layers);
   }
   const promptParts = request.prompt
     ? asPromptParts(request.prompt)
-    : buildPromptParts(request.description, stylePrompt, config.negativePrompt, config.characterPrompt);
+    : buildPromptParts(request.description, stylePrompt, plan.negativePrompt,
+      plan.promptLayers.character || config.characterPrompt, { logger });
   // 发出前先量一次实际字符数并断言；超限直接失败，不再让接口静默截断。
   const promptChars = assertPromptBudget(promptParts);
   logger(`[imagegen] prompt-chars positive=${promptChars.positive} negative=${promptChars.negative}`);
@@ -1161,26 +1404,19 @@ export async function generateImage(request = {}, dependencies = {}) {
     }
   }
 
-  // 参考图：统一在这里校验，各适配器只拿校验过的 buffer/mime。
-  // 没有传参考图时用配置里的角色锚点兜底；锚点也读不到且策略为 require 就拒绝出图，不降级成纯文生图。
-  let referenceInput = request.referenceImages ?? request.referenceImage;
-  let referenceOrigin = referenceInput ? 'request' : '';
-  if (!referenceInput && config.defaultReferenceImage) {
-    referenceInput = config.defaultReferenceImage;
-    referenceOrigin = 'anchor';
-  }
-  let referenceResult = referenceInput ? normalizeReferenceImages(referenceInput) : { ok: true, images: [] };
-  if (!referenceResult.ok) {
-    logger(`[imagegen] reject reason=reference-invalid origin=${referenceOrigin} detail=${referenceResult.error}`);
+  // 参考图：plan 已按最终景别选定并校验，这里只做失败映射与参考图策略判定。
+  const referenceOrigin = plan.referenceOrigin;
+  if (plan.referenceError) {
+    logger(`[imagegen] reject reason=reference-invalid origin=${referenceOrigin} detail=${plan.referenceError}`);
     return {
       ok: false,
       reason: referenceOrigin === 'anchor' ? 'reference-required' : 'reference-invalid',
-      error: referenceResult.error,
+      error: plan.referenceError,
       attempts: [],
       ms: Date.now() - started
     };
   }
-  const references = referenceResult.images;
+  const references = plan.referenceImages;
   if (!references.length && (config.referencePolicy === 'require' || request.referenceRequired === true)) {
     logger('[imagegen] reject reason=reference-required (no reference, policy=require)');
     return { ok: false, reason: 'reference-required', error: '缺少参考图', attempts: [], ms: Date.now() - started };
@@ -1470,13 +1706,14 @@ export async function generateImage(request = {}, dependencies = {}) {
     promptChars,
     description: String(request.description ?? ''),
     descriptionTrimmed: promptParts.descriptionTrimmed === true,
+    droppedLayers: Array.isArray(promptParts.droppedLayers) ? promptParts.droppedLayers : [],
     provider: chosen.provider,
     model: String(providerMeta.model || chosen.model),
     tier: chosen.tier,
     stylePreset: chosen.stylePreset || '',
     outfit: chosen.outfit || '',
-    framing: chosen.framing || '',
-    framingSource: chosen.framingSource || '',
+    framing: plan.framing,
+    framingSource: plan.framingSource,
     tail: chosen.tail || '',
     vibe: config.vibe || '',
     vibeSource: ['explicit', 'auto'].includes(request.vibeSource) ? request.vibeSource : (config.vibeSource || 'auto'),
@@ -1485,6 +1722,7 @@ export async function generateImage(request = {}, dependencies = {}) {
     hairstyle: hairChoice.name,
     hairstyleSource: hairChoice.source,
     referenceOrigin: references.length ? referenceOrigin : '',
+    referenceFiles: references.length ? plan.referenceFiles : [],
     size: `${width}x${height}`,
     width,
     height,
@@ -1588,18 +1826,51 @@ function normalizePromptLayers(raw, preset, options = {}) {
     const motif = normalizeClothingMotif(options.clothingMotif);
     layers.clothing = motif ? `${outfitClothing}，服装上只有一处${motif}，不要重复出现其他图案` : outfitClothing;
   }
+  // 调用方补充的画面细节只追加到光影层；重复归一化时先摘掉旧尾巴，避免同一句叠两遍。
+  const styleNotes = String(options.styleNotes ?? '').trim();
+  if (styleNotes) {
+    const baseLighting = String(layers.lighting ?? '').split(`，${styleNotes}`).join('');
+    layers.lighting = baseLighting ? `${baseLighting}，${styleNotes}` : styleNotes;
+  }
   // 景别、机位、人物占比、留白写进构图层第 4 位（画质、身份与脸部画法之后），确保送达。
   // 已归一化的层会被再次归一化（MCP 合并配置），先剔除旧景别句避免叠加。
   const wideScene = normalizeSceneFraming(options.sceneFraming) === 'wide_scene';
+  const nearShot = normalizeFraming(options.framing) === 'bust';
+  // 顺序固定：preset 层已并进 layers.composition → 剔除旧景别句 → 再剔除与最终景别冲突的 preset 景别句。
+  // 景别只由 plan 决定，preset 只能补充构图细节，不能把近景拉回全身、也不能把全身拉成近景。
+  const customComposition = stripOpposingScaleClauses(stripFramingClauses(layers.composition), options.framing);
   const compositionText = wideScene
     ? SCENE_FRAMINGS.wide_scene.text
-    : `${framingLayerFor(options.framing || 'full')}，${stripFramingClauses(layers.composition)}`;
-  layers.composition = `${REFERENCE_IDENTITY_ONLY}，${compositionText}`;
-  // 背景层补背景密度：rich 只虚化最远层，minimal 强虚化，mid 保持三层纵深。
+    : `${framingLayerFor(options.framing || 'full')}${customComposition ? `，${customComposition}` : ''}`;
+  // 近景档不写 3/4 侧向视线句：胸像要正面看脸，侧向会把五官推远。
+  layers.composition = nearShot ? `${compositionText}，正面或极轻侧` : `${compositionText}，${GAZE_CLAUSE}`;
+  if (nearShot) {
+    // 全身比例约束与尾巴在胸像里看不到，删掉把字数让给脸部。
+    layers.character = layers.character
+      .split('，')
+      .filter((segment) => !/(头高占全身|肩宽|胯宽|鲸尾|尾巴|两只手|两只脚)/.test(segment))
+      .join('，');
+    // 气质层原本在写脸形，近景档由脸部细节统一接管；只保留未成年硬锁。
+    layers.vibe = ['swim', 'bikini', 'nightgown'].includes(options.outfit) ? ADULT_HARD_LOCK : '';
+    layers.faceStyle = NEAR_SHOT_FACE_STYLE;
+    layers.acceptance = NEAR_SHOT_ACCEPTANCE;
+    layers.keepUnchanged = NEAR_SHOT_REFERENCE;
+    // 表情只留标签：眼开度、腮红已由脸部层统一规定，长表情文案会和脸部层互相打架。
+    const nearShotExpression = EXPRESSIONS[options.expression] || EXPRESSIONS[DEFAULT_EXPRESSION];
+    layers.expression = `${nearShotExpression.label}，${EXPRESSION_IDENTITY_LOCK}`;
+  }
+  // 背景层补空气透视与背景密度：rich 只虚化最远层，minimal 强虚化，mid 保持三层纵深。
   const detail = normalizeBackgroundDetail(options.backgroundDetail);
   const detailText = BACKGROUND_DETAILS[detail].text;
+  // 胸像看不到地面，接触阴影那句在近景档里是废字，去掉让给脸部。
+  const physicsText = nearShot ? BACKGROUND_PHYSICS.replace('，地面有柔和接触阴影', '') : BACKGROUND_PHYSICS;
   const backgroundBase = stripBackgroundDepth(layers.background);
-  layers.background = backgroundBase ? `${backgroundBase}，${detailText}` : detailText;
+  layers.background = backgroundBase
+    ? `${backgroundBase}，${physicsText}，${detailText}`
+    : `${physicsText}，${detailText}`;
+  // 两段固定约束：只取参考图身份、以及可验收的硬条件。
+  layers.keepUnchanged = nearShot ? NEAR_SHOT_REFERENCE : REFERENCE_IDENTITY_ONLY;
+  layers.acceptance = nearShot ? NEAR_SHOT_ACCEPTANCE : ACCEPTANCE_TEXT;
   return layers;
 }
 
@@ -1636,11 +1907,18 @@ export function normalizeImageGenConfig(input = {}) {
   const hairstyleName = hairstyleMode === 'explicit' ? requestedHairstyle : '';
   const clothingMotif = normalizeClothingMotif(raw.clothingMotif);
   const framingChoice = resolveFraming(raw.framing, outfit);
+  // 上游已给出解析后的景别名与来源（调用方先归一化过一次）时沿用其来源，
+  // 否则二次归一化会把 auto 误标成 explicit；显式换景别时由 applyRequestOverrides 重置为 explicit。
+  if ((raw.framingSource === 'auto' || raw.framingSource === 'explicit')
+    && normalizeFraming(raw.framing) === framingChoice.name) {
+    framingChoice.source = raw.framingSource;
+  }
   const framing = framingChoice.name;
   const faceStyleChoice = resolveFaceStyle(raw.faceStyle);
   const faceStyle = faceStyleChoice.name;
   const sceneFraming = normalizeSceneFraming(raw.sceneFraming);
   const backgroundDetail = normalizeBackgroundDetail(raw.backgroundDetail);
+  const styleNotes = String(raw.styleNotes ?? '').trim();
   // 方形画幅塞全身会显小、背景被挤掉：全身/七分身默认改竖幅 2:3，
   // wide_scene 改 16:9 横幅（1536×864），显式非方形尺寸则原样保留。
   const portrait = framing !== 'closeup' && width === height;
@@ -1650,15 +1928,35 @@ export function normalizeImageGenConfig(input = {}) {
   const promptLayers = normalizePromptLayers(raw, preset, {
     outfit, tail: tailMode, expression, vibe, hairstyleName, clothingMotif, framing,
     faceStyle: faceStyleChoice.name === 'none' ? 'none' : faceStyleChoice.name,
-    sceneFraming, backgroundDetail
+    sceneFraming, backgroundDetail, styleNotes
   });
   const timeoutMs = clampInt(raw.timeoutMs, 10_000, 300_000, 120_000);
   // Key 只从配置或环境变量读，永不回显；apiKeyEnv 便于把密钥留在环境里。
   const apiKey = String(raw.apiKey || (raw.apiKeyEnv ? process.env[String(raw.apiKeyEnv)] || '' : ''));
   const baseNegative = String(raw.negativePrompt || preset.negativePrompt);
   const tailNegative = TAIL_NEGATIVE[tailMode] || [];
+  // 默认参考图：数组优先（全身锚点在前、脸部特写在后），单值字段兜底。
+  const defaultReferenceImages = (Array.isArray(raw.defaultReferenceImages)
+    ? raw.defaultReferenceImages
+    : [raw.defaultReferenceImages])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+  if (!defaultReferenceImages.length && raw.defaultReferenceImage) {
+    defaultReferenceImages.push(String(raw.defaultReferenceImage).trim());
+  }
   // 裁脚类负向词放最前：负向也有 500 字符上限，放最后等于没写。
-  const negativePrompt = mergeNegativeTerms(FRAMING_NEGATIVE[framing] || [], baseNegative, tailNegative).join('、');
+  // 近景档：头身比/腿长类负向词没有意义，剔除；尾巴也看不见，不再追加尾巴负向。
+  const nearShotNegative = framing === 'bust';
+  const baseNegativeTerms = String(baseNegative)
+    .split('、')
+    .map((term) => term.trim())
+    .filter(Boolean)
+    .filter((term) => !(nearShotNegative && NEAR_SHOT_DROP_NEGATIVE.has(term)));
+  const negativePrompt = mergeNegativeTerms(
+    FRAMING_NEGATIVE[framing] || [],
+    baseNegativeTerms.join('、'),
+    nearShotNegative ? [] : tailNegative
+  ).join('、');
   return {
     enabled: raw.enabled !== false,
     provider,
@@ -1688,14 +1986,22 @@ export function normalizeImageGenConfig(input = {}) {
     hairstyleEnabled,
     hairstylePool,
     clothingMotif,
+    styleNotes,
     characterPrompt: promptLayers.character,
     promptLayers,
     // 显式 stylePrompt 仍然优先（控制台临时覆盖）；否则由分层模板拼装。
-    stylePrompt: String(raw.stylePrompt || assemblePromptLayers(promptLayers)),
+    // 同时给了 promptLayers 时以分层为准，避免旧 stylePrompt 与归一化后的层不一致，
+    // 导致出图时判定为“非分层模板”而不再按发型/表情重拼。
+    stylePrompt: String(raw.stylePrompt && !(raw.promptLayers && typeof raw.promptLayers === 'object')
+      ? raw.stylePrompt
+      : assemblePromptLayers(promptLayers)),
     negativePrompt,
     // 正常出图一律带参考图：没有传参考图时用角色锚点兜底，连锚点都读不到就拒绝出图。
     referencePolicy: raw.referencePolicy === 'optional' ? 'optional' : (provider === 'dashscope' || provider === 'ark' ? 'require' : 'optional'),
-    defaultReferenceImage: String(raw.defaultReferenceImage || ''),
+    defaultReferenceImage: defaultReferenceImages[0] || '',
+    defaultReferenceImages,
+    // 按景别分工的参考图；未配到的景别用 defaultReferenceImages 兜底。
+    referenceImagesByFraming: normalizeReferenceImagesByFraming(raw.referenceImagesByFraming),
     timeoutMs,
     // 单次请求超时之外的整体预算：含重试、下载与轮询，防止一条链跑十几分钟。
     budgetMs: clampInt(raw.budgetMs, 15_000, 900_000, Math.max(180_000, timeoutMs * 2)),
@@ -1802,7 +2108,7 @@ export function decideImageAccess({ isGroup, isOwner, mentioned, target, sender,
  * - 不支持的后端由 buildPrompt 回退拼进正向。
  */
 export function buildPromptParts(description, stylePrompt = DEFAULT_STYLE_PROMPT, negativePrompt = NEGATIVE_STYLE_PROMPT,
-  characterPrompt = CHARACTER_TEMPLATE) {
+  characterPrompt = CHARACTER_TEMPLATE, options = {}) {
   const original = String(description ?? '').trim();
   const content = sanitizeDrawDescription(original) || original;
   const style = String(stylePrompt ?? '').trim();
@@ -1810,13 +2116,31 @@ export function buildPromptParts(description, stylePrompt = DEFAULT_STYLE_PROMPT
   const character = String(characterPrompt ?? '').trim();
   // 人物层已经包含在 style 里时不再重复前置：以前同一段角色锁被拼了两遍，白占 300+ 字符。
   const characterBlock = character && !style.includes(character) ? character : '';
-  const base = characterBlock ? `${characterBlock}；${style}` : style;
+  const withCharacter = (text) => (characterBlock ? `${characterBlock}；${text}` : text);
+  const logger = typeof options.logger === 'function' ? options.logger : ((line) => console.warn(line));
+  let base = withCharacter(style);
+  // 超限降级：身份层、比例句、表情层、服装层一个字不动，只按顺序丢最不承重的背景、光影层。
+  // 都不够时，下面的“只吃剩余预算”逻辑才开始裁用户描述句。
+  const droppedLayers = [];
+  for (const layerName of PROMPT_DEGRADE_ORDER) {
+    if (measurePromptChars({ positive: base }).positive <= PROMPT_BUDGET.positive.max) break;
+    const next = withCharacter(stripPromptLayers(style, [...droppedLayers, layerName]));
+    if (next === base) continue; // 这层不存在（自定义 stylePrompt），跳过。
+    droppedLayers.push(layerName);
+    base = next;
+    logger(`[imagegen] prompt-overflow drop-layer=${PROMPT_LAYER_LABELS[layerName]} chars=${measurePromptChars({ positive: base }).positive}`);
+  }
   // 描述只吃剩余预算：宁可把用户描述截短（会记录），也不能让接口把构图和身份锁截掉。
   const room = Math.max(0, PROMPT_BUDGET.positive.max - measurePromptChars({ positive: base }).positive - 1);
   const contentChars = Array.from(content);
   const body = room > 0 ? contentChars.slice(0, room).join('') : '';
   const positive = body ? `${base}；${body}` : base;
-  return { positive, negative, descriptionTrimmed: body.length < content.length };
+  return {
+    positive,
+    negative,
+    descriptionTrimmed: body.length < content.length,
+    droppedLayers
+  };
 }
 
 /** 文本型后端的整段 prompt（负向词拼进正向，接口不认识 negative_prompt）。 */
