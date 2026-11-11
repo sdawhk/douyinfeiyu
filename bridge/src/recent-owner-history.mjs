@@ -6,9 +6,20 @@ export function isOwnerHistoryKey(key, { ownerIds = [], douyinOwnerId = '' } = {
 }
 
 export function formatDouyinRecentHistory(exchanges, replies = [], { currentVideo = false } = {}) {
-  // A newly shared video starts a new topic. Old video replies are highly salient
-  // and have repeatedly caused the model to describe the first shared video again.
-  if (currentVideo) return '';
+  // A newly shared video starts a new topic, but the text right before it still explains
+  // what 爸 was saying, and dropping it entirely is what made replies look "half read".
+  // Keep the last one or two exchanges, and only when a video is the current turn.
+  if (currentVideo) {
+    const recent = Array.isArray(exchanges)
+      ? exchanges.slice(-2).filter((item) => item && typeof item.input === 'string' && typeof item.reply === 'string') : [];
+    if (!recent.length) return '';
+    const rows = recent.map((item) => {
+      const input = item.input.replace(/[\r\n]+/g, ' ').trim().slice(0, 300);
+      const reply = item.reply.replace(/[\r\n]+/g, ' ').trim().slice(0, 300);
+      return `爸：${input}\n你：${reply}`;
+    });
+    return `【分享这条视频之前的一两轮私信】以下内容发生在爸刚分享的视频之前，只用来理解他的语气和话题，不要把它当成对这条新视频的描述，也不要复述其中的旧回复。\n${rows.join('\n')}\n\n`;
+  }
   const rows = Array.isArray(exchanges)
     ? exchanges.slice(-3).filter((item) => item && typeof item.input === 'string' && typeof item.reply === 'string') : [];
   const cleanReply = (reply) => reply.replace(/[\r\n]+/g, ' ').trim().slice(0, 220);

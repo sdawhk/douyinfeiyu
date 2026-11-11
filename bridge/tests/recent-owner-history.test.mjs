@@ -32,9 +32,18 @@ test('previously saved Douyin replies remain visible before exchange history is 
   assert.ok(prompt.includes('你：旧回复一'));
 });
 
-test('a newly shared video does not inherit old video replies as prompt context', () => {
+test('a newly shared video keeps only the two exchanges right before it', () => {
   const prompt = formatDouyinRecentHistory([
+    { input: '更早的一轮', reply: '更早的回复' },
     { input: '分享旧视频', reply: '旧视频讲了什么' },
+    { input: '分享新视频之前', reply: '好呀' },
   ], ['第一次分享的视频', '另一个旧视频'], { currentVideo: true });
-  assert.equal(prompt, '');
+  assert.ok(prompt.includes('分享这条视频之前的一两轮私信'));
+  assert.ok(prompt.includes('爸：分享旧视频'));
+  assert.ok(prompt.includes('爸：分享新视频之前'));
+  assert.ok(!prompt.includes('更早的一轮'));
+  // Old replies carry no usable text context for a brand new video.
+  assert.ok(!prompt.includes('第一次分享的视频'));
+  assert.ok(!prompt.includes('另一个旧视频'));
+  assert.equal(formatDouyinRecentHistory([], [], { currentVideo: true }), '');
 });
