@@ -1,4 +1,5 @@
-// 个人头像预处理：来源解析 + 魔数判型 + ffmpeg 标准化 + 备份/配额/审计。
+// 个人头像预处理：来源解析 + 魔数判型 + ffmpeg 标准化 + 备份/审计。
+// 不设每日次数与冷却闸门：只保留备份、格式/大小校验和上传失败上报。
 //
 // 设计约束（P0）：
 //   - 只支持 archive / sticker / self / message 四类来源，不接受任意 URL；
@@ -29,8 +30,9 @@ export const AVATAR_DEFAULTS = Object.freeze({
   ownerOnly: true,
   privateOnly: true,
   requireConfirm: true,
-  dailyLimit: 1,
-  minIntervalMs: 21_600_000,
+  // 0 = 不限次数 / 无冷却：默认不再限制每天能换几次，也不强制两次之间等待。
+  dailyLimit: 0,
+  minIntervalMs: 0,
   inputMaxBytes: 8 * 1024 * 1024,
   outputSize: 640,
   outputMaxBytes: 1024 * 1024,
@@ -48,7 +50,7 @@ function boundedNumber(value, fallback, min, max) {
   return Math.min(max, Math.max(min, Math.round(number)));
 }
 
-/** 把 config.json 的 imageAvatar 段规整成可用参数，非法值回落到默认值。 */
+/** 把 config.json 的 imageAvatar 段规整成可用参数，非法值回落到默认值。dailyLimit=0 表示不限次数。 */
 export function avatarOptions(config = {}) {
   const source = config && typeof config === 'object' ? config : {};
   return {
@@ -255,21 +257,39 @@ export async function readAvatarState(file = AVATAR_STATE_PATH) {
   }
 }
 
-/** 只读检查：当天次数 + 最小间隔。 */
+/**
+ * 只读检查：当天次数 + 最小间隔。
+ * dailyLimit <= 0 表示不限次数；minIntervalMs <= 0 表示无冷却。
+ * 默认两者都关闭，返回 remaining=null 代表不设上限。
+ */
 export function checkAvatarQuota(state, now, options) {
   const s = state && typeof state === 'object' ? state : {};
+  const dailyLimit = Number(options?.dailyLimit) || 0;
+  const minIntervalMs = Number(options?.minIntervalMs) || 0;
+  if (dailyLimit <= 0 && minIntervalMs <= 0) {
+    return { ok: true, reason: '', remaining: null };
+  }
+
   const day = localDay(now);
-  if (s.day !== day) return { ok: true, reason: '', remaining: options.dailyLimit };
+  if (s.day !== day) {
+    return { ok: true, reason: '', remaining: dailyLimit > 0 ? dailyLimit : null };
+  }
   const count = Number(s.count) || 0;
-  if (count >= options.dailyLimit) {
-    return { ok: false, reason: `今天的换头像次数已用完（上限 ${options.dailyLimit} 次）。` };
+  if (dailyLimit > 0 && count >= dailyLimit) {
+    return { ok: false, reason: `今天的换头像次数已用完（上限 ${dailyLimit} 次）。`, remaining: 0 };
   }
-  const lastAt = Number(s.lastAt) || 0;
-  if (lastAt && now - lastAt < options.minIntervalMs) {
-    const waitMinutes = Math.ceil((options.minIntervalMs - (now - lastAt)) / 60_000);
-    return { ok: false, reason: `距上次换头像还不到 ${Math.ceil(options.minIntervalMs / 60_000)} 分钟，请约 ${waitMinutes} 分钟后再试。` };
+  if (minIntervalMs > 0) {
+    const lastAt = Number(s.lastAt) || 0;
+    if (lastAt && now - lastAt < minIntervalMs) {
+      const waitMinutes = Math.ceil((minIntervalMs - (now - lastAt)) / 60_000);
+      return {
+        ok: false,
+        reason: `距上次换头像还不到 ${Math.ceil(minIntervalMs / 60_000)} 分钟，请约 ${waitMinutes} 分钟后再试。`,
+        remaining: dailyLimit > 0 ? Math.max(0, dailyLimit - count) : null
+      };
+    }
   }
-  return { ok: true, reason: '', remaining: Math.max(0, options.dailyLimit - count) };
+  return { ok: true, reason: '', remaining: dailyLimit > 0 ? Math.max(0, dailyLimit - count) : null };
 }
 
 function nextAvatarState(state, now) {

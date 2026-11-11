@@ -95,11 +95,11 @@ async function main() {
   assert.equal(defaults.outputSize, 640);
   assert.equal(defaults.jpegQuality, 82);
   assert.equal(defaults.outputMaxBytes, AVATAR_DEFAULTS.outputMaxBytes);
-  assert.equal(defaults.dailyLimit, 1);
-  assert.equal(defaults.minIntervalMs, 21_600_000);
+  assert.equal(defaults.dailyLimit, 0);
+  assert.equal(defaults.minIntervalMs, 0);
   assert.equal(defaults.groupPortraitEnabled, false);
   assert.equal(avatarOptions({ outputSize: 99999 }).outputSize, 1024, '非法尺寸应被钳制');
-  console.log('[test] 默认参数：640×640 / q82 / ≤1MB / dailyLimit=1 / 6h 间隔');
+  console.log('[test] 默认参数：640×640 / q82 / ≤1MB / 不限次数 / 无冷却');
 
   await mkdir(WORK_ROOT, { recursive: true });
   const dir = await mkdtemp(path.join(WORK_ROOT, 'test-avatar-image-'));
@@ -196,20 +196,26 @@ async function main() {
     );
     console.log('[test] 会话/来源护栏通过：群聊、非主人、外部 URL 全部拒绝');
 
-    // ── 4. 配额（纯函数） ───────────────────────────────────────────────────
+    // ── 4. 配额（纯函数）：默认不限次数、无冷却 ─────────────────────────────
     const now = Date.now();
     const day = localDay(now);
-    const quotaOpts = avatarOptions({ dailyLimit: 1, minIntervalMs: 21_600_000 });
-    assert.equal(checkAvatarQuota({}, now, quotaOpts).ok, true);
-    const over = checkAvatarQuota({ day, count: 1, lastAt: now }, now, quotaOpts);
+    const unlimited = avatarOptions({ dailyLimit: 0, minIntervalMs: 0 });
+    for (const count of [0, 1, 5, 99]) {
+      const free = checkAvatarQuota({ day, count, lastAt: now }, now, unlimited);
+      assert.equal(free.ok, true, `不限次数时 count=${count} 也不应被拦`);
+      assert.equal(free.remaining, null, '不限次数时 remaining 应为 null');
+    }
+    const legacyOpts = avatarOptions({ dailyLimit: 2, minIntervalMs: 21_600_000 });
+    assert.equal(checkAvatarQuota({}, now, legacyOpts).ok, true);
+    const over = checkAvatarQuota({ day, count: 2, lastAt: now }, now, legacyOpts);
     assert.equal(over.ok, false);
     assert.match(over.reason, /次数已用完/);
-    const nextDay = checkAvatarQuota({ day: localDay(now - 86_400_000), count: 1, lastAt: now }, now, quotaOpts);
-    assert.equal(nextDay.ok, true, '跨天后配额应重置');
-    const tooSoon = checkAvatarQuota({ day, count: 0, lastAt: now - 60_000 }, now, quotaOpts);
+    const nextDay = checkAvatarQuota({ day: localDay(now - 86_400_000), count: 2, lastAt: now }, now, legacyOpts);
+    assert.equal(nextDay.ok, true, '显式配置上限时跨天仍应重置');
+    const tooSoon = checkAvatarQuota({ day, count: 0, lastAt: now - 60_000 }, now, legacyOpts);
     assert.equal(tooSoon.ok, false);
     assert.match(tooSoon.reason, /分钟/);
-    console.log('[test] 配额通过：当日超限拒绝 / 跨天重置 / 最小间隔拒绝');
+    console.log('[test] 配额通过：默认不限次数/无冷却；显式配置时才启用次数与间隔限制');
 
     // ── 5. 预览：不上传、不写配额 ────────────────────────────────────────────
     const previewStatePath = path.join(dir, 'preview-state.json');
@@ -308,16 +314,18 @@ async function main() {
     assert.equal(auditLines.some((item) => typeof item.b64 === 'string'), false, '审计不能写 base64');
     console.log(`[test] 更换成功：upload=${uploads.length} 次，state=${JSON.stringify(state)}，审计 ${auditLines.length} 行`);
 
-    // ── 8. 配额超限：第二次直接拒绝，不再上传 ────────────────────────────────
+    // ── 8. 不限次数：同一天连续第二次仍然照常上传 ────────────────────────────
     const second = await changeAvatar({
       input: { sourceType: 'message', messageId: 2003 },
       options,
-      deps
+      deps: { ...deps, now: () => now + 5_000 }
     });
-    assert.equal(second.ok, false);
-    assert.equal(second.stage, 'quota');
-    assert.equal(uploads.length, 1, '配额拒绝时不得再次上传');
-    console.log(`[test] 配额超限：stage=${second.stage}，upload 总数仍为 ${uploads.length}`);
+    assert.equal(second.ok, true, '不得再被每日次数拦住');
+    assert.equal(second.changed, true);
+    assert.equal(uploads.length, 2, '第二次也应真实上传');
+    assert.equal((await readAvatarState(statePath)).count, 2);
+    assert.equal(second.quota?.remaining, null, '成功结果不应再报剩余次数');
+    console.log(`[test] 不限次数：连续更换 upload=${uploads.length} 次，未被配额拦截`);
 
     // ── 9. 回滚能力（内部函数，未注册工具） ─────────────────────────────────
     const backups = await listAvatarBackups(backupDir);

@@ -79,7 +79,23 @@ test('Qzone tools are available to the model and reject a caller without an owne
       arguments: { key: 'private:999999', token: 'invalid', sourceType: 'self' }
     });
     assert.equal(deniedAvatarStranger.isError, true);
+
+    // 两段式安全闸：confirm 只能是可选参数，真正上传仍由 confirm 决定，不能被改成必填。
+    assert.ok(avatarTool.inputSchema.properties?.confirm, 'confirm 参数必须存在');
+    assert.ok(avatarTool.inputSchema.properties?.dryRun, 'dryRun 参数必须存在');
+    assert.equal(new Set(avatarTool.inputSchema.required).has('confirm'), false, 'confirm 不能变成必填');
+    assert.match(mcpSource, /dryRun \|\| \(options\.requireConfirm && !confirm\)/);
   } finally {
     await client.close();
   }
+});
+
+test('avatar prompt accepts casual approval but keeps two-stage confirm', () => {
+  const source = readFileSync(fileURLToPath(new URL('../src/qq-bot.mjs', import.meta.url)), 'utf8');
+  assert.match(source, /【机器人本人头像】/);
+  assert.match(source, /换吧\/再换一次\/试试\/给你加权限了\/换成这张/);
+  assert.match(source, /先不带 confirm（或 dryRun=true）预览/);
+  assert.match(source, /再传 confirm=true/);
+  assert.match(source, /群聊里绝不能调用/);
+  assert.match(source, /ownerTurn && !key\.startsWith\('g'\)/);
 });

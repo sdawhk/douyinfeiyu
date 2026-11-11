@@ -652,7 +652,9 @@ server.tool(
         const p = preview.preview;
         const quotaLine = preview.quota?.ok === false
           ? `当前配额：${preview.quota.reason}`
-          : `当前配额：今日剩余 ${preview.quota?.remaining ?? options.dailyLimit} 次`;
+          : (preview.quota?.remaining == null
+            ? '当前配额：不限次数'
+            : `当前配额：今日剩余 ${preview.quota.remaining} 次`);
         return {
           content: [{
             type: 'text',
