@@ -133,8 +133,10 @@ export class NodeApiClient {
 
     this.host = {
       // 0.2.x 不再暴露 host.describe；用会话列表作为连通性探针。
+      // 会话多时 session/list 会慢到 10s 以上，5s 会把「活着的 DSH」误判成未就绪，
+      // 导致机器人重启后白等 12 轮（约 2 分钟）才上线，所以放宽到 30s。
       describe: () => this.call('session/list', { _request: {} }, {
-        signal: AbortSignal.timeout(5000)
+        signal: AbortSignal.timeout(30_000)
       }).then(() => ({ ok: true }))
     };
 
