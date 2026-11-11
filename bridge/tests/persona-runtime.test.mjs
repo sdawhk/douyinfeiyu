@@ -106,12 +106,13 @@ test('observePersonaTurn updates mood, open loops and relation memory', () => {
     reply: '行，我记着了。', now
   });
   assert.equal(next.mood, '平静');
-  assert.equal(next.openLoops.length, 1);
-  assert.match(next.openLoops[0].text, /明天/);
-  assert.match(next.currentFocus, /帮我|看看/);
+  const loops = Object.values(next.openLoops).flat();
+  assert.equal(loops.length, 1);
+  assert.match(loops[0].text, /明天/);
+  assert.match(next.currentFocus.p2.text, /帮我|看看/);
 
   const stored = JSON.parse(readFileSync(join(stateDir, 'persona-state.json'), 'utf8'));
-  assert.equal(stored.openLoops.length, 1);
+  assert.equal(Object.values(stored.openLoops).flat().length, 1);
 
   const relation = JSON.parse(readFileSync(join(stateDir, 'persona-relations', 'p2.json'), 'utf8'));
   assert.equal(relation.recent.length, 1);
@@ -137,15 +138,16 @@ test('self notes keep only real jabs and never invent outside events', () => {
   const now = new Date(2026, 10, 8, 12, 0).getTime();
   const input = { chatKey: 'p4', senderId: '4', userText: '你这大肥鱼又吃白饭了吧', reply: '大肥鱼就大肥鱼吧，白饭还没吃完呢', now };
   const next = observePersonaTurn(input);
-  assert.equal(next.selfNotes.length, 1);
-  assert.match(next.selfNotes[0].text, /大肥鱼/);
-  assert.doesNotMatch(next.selfNotes[0].text, /看见|刷到|遇到/);
+  const notes = next.selfNotes.p4 ?? [];
+  assert.equal(notes.length, 1);
+  assert.match(notes[0].text, /大肥鱼/);
+  assert.doesNotMatch(notes[0].text, /看见|刷到|遇到/);
 
   const context = buildPersonaContext({ chatKey: 'p4', senderId: '4', text: '在吗', now });
   assert.match(context, /【你自己的一点私事】/);
 
   const repeated = observePersonaTurn({ ...input, now: now + 1000 });
-  assert.equal(repeated.selfNotes.length, 1);
+  assert.equal((repeated.selfNotes.p4 ?? []).length, 1);
 });
 
 test('harvestBeforeRotation keeps open loops, recent lines and stable facts', () => {
@@ -194,4 +196,55 @@ test('proactiveGroupDecision respects probability and daily cap', () => {
   assert.equal(first.allow, true);
   assert.equal(first.reason, 'proactive');
   assert.equal(proactiveGroupDecision('789', noon, () => 0).reason, 'daily-cap');
+});
+
+test('open loops are scoped to the current group speaker', () => {
+  const now = new Date(2026, 10, 8, 12, 0).getTime();
+  observePersonaTurn({
+    chatKey: 'g900', isGroup: true, senderId: '111',
+    userText: '明天把那张图发我，别忘了', reply: '行，记着', now
+  });
+
+  const other = buildPersonaContext({ chatKey: 'g900', isGroup: true, senderId: '222', text: '在吗', now });
+  assert.doesNotMatch(other, /明天把那张图发我/);
+  assert.doesNotMatch(other, /【你还没收尾的事】/);
+
+  const own = buildPersonaContext({ chatKey: 'g900', isGroup: true, senderId: '111', text: '在吗', now });
+  assert.match(own, /明天把那张图发我/);
+});
+
+test('internal directives never become focus and never get injected', () => {
+  const now = new Date(2026, 10, 8, 12, 0).getTime();
+  observePersonaTurn({
+    chatKey: 'p6', senderId: '6',
+    userText: '【主动私聊主人】帮我看看他睡了没', reply: '好', now
+  });
+  const stored = JSON.parse(readFileSync(join(stateDir, 'persona-state.json'), 'utf8'));
+  assert.equal(stored.currentFocus?.p6, undefined);
+
+  writeState('persona-state.json', {
+    ...stored,
+    currentFocus: { p7: { text: '【主动私聊主人】现在去发消息', at: now } }
+  });
+  const context = buildPersonaContext({ chatKey: 'p7', senderId: '7', text: '在吗', now });
+  assert.doesNotMatch(context, /主动私聊主人/);
+});
+
+test('legacy unscoped persona state is readable but never shared across scopes', () => {
+  const now = new Date(2026, 10, 8, 12, 0).getTime();
+  writeState('persona-state.json', {
+    mood: '平静',
+    energy: 0.65,
+    currentFocus: '【主动私聊主人】现在去发消息',
+    focusAt: now,
+    openLoops: [{ text: '明天再聊', at: now, important: true }],
+    selfNotes: [{ text: '刚才在摸鱼', at: now }],
+    updatedAt: now
+  });
+
+  const context = buildPersonaContext({ chatKey: 'p5', senderId: '5', text: '在吗', now });
+  assert.ok(context.length > 0);
+  assert.doesNotMatch(context, /明天再聊/);
+  assert.doesNotMatch(context, /主动私聊主人/);
+  assert.doesNotMatch(context, /刚才在摸鱼/);
 });

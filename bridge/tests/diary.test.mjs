@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  DIARY_ENTRY_MAX_CHARS, appendDiaryEntry, diaryCommandDenial, diaryEntryIssue, diaryInjectionText,
+  DIARY_ENTRY_MAX_CHARS, appendDiaryEntry, detectDiaryGap, diaryCommandDenial, diaryEntryIssue, diaryInjectionText,
   diaryTailDue, diaryToolDenial, diaryToolFilePath, formatDiaryReply, isDiaryDayKey, normalizeDiaryState,
   parseDiaryCommand, readDiaryEntries, readDiaryForTool, redactDiaryText, scoreDiaryMaterial,
   summarizeDiaryText, weekdayCn
@@ -162,8 +162,31 @@ test('没有日记时注入块告知“还没记”，仍保留日期与硬规�
   const block = diaryInjectionText({ dir, now: new Date(2026, 10, 6, 12, 0) });
   assert.match(block, /今天是 2026-11-06 星期五/);
   assert.match(block, /今天还没记。/);
-  assert.match(block, /只有明确写“今天还没记”时才可以说没写/);
+  assert.match(block, /上面有今天的内容时，不许说没写/);
+  assert.doesNotMatch(block, /只有明确写“今天还没记”时才可以说没写/);
 }));
+
+test('断档：最后写过的那天文件没了就给提示，文件还在就不提', () => withTempDir((dir) => {
+  appendDiaryEntry({ dir, dayKey: '2026-11-06', time: '14:05', text: ENTRY_A });
+  const file = join(dir, '2026-11-06.md');
+  assert.equal(detectDiaryGap({ dir, dayKey: '2026-11-06', lastWrittenDayKey: '2026-11-06', lastFile: file }), null);
+
+  rmSync(file);
+  const gap = detectDiaryGap({ dir, dayKey: '2026-11-06', lastWrittenDayKey: '2026-11-06', lastFile: file });
+  assert.deepEqual(gap, { kind: 'today-missing', dayKey: '2026-11-06' });
+
+  const block = diaryInjectionText({ dir, now: new Date(2026, 10, 6, 22, 0), gap });
+  assert.match(block, /【日记断档】2026-11-06/);
+  assert.match(block, /问问爸是不是动过文件/);
+  assert.doesNotMatch(diaryInjectionText({ dir, now: new Date(2026, 10, 6, 22, 0) }), /日记断档/);
+}));
+
+test('状态里保留最后写入日期，旧状态可从 lastFile 推出', () => {
+  assert.equal(normalizeDiaryState({ lastWrittenDayKey: '2026-11-06' }).lastWrittenDayKey, '2026-11-06');
+  assert.equal(normalizeDiaryState({ lastFile: 'D:\\deepseek\\diary\\2026-11-05.md' }).lastWrittenDayKey, '2026-11-05');
+  assert.equal(normalizeDiaryState({}).lastWrittenDayKey, '');
+  assert.equal(normalizeDiaryState({}).diaryGap, null);
+});
 
 test('摘录按句号边界截断并补“…”，不出现半句', () => withTempDir((dir) => {
   const text = `今天和爸聊了几句，还一起听了几首歌。${'后面还有很多零碎的细节'.repeat(10)}`;

@@ -66,6 +66,77 @@ export function safeKey(value) {
   return cleaned.slice(0, 120) || 'unknown';
 }
 
+// 旧格式（无 scope）的数据统一放在这个桶里：能读、不崩，但不会注入给任何会话。
+const LEGACY_SCOPE = '_legacy';
+
+// 括号指令 / 系统提示不是人物线索，既不能写成 focus，也不能回灌进上下文。
+const INTERNAL_DIRECTIVE_RE = /【[^】]*】|主动(?:私聊|联系|去找|找)主人/u;
+// 只识别内部提示词本身；群友正常消息里可能带【…】（游戏邀请等），不能一律丢。
+const PROMPT_NOISE_RE = /主动(?:私聊|联系|去找|找)主人|系统提示|内部提示|不要输出|只输出|（只 @ 了你|把这几句当成这轮/u;
+
+export function isInternalDirective(text) {
+  return INTERNAL_DIRECTIVE_RE.test(String(text ?? ''));
+}
+
+function isPromptNoise(text) {
+  return PROMPT_NOISE_RE.test(String(text ?? ''));
+}
+
+/**
+ * 记忆作用域：私聊 p<QQ>；群聊 g<群号>-<QQ>，同一个群里每个人独立。
+ * 群聊拿不到发言人时返回空串，宁可不注入，也不退回整群桶。
+ */
+export function personaScope({ chatKey = '', isGroup = false, senderId = '' } = {}) {
+  if (!chatKey) return '';
+  if (!isGroup) return chatKey;
+  return senderId ? `${chatKey}-${senderId}` : '';
+}
+
+function scopedBuckets(raw) {
+  if (Array.isArray(raw)) return { [LEGACY_SCOPE]: raw };
+  return raw && typeof raw === 'object' ? raw : {};
+}
+
+function listForScope(raw, scope) {
+  if (!scope) return [];
+  const list = scopedBuckets(raw)[scope];
+  return Array.isArray(list) ? list : [];
+}
+
+function withScopedList(raw, scope, list) {
+  if (!scope) return raw;
+  return { ...scopedBuckets(raw), [scope]: list };
+}
+
+function focusForScope(raw, focusAt, scope) {
+  if (!scope) return null;
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    return text ? { scope: LEGACY_SCOPE, text, at: Number(focusAt) || 0 } : null;
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  if (typeof raw.text === 'string') {
+    const text = raw.text.trim();
+    return text ? { scope: String(raw.scope || LEGACY_SCOPE), text, at: Number(raw.at ?? focusAt) || 0 } : null;
+  }
+  const entry = raw[scope];
+  if (!entry || typeof entry.text !== 'string') return null;
+  const text = entry.text.trim();
+  return text ? { scope, text, at: Number(entry.at) || 0 } : null;
+}
+
+function withFocus(raw, focusAt, scope, text, at) {
+  if (!scope) return raw;
+  const map = !raw || typeof raw !== 'object' || Array.isArray(raw) || typeof raw.text === 'string'
+    ? {} : { ...raw };
+  if (typeof raw === 'string' && raw.trim()) {
+    map[LEGACY_SCOPE] = { text: raw.trim().slice(0, 60), at: Number(focusAt) || 0 };
+  }
+  if (text) map[scope] = { text: String(text).slice(0, 60), at };
+  else delete map[scope];
+  return map;
+}
+
 export function timeOfDay(now = Date.now()) {
   const hour = new Date(now).getHours();
   if (hour < 5) return '深夜';
@@ -97,15 +168,16 @@ function normalizeSelfNotes(list, now = Date.now()) {
     .slice(-SELF_NOTE_MAX);
 }
 
-function readState() {
+function readState(now = Date.now()) {
   const raw = readJson(join(stateDir(), STATE_FILE), null) ?? {};
   return {
     mood: typeof raw.mood === 'string' && raw.mood.trim() ? raw.mood.trim().slice(0, 12) : '平静',
     energy: clamp01(Number(raw.energy ?? 0.65)),
-    currentFocus: typeof raw.currentFocus === 'string' ? raw.currentFocus.trim().slice(0, 60) : '',
+    // 旧格式是 string / Array；新格式是按 scope 分的对象。这里保持原样，读取端按 scope 取。
+    currentFocus: raw.currentFocus,
     focusAt: Number(raw.focusAt) || 0,
-    openLoops: Array.isArray(raw.openLoops) ? raw.openLoops : [],
-    selfNotes: normalizeSelfNotes(raw.selfNotes),
+    openLoops: raw.openLoops,
+    selfNotes: raw.selfNotes,
     updatedAt: Number(raw.updatedAt) || 0
   };
 }
@@ -160,22 +232,23 @@ function loadRelation(key) {
   };
 }
 
-function activeOpenLoops(now) {
-  return readState().openLoops
+function activeOpenLoops(scope, now) {
+  return listForScope(readState().openLoops, scope)
     .map((item) => ({
       text: cleanSnippet(item?.text, 80),
       at: Number(item?.at) || 0,
       important: item?.important === true
     }))
-    .filter((item) => item.text && now - item.at <= OPEN_LOOP_TTL_MS)
+    .filter((item) => item.text && !isPromptNoise(item.text) && now - item.at <= OPEN_LOOP_TTL_MS)
     .sort((a, b) => Number(b.important) - Number(a.important) || b.at - a.at)
     .slice(0, OPEN_LOOP_MAX);
 }
 
-function describeState(state) {
+function describeState(state, focus = '') {
   const energy = state.energy >= 0.7 ? '精神还行' : state.energy >= 0.4 ? '有点倦' : '快没电了';
-  const focus = state.currentFocus ? `，心里还挂着「${state.currentFocus}」` : '';
-  return `${state.mood}，${energy}${focus}`;
+  const visibleFocus = focus && !isInternalDirective(focus) ? focus : '';
+  const focusLine = visibleFocus ? `，心里还挂着「${visibleFocus}」` : '';
+  return `${state.mood}，${energy}${focusLine}`;
 }
 
 function readFewShot(kind) {
@@ -195,10 +268,14 @@ export function buildPersonaContext({
   text = '', channel = 'qq', now = Date.now(), includeExamples = false
 } = {}) {
   const lines = [];
-  const state = readState();
-  lines.push(`【此刻】${formatClock(now)}，${timeOfDay(now)}。${describeState(state)}。`);
-  if (state.selfNotes.length) {
-    lines.push(`【你自己的一点私事】${state.selfNotes.map((item) => item.text).join('；')}。这些只是你自己的状态，不用向谁报备；聊到了顺口带一句，别主动汇报，也别补细节。`);
+  const scope = personaScope({ chatKey, isGroup, senderId });
+  const state = readState(now);
+  const focus = focusForScope(state.currentFocus, state.focusAt, scope);
+  const focusText = focus && now - focus.at <= FOCUS_TTL_MS ? focus.text : '';
+  lines.push(`【此刻】${formatClock(now)}，${timeOfDay(now)}。${describeState(state, focusText)}。`);
+  const selfNotes = normalizeSelfNotes(listForScope(state.selfNotes, scope), now);
+  if (selfNotes.length) {
+    lines.push(`【你自己的一点私事】${selfNotes.map((item) => item.text).join('；')}。这些只是你自己的状态，不用向谁报备；聊到了顺口带一句，别主动汇报，也别补细节。`);
   }
 
   const preferences = loadPreferences();
@@ -217,8 +294,10 @@ export function buildPersonaContext({
       .join('；')}。`);
   }
 
-  const relationKey = isGroup && senderId ? `${chatKey}-${senderId}` : chatKey;
-  const relation = loadRelation(relationKey);
+  const relationKey = isGroup ? (senderId ? `${chatKey}-${senderId}` : '') : chatKey;
+  const relation = relationKey
+    ? loadRelation(relationKey)
+    : { traits: [], bits: [], boundaries: [], recent: [] };
   const relationLines = [];
   if (relation.traits.length) relationLines.push(`印象：${relation.traits.slice(0, 3).join('；')}`);
   if (relation.bits.length) relationLines.push(`你们之间的梗：${relation.bits.slice(0, 2).join('；')}`);
@@ -243,7 +322,7 @@ export function buildPersonaContext({
     if (impressions) lines.push(impressions);
   }
 
-  const loops = activeOpenLoops(now);
+  const loops = activeOpenLoops(scope, now);
   if (loops.length) {
     lines.push(`【你还没收尾的事】${loops.slice(0, 2).map((item) => item.text).join('；')}。`);
   }
@@ -271,7 +350,7 @@ const MOOD_RULES = [
 const FOCUS_RE = /帮我|帮我看|看看|查一下|查查|画一|画个|写一|写个|做一|做个|弄一|修一|找一|推荐|搜一|解释|讲讲/u;
 const LOOP_RE = /下次|改天|回头|等你|还没|明天|说好|答应|待会|晚点|记得|约好|欠你/u;
 
-function applyMood(state, text, now) {
+function applyMood(state, text, now, scope) {
   const next = { ...state };
   for (const rule of MOOD_RULES) {
     if (rule.re.test(text)) {
@@ -280,16 +359,17 @@ function applyMood(state, text, now) {
       break;
     }
   }
-  if (FOCUS_RE.test(text)) {
+  if (!scope) return next;
+  const existing = focusForScope(state.currentFocus, state.focusAt, scope);
+  if (FOCUS_RE.test(text) && !isInternalDirective(text)) {
     const focus = cleanSnippet(text, 30);
-    if (focus) {
-      next.currentFocus = focus;
-      next.focusAt = now;
+    if (focus && !isInternalDirective(focus)) {
+      next.currentFocus = withFocus(state.currentFocus, state.focusAt, scope, focus, now);
     }
-  } else if (now - (Number(next.focusAt) || 0) > FOCUS_TTL_MS) {
-    next.currentFocus = '';
-    next.focusAt = 0;
+  } else if (now - (existing?.at || 0) > FOCUS_TTL_MS) {
+    next.currentFocus = withFocus(state.currentFocus, state.focusAt, scope, '', 0);
   }
+  next.focusAt = 0;
   return next;
 }
 
@@ -345,22 +425,28 @@ export function observePersonaTurn({
   userText = '', reply = '', now = Date.now()
 } = {}) {
   const state = readState();
+  const scope = personaScope({ chatKey, isGroup, senderId });
   const user = String(userText ?? '');
   const answer = String(reply ?? '');
-  const next = applyMood(state, user, now);
-  next.openLoops = updateOpenLoops(state.openLoops, user, answer, now);
-  next.selfNotes = updateSelfNotes(state.selfNotes, { userText: user, reply: answer, now });
+  const next = applyMood(state, user, now, scope);
+  next.openLoops = withScopedList(
+    state.openLoops, scope,
+    updateOpenLoops(listForScope(state.openLoops, scope), user, answer, now)
+  );
+  next.selfNotes = withScopedList(
+    state.selfNotes, scope,
+    updateSelfNotes(listForScope(state.selfNotes, scope), { userText: user, reply: answer, now })
+  );
   next.updatedAt = now;
   writeJson(join(stateDir(), STATE_FILE), next);
 
-  if (chatKey) {
-    const relationKey = isGroup && senderId ? `${chatKey}-${senderId}` : chatKey;
-    const relation = loadRelation(relationKey);
+  if (scope) {
+    const relation = loadRelation(scope);
     const snippet = cleanSnippet(user || answer, 60);
     if (snippet) {
       relation.recent.push({ at: now, text: snippet });
       relation.recent = relation.recent.slice(-RECENT_RELATION_MAX);
-      writeJson(relationPath(relationKey), relation);
+      writeJson(relationPath(scope), relation);
     }
   }
   return next;
@@ -376,9 +462,12 @@ const HARVEST_FACT_RE = /(?:我叫|我是|我在|我住|我养|我有(?:一|两|
  * 3) 对方自述的稳定事实：含“我叫/我是/我在/我住/我养/我有…/我女儿/我儿子”等的句子，写进同一关系文件的 traits。
  * 重建后由 buildPersonaContext 每轮读回，所以不需要把旧会话整段带过去。
  */
-export function harvestBeforeRotation({ chatKey = '', recentExchanges = [], now = Date.now() } = {}) {
+export function harvestBeforeRotation({ chatKey = '', isGroup = false, senderId = '', recentExchanges = [], now = Date.now() } = {}) {
   const result = { loops: 0, recent: 0, facts: 0 };
   if (!chatKey) return result;
+  // 群聊必须带发言人，写到 g<群号>-<QQ>；拿不到发言人就不写，避免又落回整群桶。
+  const scope = personaScope({ chatKey, isGroup: isGroup || String(chatKey).startsWith('g'), senderId });
+  if (!scope) return result;
   const exchanges = (Array.isArray(recentExchanges) ? recentExchanges : [])
     .map((item) => ({ input: cleanSnippet(item?.input, 220) }))
     .filter((item) => item.input && item.input !== '（你主动发起）')
@@ -386,7 +475,7 @@ export function harvestBeforeRotation({ chatKey = '', recentExchanges = [], now 
   if (!exchanges.length) return result;
 
   const state = readState();
-  const loops = state.openLoops
+  const loops = listForScope(state.openLoops, scope)
     .map((item) => ({
       text: cleanSnippet(item?.text, 80),
       at: Number(item?.at) || 0,
@@ -394,7 +483,7 @@ export function harvestBeforeRotation({ chatKey = '', recentExchanges = [], now 
     }))
     .filter((item) => item.text && now - item.at <= OPEN_LOOP_TTL_MS);
   for (const { input } of exchanges) {
-    if (!LOOP_RE.test(input)) continue;
+    if (!LOOP_RE.test(input) || isPromptNoise(input)) continue;
     const snippet = cleanSnippet(input, 60);
     const normalized = snippet.replace(/\s+/g, '');
     if (!snippet || loops.some((item) => item.text.replace(/\s+/g, '') === normalized)) continue;
@@ -402,20 +491,20 @@ export function harvestBeforeRotation({ chatKey = '', recentExchanges = [], now 
     result.loops += 1;
   }
   if (result.loops) {
-    state.openLoops = loops.slice(-OPEN_LOOP_MAX);
+    state.openLoops = withScopedList(state.openLoops, scope, loops.slice(-OPEN_LOOP_MAX));
     state.updatedAt = now;
     writeJson(join(stateDir(), STATE_FILE), state);
   }
 
-  const relation = loadRelation(chatKey);
+  const relation = loadRelation(scope);
   for (const { input } of exchanges.slice(-2)) {
     const text = cleanSnippet(input, 60);
-    if (!text || relation.recent.some((item) => item.text === text)) continue;
+    if (!text || isPromptNoise(text) || relation.recent.some((item) => item.text === text)) continue;
     relation.recent.push({ at: now, text });
     result.recent += 1;
   }
   for (const { input } of exchanges) {
-    if (!HARVEST_FACT_RE.test(input)) continue;
+    if (!HARVEST_FACT_RE.test(input) || isPromptNoise(input)) continue;
     const sentence = input.split(/[。！？!?\n]/u).map((item) => item.trim())
       .find((item) => item && HARVEST_FACT_RE.test(item));
     const fact = cleanSnippet(sentence, 50);
@@ -425,7 +514,7 @@ export function harvestBeforeRotation({ chatKey = '', recentExchanges = [], now 
   }
   relation.traits = relation.traits.slice(-8);
   relation.recent = relation.recent.slice(-RECENT_RELATION_MAX);
-  if (result.recent || result.facts) writeJson(relationPath(chatKey), relation);
+  if (result.recent || result.facts) writeJson(relationPath(scope), relation);
   return result;
 }
 
@@ -434,10 +523,25 @@ export function groupMemberImpressions(groupId, limit = 2) {
   const id = String(groupId ?? '').replace(/^g/, '').trim();
   if (!id) return '';
   const doc = readJson(join(stateDir(), SOCIAL_FILE), null);
-  const map = doc?.conversations?.[`group:${id}`]?.memberImpressions;
+  const conv = doc?.conversations?.[`group:${id}`];
+  const map = conv?.memberImpressions;
   if (!map || typeof map !== 'object') return '';
-  const rows = Object.entries(map).map(([name, item]) => ({
-    name: cleanSnippet(name, 30),
+  // 印象的键是 QQ 号（B 档迁移后按 QQ 存），昵称只用于展示，不参与匹配。
+  // 取昵称的顺序：条目自带的 name → 该群最近消息里这个 QQ 最后一次用的昵称
+  //   → 维护脚本落盘的 QQ→昵称旁挂表 → 回落 QQ 号。
+  // 这样即使印象里没存昵称，也不会把“123456789：爱发猫图”这种数字当名字注入。
+  const nicknameByQQ = new Map();
+  for (const message of Array.isArray(conv?.recentMessages) ? conv.recentMessages : []) {
+    const uid = String(message?.userId ?? '').trim();
+    const nick = cleanSnippet(message?.sender, 30);
+    if (uid && nick && nick !== uid) nicknameByQQ.set(uid, nick);
+  }
+  const savedNames = readJson(join(stateDir(), 'persona-member-names.json'), null) ?? {};
+  const rows = Object.entries(map).map(([qq, item]) => ({
+    name: cleanSnippet(item?.name, 30)
+      || nicknameByQQ.get(String(qq))
+      || cleanSnippet(savedNames[`g${id}-${qq}`]?.name, 30)
+      || String(qq),
     traits: (Array.isArray(item?.traits) ? item.traits : [])
       .map((trait) => cleanSnippet(trait, 50)).filter(Boolean).slice(0, 2),
     interactionCount: Number(item?.interactionCount) || 0,

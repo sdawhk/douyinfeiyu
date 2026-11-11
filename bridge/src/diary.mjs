@@ -318,10 +318,29 @@ function entryExcerpt(entry, chars) {
 }
 
 /**
+ * 判断“最后写过的那一天”的文件是否还在。只做一次 existsSync，不读内容。
+ * 目录被整个删掉、或当天文件被删掉，都会命中。
+ */
+export function detectDiaryGap({ dir = DEFAULT_DIARY_DIR, dayKey = '', lastWrittenDayKey = '', lastFile = '' } = {}) {
+  const writtenDay = isDiaryDayKey(lastWrittenDayKey) ? String(lastWrittenDayKey) : '';
+  if (!writtenDay) return null;
+  const expected = path.join(dir, `${writtenDay}.md`);
+  const target = lastFile && path.resolve(lastFile) === path.resolve(expected) ? lastFile : expected;
+  if (existsSync(target)) return null;
+  return { kind: writtenDay === dayKey ? 'today-missing' : 'last-day-missing', dayKey: writtenDay };
+}
+
+/** 断档时给人格层的一句话；没有断档就返回空串。 */
+export function diaryGapNote(gap) {
+  if (!gap || !isDiaryDayKey(gap.dayKey)) return '';
+  return `【日记断档】${gap.dayKey} 那天的日记不见了，不像你自己漏记的；可以说一句，问问爸是不是动过文件。`;
+}
+
+/**
  * 私聊提示词里的“我的日记”块：今天最近 2 条 + 昨天最后 1 条，总量 ≤450 字。
  * 没写过时也返回自我认知，便于模型知道自己有写日记的习惯。
  */
-export function diaryInjectionText({ dir = DEFAULT_DIARY_DIR, now = new Date() } = {}) {
+export function diaryInjectionText({ dir = DEFAULT_DIARY_DIR, now = new Date(), gap = null } = {}) {
   const today = localDayKey(now);
   const yesterday = localDayKey(new Date(now.getTime() - 24 * 60 * 60_000));
   const todayEntries = readDiaryEntries(dir, today);
@@ -343,7 +362,8 @@ export function diaryInjectionText({ dir = DEFAULT_DIARY_DIR, now = new Date() }
     ? `今天是 ${today} ${weekdayCn(today)}，今天已经记过 ${todayCount} 条。`
     : `今天是 ${today} ${weekdayCn(today)}。`;
   const intro = `【我的日记】我习惯想到就记一笔，日记存在 ${dir}，不发给别人，只有我自己和爸能看。${dateLine}`;
-  const tail = '上面有今天的内容就代表今天已经写过，不许说没写/还没写/等晚上再写，也不用为此调用 qq_diary_read；只有明确写“今天还没记”时才可以说没写。要看更多或全文时，由命令层读取文件回答。';
+  const tail = '上面有今天的内容时，不许说没写/还没写/等晚上再写，也不用为此调用 qq_diary_read。要看更多或全文时，由命令层读取文件回答。';
+  const gapLine = diaryGapNote(gap);
 
   const levels = [
     { today: 2, yesterday: 1, chars: 60 },
@@ -376,10 +396,10 @@ export function diaryInjectionText({ dir = DEFAULT_DIARY_DIR, now = new Date() }
         lines.push(`- ${head} ${mood}${excerpt}`.trim());
       }
     }
-    const text = `${intro}\n${lines.join('\n')}\n${tail}`;
+    const text = `${intro}\n${lines.join('\n')}${gapLine ? `\n${gapLine}` : ''}\n${tail}`;
     if ([...text].length <= DIARY_INJECTION_MAX_CHARS) return text;
   }
-  return `${intro}\n今天还没记。\n${tail}`;
+  return `${intro}\n今天还没记。${gapLine ? `\n${gapLine}` : ''}\n${tail}`;
 }
 
 /** 日记命令的权限/场景拦截；返回空字符串表示允许。 */
@@ -525,6 +545,12 @@ export function normalizeDiaryState(raw = {}, now = new Date()) {
     lastAttemptAt: Math.max(0, Number(source.lastAttemptAt) || 0),
     lastError: typeof source.lastError === 'string' ? source.lastError.slice(0, 200) : '',
     lastFile: typeof source.lastFile === 'string' ? source.lastFile : '',
+    // 不随午夜清零：用来判断“最后写过的那一天”的文件还在不在（断档检测）。
+    lastWrittenDayKey: dayKey(source.lastWrittenDayKey)
+      || dayKey(String(source.lastFile ?? '').match(/(\d{4}-\d{2}-\d{2})\.md$/)?.[1] ?? ''),
+    diaryGap: source.diaryGap && typeof source.diaryGap === 'object' && dayKey(source.diaryGap.dayKey)
+      ? { kind: String(source.diaryGap.kind ?? '').slice(0, 20), dayKey: dayKey(source.diaryGap.dayKey) }
+      : null,
     tailDoneDate: dayKey(source.tailDoneDate),
     lastPushDate: dayKey(source.lastPushDate),
     pushAttempts: Math.max(0, Math.min(9, Number(source.pushAttempts) || 0)),
