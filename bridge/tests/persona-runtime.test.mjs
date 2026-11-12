@@ -209,8 +209,9 @@ test('open loops are scoped to the current group speaker', () => {
   assert.doesNotMatch(other, /明天把那张图发我/);
   assert.doesNotMatch(other, /【你还没收尾的事】/);
 
-  const own = buildPersonaContext({ chatKey: 'g900', isGroup: true, senderId: '111', text: '在吗', now });
+  const own = buildPersonaContext({ chatKey: 'g900', isGroup: true, senderId: '111', text: '刚才那张图呢', now });
   assert.match(own, /明天把那张图发我/);
+  assert.doesNotMatch(buildPersonaContext({ chatKey: 'g900', isGroup: true, senderId: '111', text: '在吗', now }), /明天把那张图发我/);
 });
 
 test('internal directives never become focus and never get injected', () => {
@@ -279,12 +280,12 @@ test('quota loops expire when avatar quota policy changes, real loops stay', () 
     userText: '明天把画发我', reply: '好', now
   });
 
-  let context = buildPersonaContext({ chatKey: 'p30', isOwner: true, text: '在吗', now: now + 1_000 });
+  let context = buildPersonaContext({ chatKey: 'p30', isOwner: true, text: '明天再换头像和画的事还记着吗', now: now + 1_000 });
   assert.match(context, /明天再换/);
   assert.match(context, /明天把画发我/);
 
   setAvatarQuotaPolicy({ dailyLimit: 0, minIntervalMs: 0 });
-  context = buildPersonaContext({ chatKey: 'p30', isOwner: true, text: '在吗', now: now + 2_000 });
+  context = buildPersonaContext({ chatKey: 'p30', isOwner: true, text: '明天再换头像和画的事还记着吗', now: now + 2_000 });
   assert.doesNotMatch(context, /明天再换/);
   assert.match(context, /明天把画发我/);
 

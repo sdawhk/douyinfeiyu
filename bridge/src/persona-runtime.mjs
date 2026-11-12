@@ -218,8 +218,8 @@ function localDayKey(now = Date.now()) {
 /** 私事只留最近 3 条、6 小时内有效；内容不指向外部事实，避免编造见闻。 */
 function normalizeSelfNotes(list, now = Date.now()) {
   return (Array.isArray(list) ? list : [])
-    .map((item) => ({ text: cleanSnippet(item?.text, 40), at: Number(item?.at) || 0 }))
-    .filter((item) => item.text && now - item.at <= SELF_NOTE_TTL_MS)
+    .map((item) => ({ text: cleanSnippet(item?.text, 40), at: Number(item?.at) || 0, source: cleanSnippet(item?.source, 24) }))
+    .filter((item) => item.text && item.source === 'observed_interaction' && item.at <= now && now - item.at <= SELF_NOTE_TTL_MS)
     .slice(-SELF_NOTE_MAX);
 }
 
@@ -298,7 +298,7 @@ function activeOpenLoops(scope, now) {
       at: Number(item?.at) || 0,
       important: item?.important === true
     }))
-    .filter((item) => item.text && !isPromptNoise(item.text) && now - item.at <= OPEN_LOOP_TTL_MS)
+    .filter((item) => item.text && !isPromptNoise(item.text) && item.at > 0 && item.at <= now && now - item.at <= OPEN_LOOP_TTL_MS)
     .filter((item) => !(expired && QUOTA_LOOP_RE.test(item.text)))
     .sort((a, b) => Number(b.important) - Number(a.important) || b.at - a.at)
     .slice(0, OPEN_LOOP_MAX);
@@ -361,8 +361,9 @@ export function buildPersonaContext({
   const relationLines = [];
   if (relation.traits.length) relationLines.push(`印象：${relation.traits.slice(0, 3).join('；')}`);
   if (relation.bits.length) relationLines.push(`你们之间的梗：${relation.bits.slice(0, 2).join('；')}`);
-  if (relation.recent.length) {
-    const last = relation.recent[relation.recent.length - 1];
+  const relevantRecent = recentRelationForPrompt(relation.recent, text, now);
+  if (relevantRecent.length) {
+    const last = relevantRecent[relevantRecent.length - 1];
     relationLines.push(`上次聊到：${last.topic ? `（${last.topic}）` : ''}${last.text}`);
   }
   if (relationLines.length) {
@@ -385,7 +386,7 @@ export function buildPersonaContext({
     if (impressions) lines.push(impressions);
   }
 
-  const loops = activeOpenLoops(scope, now);
+  const loops = relevantOpenLoops(activeOpenLoops(scope, now), text, now);
   if (loops.length) {
     lines.push(`【你还没收尾的事】${loops.slice(0, 2).map((item) => item.text).join('；')}。`);
   }
@@ -461,8 +462,7 @@ function updateOpenLoops(existing, userText, reply, now) {
 
 // 私事只写固定短语，不写具体见闻：只记录真实发生过的互动和状态，避免编造“我看见了什么”。
 const SELF_NOTE_RULES = [
-  { re: /大肥鱼|吃白饭|白饭/u, text: '刚被人拿“大肥鱼/白饭”开涮，嘴上没输，心里还记着' },
-  { re: /摸鱼|刷视频|刷了会儿|发呆|犯困/u, text: '刚才在摸鱼，没干什么正事' }
+  /大肥鱼|吃白饭|白饭/u
 ];
 
 function updateSelfNotes(existing, { userText = '', reply = '', now = Date.now() } = {}) {
@@ -472,14 +472,40 @@ function updateSelfNotes(existing, { userText = '', reply = '', now = Date.now()
     if (!text) return;
     const normalized = text.replace(/\s+/g, '');
     if (notes.some((item) => item.text.replace(/\s+/g, '') === normalized)) return;
-    notes.push({ text, at: now });
+    notes.push({ text, at: now, source: 'observed_interaction' });
   };
-  for (const rule of SELF_NOTE_RULES) {
-    if (rule.re.test(userText) || rule.re.test(reply)) push(rule.text);
+  if (!isInternalDirective(userText)) {
+    for (const rule of SELF_NOTE_RULES) {
+      const mentioned = String(userText).match(rule)?.[0];
+      if (mentioned) push(`刚有人提到“${mentioned}”`);
+    }
   }
-  const hour = new Date(now).getHours();
-  if (hour >= 23 || hour < 5) push('这个点还醒着');
   return notes.slice(-SELF_NOTE_MAX);
+}
+
+function relevantToCurrent(text, source, topic = '') {
+  const query = String(text ?? '').toLowerCase();
+  if (!query.trim()) return false;
+  const candidate = `${source ?? ''} ${topic ?? ''}`.toLowerCase();
+  const terms = (candidate.match(/[\p{Script=Han}]{2,}|[a-z0-9]{2,}/giu) ?? []).flatMap((term) => {
+    if (!/^[\p{Script=Han}]+$/u.test(term)) return [term];
+    return Array.from({ length: term.length - 1 }, (_, index) => term.slice(index, index + 2));
+  });
+  return terms.some((term) => query.includes(term));
+}
+
+function recentRelationForPrompt(recent, text, now) {
+  return (Array.isArray(recent) ? recent : [])
+    .filter((item) => item.at > 0 && item.at <= now && now - item.at <= 24 * 60 * 60_000)
+    .filter((item) => relevantToCurrent(text, item.text, item.topic)
+      || (now - item.at <= 30 * 60_000 && /这个|那个|刚才|之前|继续|后来|上次|它|呢/u.test(text)))
+    .slice(-2);
+}
+
+function relevantOpenLoops(loops, text, now) {
+  return loops.filter((item) => relevantToCurrent(text, item.text)
+    || (item.important && now - item.at <= 60 * 60_000 && /还记得|后来|那件|刚才|之前|上次|继续|结果/u.test(text)))
+    .slice(0, 2);
 }
 
 /** 每轮回复后更新状态、关系里的“上次聊到”和未收尾话题。失败不影响主流程。 */
