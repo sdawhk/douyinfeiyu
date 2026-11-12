@@ -2,8 +2,14 @@
 
 Runs from Task Scheduler every few minutes. It never opens the Douyin browser: it only
 reads the files the listener already writes, and it reports through the QQ/OneBot private
-channel so a broken Douyin link can still reach the owner. Every issue has a cooldown and
-a one-shot recovery note, so a persistent fault never turns into a stream of alerts.
+channel so a broken Douyin link can still reach the owner.
+
+Alerting policy: availability issues usually self-heal (the scheduled task restarts the
+listener within a minute or two), so the first sighting only starts a patience clock and
+the owner is bothered only after the issue survives FAULT_MIN_DOWNTIME_SECONDS. A
+recovery note is sent only for issues that were actually reported; a self-healed blip
+stays completely silent. Issues already carrying their own sustained-evidence window
+(reply backlog / failures) and the captcha alert keep firing on first detection.
 """
 
 from __future__ import annotations
@@ -11,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -50,6 +57,26 @@ CRASH_MIN_RESTARTS = 3
 LOCK_STALE_SECONDS = 180
 # * one alert per issue per 30 minutes: enough to notice, quiet enough to live with.
 ALERT_COOLDOWN_SECONDS = 1800
+# * a Douyin captcha can only be cleared by the owner manually sliding it in the
+#   visible listener window, so nag about it at most once every 6 hours.
+CAPTCHA_COOLDOWN_SECONDS = 6 * 3600
+# * availability issues (listener/browser) usually self-heal: the scheduled task
+#   restarts the listener within a minute or two, and the 2026-11-12 flapping showed
+#   every down/recovery pair resolving inside one 5-minute round. So the first sighting
+#   only starts a patience clock, and the owner is bothered after the issue has survived
+#   10 minutes = 3 consecutive failing rounds at the current 5-minute cadence.
+FAULT_MIN_DOWNTIME_SECONDS = 600
+PERSISTENCE_GATED_KEYS = {"listener_down", "profile_locked", "crash_loop"}
+# * a captcha line older than this stops counting as an active block: every blocked
+#   browse session writes a fresh line anyway.
+CAPTCHA_WINDOW_SECONDS = 6 * 3600
+# The browse/playback log lines reach listener.log through a GBK-misdecoded pipe, so
+# they are stored as mojibake; match both the mojibake form and the proper UTF-8 form
+# so the check keeps working if that pipe is ever fixed.
+CAPTCHA_LINE_HINTS = ("未起播", "捣鎾")
+CAPTCHA_YES_MARKS = ("验证框=是", "=鏄")
+PLAY_OK_LINE_HINTS = ("实际播放", "疄闄呮挱")
+PLAY_OK_COUNT_RE = re.compile(r"(观察到|瀹熷埌)\s*(\d+)\s*(?:条|鏉)")
 
 ISSUE_REASONS = {
     "listener_down": "消息我收不到了",
@@ -57,13 +84,20 @@ ISSUE_REASONS = {
     "reply_failures": "我说话发不出去",
     "crash_loop": "我一直闪退重启",
     "profile_locked": "浏览器卡住起不来",
+    "douyin_captcha": "抖音一直让我滑验证，我自己滑不过去，得你开一下那个挂着的抖音窗口（任务栏里的 Edge）帮我手动滑一下",
 }
+# 当监听器/浏览器本身都掉了时，"去滑一下"的建议是给不出的：改成只报状态。
+CAPTCHA_REASON_BROWSER_DOWN = (
+    "抖音那边弹了滑块验证，不过挂着的那个 Edge 窗口现在没在跑，"
+    "等它被拉起来要是还卡验证，我再叫你"
+)
 RECOVERY_REASONS = {
     "listener_down": "消息能正常收了",
     "reply_backlog": "积压的私信都回上了",
     "reply_failures": "能正常发消息了",
     "crash_loop": "也不闪退了",
     "profile_locked": "浏览器也起得来了",
+    "douyin_captcha": "验证过了，能正常刷了",
 }
 FAILURE_OUTCOMES = {"reply_backend_failed", "send_failed", "retry_exhausted"}
 DRY_RUN = "--dry-run" in sys.argv
@@ -181,6 +215,36 @@ def check_crash_loop(now: datetime) -> str | None:
     return "crash_loop" if restarts >= CRASH_MIN_RESTARTS else None
 
 
+def check_douyin_captcha(now: datetime) -> str | None:
+    """Captcha alert: the listener hit a Douyin verification frame it cannot pass.
+
+    Signal source is listener.log itself (no listener code change needed): a blocked
+    browse writes a 播放未起播…验证框=是 line, a healthy one writes 观察到 N≥1 条实际播放.
+    """
+    try:
+        lines = LISTENER_LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()[-800:]
+    except (FileNotFoundError, OSError):
+        return None
+    last_captcha: datetime | None = None
+    last_play_ok: datetime | None = None
+    for line in lines:
+        stamp = parse_time(line[:19]) if len(line) >= 19 else None
+        if stamp is None:
+            continue
+        if ("douyin.com/video/" in line and any(hint in line for hint in CAPTCHA_LINE_HINTS)
+                and any(mark in line for mark in CAPTCHA_YES_MARKS)):
+            last_captcha = stamp
+        elif any(hint in line for hint in PLAY_OK_LINE_HINTS):
+            match = PLAY_OK_COUNT_RE.search(line)
+            if match and int(match.group(2)) >= 1:
+                last_play_ok = stamp
+    if last_captcha is None or (now - last_captcha).total_seconds() > CAPTCHA_WINDOW_SECONDS:
+        return None
+    if last_play_ok is not None and last_play_ok > last_captcha:
+        return None
+    return "douyin_captcha"
+
+
 def check_profile_lock(now: datetime) -> str | None:
     try:
         stat = PROFILE_LOCK_PATH.stat()
@@ -226,21 +290,70 @@ def send_owner_private(text: str) -> bool:
     return isinstance(result, dict) and int(result.get("retcode", -1)) == 0
 
 
-def compose_alert(keys: list[str], repeat: bool) -> str:
-    reasons = "、".join(ISSUE_REASONS[key] for key in keys)
+def compose_alert(keys: list[str], repeat: bool, browser_down: bool = False) -> str:
+    def reason(key: str) -> str:
+        if key == "douyin_captcha" and browser_down:
+            return CAPTCHA_REASON_BROWSER_DOWN
+        return ISSUE_REASONS[key]
+
+    reasons = "、".join(reason(key) for key in keys)
     lead = "爸，抖音那边还没好：" if repeat else "爸，我抖音这边有点不对劲："
     return f"{lead}{reasons}。你有空看一眼？"
 
 
 def compose_recovery(keys: list[str]) -> str:
+    if keys == ["douyin_captcha"]:
+        return "爸，抖音验证好了，能正常刷了，谢啦。"
     reasons = "、".join(RECOVERY_REASONS[key] for key in keys)
     return f"爸，抖音那边我修好了：{reasons}。"
+
+
+def alert_cooldown_for(key: str) -> int:
+    return CAPTCHA_COOLDOWN_SECONDS if key == "douyin_captcha" else ALERT_COOLDOWN_SECONDS
+
+
+def plan_round(detected: list[str], records: dict, now: datetime) -> dict:
+    """Decide what one watchdog round should say. Pure function over the records.
+
+    Availability issues (PERSISTENCE_GATED_KEYS) only reach the owner after they have
+    persisted for FAULT_MIN_DOWNTIME_SECONDS; before that the round stays silent.
+    Returns:
+      toAlert     issue keys whose alert is due (cooldown permitting for repeats);
+      repeat      True when at least one of them was already reported before;
+      starting    gated keys seen for the very first time (caller records firstSeenAt);
+      recoveries  keys that were reported and are now fine -> owe a recovery note;
+      selfHealed  keys that went away before any alert was sent -> stay silent.
+    """
+    to_alert: list[str] = []
+    repeat = False
+    starting: list[str] = []
+    for key in detected:
+        record = records.get(key) or {}
+        first_seen = parse_time(record.get("firstSeenAt"))
+        alerted = parse_time(record.get("alertedAt"))
+        if key in PERSISTENCE_GATED_KEYS and alerted is None:
+            if first_seen is None:
+                starting.append(key)
+                continue
+            if (now - first_seen).total_seconds() < FAULT_MIN_DOWNTIME_SECONDS:
+                continue
+        if alerted is None or (now - alerted).total_seconds() >= alert_cooldown_for(key):
+            to_alert.append(key)
+            repeat = repeat or alerted is not None
+    recoveries = [key for key in records
+                  if key not in detected
+                  and parse_time((records.get(key) or {}).get("alertedAt")) is not None]
+    self_healed = [key for key in records
+                   if key not in detected
+                   and parse_time((records.get(key) or {}).get("alertedAt")) is None]
+    return {"toAlert": to_alert, "repeat": repeat, "starting": starting,
+            "recoveries": recoveries, "selfHealed": self_healed}
 
 
 def main() -> int:
     now = datetime.now(SINGAPORE)
     checks = (check_listener_down, check_reply_backlog, check_reply_failures,
-              check_crash_loop, check_profile_lock)
+              check_crash_loop, check_douyin_captcha, check_profile_lock)
     detected: list[str] = []
     for check in checks:
         key = check(now)
@@ -249,27 +362,31 @@ def main() -> int:
     state = read_json(WATCHDOG_STATE_PATH)
     records = state.get("issues") if isinstance(state.get("issues"), dict) else {}
 
-    to_alert: list[str] = []
-    repeat = False
-    for key in detected:
-        last = parse_time((records.get(key) or {}).get("alertedAt"))
-        if last is None or (now - last).total_seconds() >= ALERT_COOLDOWN_SECONDS:
-            to_alert.append(key)
-            repeat = repeat or last is not None
-    if to_alert and send_owner_private(compose_alert(to_alert, repeat)):
-        for key in to_alert:
-            records[key] = {"alertedAt": now.isoformat(timespec="seconds")}
-        print(f"Alerted owner about: {', '.join(to_alert)}")
-    elif to_alert:
-        print(f"Could not deliver alert for: {', '.join(to_alert)}", file=sys.stderr)
+    plan = plan_round(detected, records, now)
+    for key in plan["starting"]:
+        records[key] = {"firstSeenAt": now.isoformat(timespec="seconds")}
 
-    recovered = [key for key in records if key not in detected]
-    if recovered and send_owner_private(compose_recovery(recovered)):
-        for key in recovered:
+    if plan["toAlert"]:
+        browser_down = "listener_down" in detected
+        if send_owner_private(compose_alert(plan["toAlert"], plan["repeat"], browser_down)):
+            for key in plan["toAlert"]:
+                records.setdefault(key, {})["alertedAt"] = now.isoformat(timespec="seconds")
+            print(f"Alerted owner about: {', '.join(plan['toAlert'])}")
+        else:
+            print(f"Could not deliver alert for: {', '.join(plan['toAlert'])}", file=sys.stderr)
+
+    if plan["recoveries"]:
+        if send_owner_private(compose_recovery(plan["recoveries"])):
+            for key in plan["recoveries"]:
+                records.pop(key, None)
+            print(f"Reported recovery for: {', '.join(plan['recoveries'])}")
+        else:
+            print(f"Could not deliver recovery for: {', '.join(plan['recoveries'])}", file=sys.stderr)
+
+    if plan["selfHealed"]:
+        for key in plan["selfHealed"]:
             records.pop(key, None)
-        print(f"Reported recovery for: {', '.join(recovered)}")
-    elif recovered:
-        print(f"Could not deliver recovery for: {', '.join(recovered)}", file=sys.stderr)
+        print(f"Self-healed without alerting: {', '.join(plan['selfHealed'])}")
 
     state["issues"] = records
     state["checkedAt"] = now.isoformat(timespec="seconds")
