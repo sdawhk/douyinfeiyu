@@ -70,8 +70,14 @@ try {
     }
 
     # Second line of defence: an actual python process or a live lock holder.
+    # Match by COMMAND LINE, not by process name: the venv python.exe shim re-execs the
+    # real interpreter as python3.12.exe (and Store installs may use other names), so a
+    # name filter misses the live listener. On 2026-11-12 that mismatch made every guard
+    # (here and in run_daily.ps1) believe the listener was down, so the scheduled task
+    # launched a second browser on the same profile every 15 minutes and killed the
+    # listener each time. Any *python* process carrying our script path is the listener.
     $listenerCommand = [regex]::Escape((Join-Path $PSScriptRoot 'douyin_share.py'))
-    $running = Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue |
+    $running = Get-CimInstance Win32_Process -Filter "Name LIKE '%python%'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match $listenerCommand -and $_.CommandLine -match '--listen-inbox' } |
         Select-Object -First 1
     if ($running) {

@@ -5,8 +5,11 @@ $logPath = Join-Path $logDir 'scheduled.log'
 if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -gt 10MB) {
     Move-Item -LiteralPath $logPath -Destination "$logPath.1" -Force
 }
+# Match by COMMAND LINE, not by process name: the venv python.exe shim re-execs the real
+# interpreter as python3.12.exe, so a name filter misses the live listener and this task
+# would open a second browser on the same profile every 15 minutes, killing the listener.
 $listenerCommand = [regex]::Escape((Join-Path $PSScriptRoot 'douyin_share.py'))
-$listener = Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue |
+$listener = Get-CimInstance Win32_Process -Filter "Name LIKE '%python%'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -match $listenerCommand -and $_.CommandLine -match '--listen-inbox' } |
     Select-Object -First 1
 if ($listener) {

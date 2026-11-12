@@ -427,7 +427,8 @@ def log_inbound_diagnostic(event: dict, video_context: dict | None, context_sour
                            outcome: str, context_source_key: str = "",
                            path: Path = INBOUND_DIAGNOSTICS_PATH,
                            batch_size: int = 1, attempt: int = 0,
-                           latency_seconds: float | None = None) -> None:
+                           latency_seconds: float | None = None,
+                           extra: dict | None = None) -> None:
     """Record message handling metadata without storing private message text or video content."""
     identity = str(event.get("id", ""))
     video_id = str((video_context or {}).get("url", "")).rsplit("/", 1)[-1]
@@ -446,6 +447,8 @@ def log_inbound_diagnostic(event: dict, video_context: dict | None, context_sour
     }
     if latency_seconds is not None:
         row["latencySeconds"] = round(float(latency_seconds), 1)
+    if extra:
+        row.update(extra)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as stream:
@@ -507,6 +510,30 @@ def load_config() -> dict:
             raise RuntimeError(f"daily_browse.{flag} must be true or false")
     if not isinstance(daily["token_file"], str) or not daily["token_file"].strip():
         raise RuntimeError("daily_browse.token_file must be a path")
+    autonomous_browse = cfg.setdefault("autonomous_browse", {})
+    autonomous_browse.setdefault("enabled", False)
+    autonomous_browse.setdefault("check_interval_minutes", 60)
+    autonomous_browse.setdefault("start_time", "09:00")
+    autonomous_browse.setdefault("end_time", "23:00")
+    autonomous_browse.setdefault("max_browses_per_day", 10)
+    autonomous_browse.setdefault("minutes", 10)
+    autonomous_browse.setdefault("decision_url", "http://127.0.0.1:3101/douyin/autonomous-browse-check")
+    if not isinstance(autonomous_browse["enabled"], bool):
+        raise RuntimeError("autonomous_browse.enabled must be true or false")
+    if not isinstance(autonomous_browse["check_interval_minutes"], int) or not 60 <= autonomous_browse["check_interval_minutes"] <= 720:
+        raise RuntimeError("autonomous_browse.check_interval_minutes must be between 60 and 720")
+    for field in ("start_time", "end_time"):
+        if not isinstance(autonomous_browse[field], str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", autonomous_browse[field]):
+            raise RuntimeError(f"autonomous_browse.{field} must use HH:MM (00:00-23:59)")
+    if autonomous_browse["end_time"] <= autonomous_browse["start_time"]:
+        raise RuntimeError("autonomous_browse.end_time must be later than start_time")
+    if not isinstance(autonomous_browse["max_browses_per_day"], int) or not 1 <= autonomous_browse["max_browses_per_day"] <= 10:
+        raise RuntimeError("autonomous_browse.max_browses_per_day must be between 1 and 10")
+    if not isinstance(autonomous_browse["minutes"], int) or not 1 <= autonomous_browse["minutes"] <= 10:
+        raise RuntimeError("autonomous_browse.minutes must be between 1 and 10")
+    decision_endpoint = urlparse(str(autonomous_browse["decision_url"]))
+    if decision_endpoint.scheme != "http" or decision_endpoint.hostname not in {"127.0.0.1", "localhost"}:
+        raise RuntimeError("autonomous_browse.decision_url must use loopback HTTP")
     inbound = cfg.setdefault("inbound", {})
     inbound.setdefault("merge_window_seconds", INBOUND_MERGE_WINDOW_SECONDS)
     inbound.setdefault("min_send_gap_seconds", INBOUND_MIN_SEND_GAP_SECONDS)
@@ -527,6 +554,16 @@ def load_config() -> dict:
         raise RuntimeError(f"browse_comments.limit must be between 1 and {COMMENT_MAX_LIMIT}")
     if not isinstance(comments["max_videos"], int) or not 0 <= comments["max_videos"] <= 10:
         raise RuntimeError("browse_comments.max_videos must be between 0 and 10")
+    engagement = cfg.setdefault("autonomous_engagement", {})
+    engagement.setdefault("enabled", False)
+    engagement.setdefault("max_likes_per_day", 2)
+    engagement.setdefault("max_comments_per_day", 1)
+    if not isinstance(engagement["enabled"], bool):
+        raise RuntimeError("autonomous_engagement.enabled must be true or false")
+    if not isinstance(engagement["max_likes_per_day"], int) or not 0 <= engagement["max_likes_per_day"] <= 2:
+        raise RuntimeError("autonomous_engagement.max_likes_per_day must be between 0 and 2")
+    if not isinstance(engagement["max_comments_per_day"], int) or not 0 <= engagement["max_comments_per_day"] <= 1:
+        raise RuntimeError("autonomous_engagement.max_comments_per_day must be 0 or 1")
     topics = cfg.setdefault("browse_topics", {})
     topics.setdefault("pool", [])
     topics.setdefault("blacklist", [])
@@ -2139,9 +2176,85 @@ def save_daily_browse_state(state: dict) -> None:
     DAILY_BROWSE_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def daily_browse_due(daily: dict, state: dict, now: datetime) -> bool:
-    return bool(daily.get("enabled")) and state.get("last_date") != now.date().isoformat() \
+def daily_browse_due(daily: dict, state: dict, now: datetime,
+                     autonomous: dict | None = None) -> bool:
+    if not daily.get("enabled"):
+        return False
+    if isinstance(autonomous, dict) and autonomous.get("enabled") is True:
+        today = now.date().isoformat()
+        count = int((state.get("autonomous_browse_count_by_day") or {}).get(today, 0) or 0)
+        if count >= int(autonomous.get("max_browses_per_day") or 1):
+            return False
+        if now.strftime("%H:%M") < str(autonomous.get("start_time", "09:00")) \
+                or now.strftime("%H:%M") >= str(autonomous.get("end_time", "22:00")):
+            return False
+        last_check = float(state.get("autonomous_last_check_at") or 0)
+        interval = int(autonomous.get("check_interval_minutes") or 240) * 60
+        return time_module.time() - last_check >= interval
+    return state.get("last_date") != now.date().isoformat() \
         and now.strftime("%H:%M") >= str(daily.get("time", "20:30"))
+
+
+def request_autonomous_browse_decision(cfg: dict, state: dict, today: str) -> dict:
+    autonomous = cfg.get("autonomous_browse") or {}
+    history = read_json(SHARED_INTEREST_PATH, {"watchedVideos": []})
+    watched = history.get("watchedVideos", []) if isinstance(history, dict) else []
+    recent_videos = []
+    for row in watched[-5:] if isinstance(watched, list) else []:
+        item = clean_observation(row) if isinstance(row, dict) else None
+        if not item:
+            continue
+        recent_videos.append({
+            "title": item["title"], "author": item["author"],
+            "summary": item["contentSummary"], "transcript": item["transcript"][:400],
+            "tags": item["tags"], "watchedSeconds": item["watchedSeconds"],
+        })
+    if not recent_videos:
+        return {"action": "skip", "topic": "", "thought": "还没有足够的真实观看线索，现在没特别想刷的。"}
+
+    token_path = Path(str((cfg.get("daily_browse") or {}).get("token_file") or "../bridge/state/console-token"))
+    if not token_path.is_absolute():
+        token_path = ROOT / token_path
+    token = token_path.read_text(encoding="utf-8").strip()
+    if not token:
+        raise RuntimeError("Local bridge console token is empty")
+    endpoint = str(autonomous.get("decision_url", "http://127.0.0.1:3101/douyin/autonomous-browse-check"))
+    reflections = state.get("autonomous_reflections", [])
+    body = json.dumps({
+        "date": today,
+        "recentVideos": recent_videos,
+        "recentReflections": reflections[-4:] if isinstance(reflections, list) else [],
+        "topicBlacklist": (cfg.get("browse_topics") or {}).get("blacklist", []),
+        "maxMinutes": int(autonomous.get("minutes") or 10),
+    }, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(endpoint, data=body, headers={
+        "Content-Type": "application/json", "x-console-token": token,
+    }, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"browse decision API HTTP {exc.code}: {detail}") from exc
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError("browse decision API returned no confirmed decision")
+    action = result.get("action") if result.get("action") in {"browse", "skip"} else "skip"
+    topic = str(result.get("topic", "")).strip()[:20] if action == "browse" else ""
+    thought = re.sub(r"[\r\n\t\0-\x1f]+", " ", str(result.get("thought", ""))).strip()[:180]
+    try:
+        minutes = int(result.get("minutes", 0)) if action == "browse" else 0
+    except (TypeError, ValueError):
+        minutes = 0
+    if action == "browse" and not topic:
+        action = "skip"
+        thought = "没有找到足够具体、确实想看的主题，这次先不刷。"
+    if action == "browse":
+        topic = validate_browse_topic(topic, cfg)
+        if not 1 <= minutes <= 10:
+            action = "skip"
+            topic = ""
+            thought = "现在没有合适的浏览时长安排，这次先不刷。"
+    return {"action": action, "topic": topic, "thought": thought, "minutes": minutes if action == "browse" else 0}
 
 
 def sanitize_daily_rows(rows: list[dict]) -> list[dict]:
@@ -2165,6 +2278,7 @@ def sanitize_daily_rows(rows: list[dict]) -> list[dict]:
             "watched_seconds": watched,
             "observed_at": str(row.get("observed_at", ""))[:40],
             "content_summary": re.sub(r"\s+", " ", str(row.get("content_summary", ""))).strip()[:400],
+            "transcript": re.sub(r"\s+", " ", str(row.get("transcript", ""))).strip()[:600],
             "tags": [re.sub(r"\s+", " ", str(tag)).strip()[:24] for tag in tags[:5]
                      if str(tag).strip()],
         })
@@ -2173,7 +2287,9 @@ def sanitize_daily_rows(rows: list[dict]) -> list[dict]:
     return cleaned
 
 
-def post_daily_report(cfg: dict, date_text: str, rows: list[dict], share_to_owner: bool, post_qzone: bool) -> bool:
+def post_daily_report(cfg: dict, date_text: str, rows: list[dict], share_to_owner: bool,
+                      post_qzone: bool, minutes: int | None = None,
+                      autonomous_thought: str = "", autonomous_topic: str = "") -> bool:
     daily = cfg.get("daily_browse") or {}
     endpoint = str(daily.get("report_url", "http://127.0.0.1:3101/douyin/daily-report"))
     parsed = urlparse(endpoint)
@@ -2187,8 +2303,10 @@ def post_daily_report(cfg: dict, date_text: str, rows: list[dict], share_to_owne
         raise RuntimeError("Local bridge console token is empty")
     body = json.dumps({
         "date": date_text,
-        "minutes": int(daily["minutes"]),
+        "minutes": int(minutes if minutes is not None else daily["minutes"]),
         "videos": rows,
+        "autonomousThought": str(autonomous_thought)[:180],
+        "autonomousTopic": str(autonomous_topic)[:20],
         "shareToOwner": bool(share_to_owner),
         "postQzone": bool(post_qzone),
     }, ensure_ascii=False).encode("utf-8")
@@ -2196,7 +2314,7 @@ def post_daily_report(cfg: dict, date_text: str, rows: list[dict], share_to_owne
         "Content-Type": "application/json", "x-console-token": token,
     }, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=300) as response:
+        with urllib.request.urlopen(request, timeout=600) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
@@ -2230,7 +2348,10 @@ def flush_daily_report(cfg: dict, state: dict) -> bool:
         save_daily_browse_state(state)
         return True
     try:
-        delivered = post_daily_report(cfg, date_text, rows, share_to_owner, post_qzone)
+        delivered = post_daily_report(cfg, date_text, rows, share_to_owner, post_qzone,
+                                      minutes=int(pending.get("minutes") or cfg["daily_browse"]["minutes"]),
+                                      autonomous_thought=str(pending.get("autonomous_thought", "")),
+                                      autonomous_topic=str(pending.get("autonomous_topic", "")))
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"Daily report failed: {exc}", file=sys.stderr)
         return False
@@ -2254,11 +2375,49 @@ def record_daily_failure(state: dict, today: str, message: str, max_attempts: in
 
 def run_daily_browse(cfg: dict, state: dict, now: datetime | None = None) -> int:
     daily = cfg.get("daily_browse") or {}
+    autonomous = cfg.get("autonomous_browse") or {}
     now = now or datetime.now(SINGAPORE)
     today = now.date().isoformat()
+    topic = ""
+    browse_minutes = int(daily["minutes"])
+    thought = ""
+    if autonomous.get("enabled") is True:
+        state["autonomous_last_check_at"] = now.timestamp()
+        save_daily_browse_state(state)
+        try:
+            decision = request_autonomous_browse_decision(cfg, state, today)
+        except Exception as exc:
+            state["autonomous_last_action"] = "decision-error"
+            state["autonomous_last_thought"] = ""
+            save_daily_browse_state(state)
+            print(f"Autonomous browse reflection failed; no browse started: {exc}", file=sys.stderr)
+            return 0
+        thought = decision["thought"]
+        topic = decision["topic"]
+        state["autonomous_last_action"] = decision["action"]
+        state["autonomous_last_topic"] = topic
+        state["autonomous_last_thought"] = thought
+        reflections = state.get("autonomous_reflections", [])
+        if not isinstance(reflections, list):
+            reflections = []
+        reflections.append({"date": today, "action": decision["action"], "topic": topic, "thought": thought})
+        state["autonomous_reflections"] = reflections[-20:]
+        save_daily_browse_state(state)
+        if decision["action"] != "browse":
+            print(f"Autonomous browse reflection: skip ({thought or 'no current curiosity'}).")
+            return 0
+        browse_minutes = int(decision["minutes"])
+        counts = state.get("autonomous_browse_count_by_day", {})
+        if not isinstance(counts, dict):
+            counts = {}
+        counts[today] = int(counts.get(today, 0) or 0) + 1
+        state["autonomous_browse_count_by_day"] = {key: value for key, value in counts.items()
+                                                   if key == today}
+        save_daily_browse_state(state)
+        print(f"Autonomous browse reflection: browse topic={topic} minutes={browse_minutes} thought={thought}")
     try:
-        rows = browse_session(int(daily["minutes"]), wait_seconds=300,
-                              comment_options=cfg.get("browse_comments") or {})
+        rows = browse_session(browse_minutes, wait_seconds=300,
+                              comment_options=cfg.get("browse_comments") or {}, topic=topic)
     except RuntimeError as exc:
         if "already in use" in str(exc):
             print("Daily browse deferred: browser profile is busy; retrying on the next scheduled check.",
@@ -2285,7 +2444,10 @@ def run_daily_browse(cfg: dict, state: dict, now: datetime | None = None) -> int
         return 0
     state["pending_report"] = {
         "date": today,
+        "minutes": browse_minutes,
         "videos": cleaned,
+        "autonomous_thought": thought,
+        "autonomous_topic": topic,
         "share_to_owner": bool(daily.get("share_to_owner", True)),
         "post_qzone": bool(daily.get("post_qzone", True)),
     }
@@ -2312,7 +2474,7 @@ def run_scheduled(poll_inbox: bool = True) -> int:
     daily_state = read_json(DAILY_BROWSE_STATE_PATH, {})
     now = datetime.now(SINGAPORE)
     flush_daily_report(cfg, daily_state)
-    if daily_browse_due(daily_cfg, daily_state, now):
+    if daily_browse_due(daily_cfg, daily_state, now, cfg.get("autonomous_browse")):
         return run_daily_browse(cfg, daily_state, now)
     today = now.date().isoformat()
     slot = claim_due_slot(state, now) if cfg["scheduled_enabled"] else None
@@ -2528,6 +2690,15 @@ def process_inbox_page(page, editor, cfg: dict, selectors: dict, state: dict,
     rows = read_inbound_rows(page, selectors)
     cached_snapshot = state.get("inbound_row_snapshot")
     assigned, new_snapshot, matched = assign_stable_message_ids(rows, cached_snapshot)
+    # The stable id must live on the row itself: build_inbound_event (and everything
+    # downstream - batch ids, the bridge dedupe key, consume bookkeeping) reads
+    # row["id"], which read_inbound_rows fills only from the platform's
+    # data-message-id. Douyin stopped rendering that attribute, so fingerprint-generated
+    # ids never reached the reply chain and messages were read but never answered
+    # (2026-11-12: every recent row keyed as t:/c: fingerprints, zero platform ids).
+    for item in assigned:
+        if item["id"]:
+            item["row"]["id"] = item["id"]
     if state.get("inbound_id_scheme") != INBOUND_ID_SCHEME:
         # One-time migration: `dom:<page-index>` keys cannot be compared with stable keys.
         # The baseline is rebuilt from the currently visible rows. Consequence: messages the
@@ -2545,11 +2716,21 @@ def process_inbox_page(page, editor, cfg: dict, selectors: dict, state: dict,
         state["inbound_row_snapshot"] = new_snapshot
     if not state.get("inbound_baseline_initialized") and rows:
         baseline = [item["id"] for item in assigned if item["id"]]
-        state["inbound_reply_attempts"] = baseline[-INBOUND_STATE_MAX_IDS:]
+        # 基线重建不能再无声吞掉全部可见消息：这次建到了哪些 id 必须落一行诊断；
+        # 且最末一条保持可回复——宁可多回一条，也不把刚到的新消息当历史吞掉。
+        log_inbound_diagnostic({"id": baseline[-1] if baseline else "", "isVideo": False}, None, "none",
+                               "baseline_rebuilt", "", batch_size=max(1, len(baseline)),
+                               extra={"baselineIds": baseline[-12:], "baselineSize": len(baseline)})
+        swallow = baseline[:-1] if len(baseline) > 1 else []
+        state["inbound_reply_attempts"] = swallow[-INBOUND_STATE_MAX_IDS:]
         state["inbound_baseline_initialized"] = True
         write_inbound_state(INBOUND_STATE_PATH, state)
-        print(f"Saved an initial baseline of {len(baseline)} existing message IDs; no reply sent.")
-        return 0
+        print(f"Saved an initial baseline of {len(baseline)} existing message IDs; the newest row stays answerable.")
+        if len(baseline) <= 1:
+            return 0
+        # Fall through so the newest row enters the pending loop this same cycle. Its id is
+        # not in inbound_reply_attempts and after_known is forced below.
+        assigned[-1]["after_known"] = True
     if rows and cached_snapshot and matched == 0:
         # The panel is showing a slice that shares nothing with the previous snapshot (it was
         # parked at the top of the history before the scroll fix). Those rows are history, but
@@ -2564,6 +2745,7 @@ def process_inbox_page(page, editor, cfg: dict, selectors: dict, state: dict,
     previous_ids = {str(item.get("id")) for item in (cached_snapshot or []) if isinstance(item, dict)}
 
     pending: list[dict] = []
+    swallowed_as_history: list[str] = []
     for item in assigned:
         message_id = item["id"]
         if not message_id or message_id in consumed:
@@ -2571,12 +2753,19 @@ def process_inbox_page(page, editor, cfg: dict, selectors: dict, state: dict,
         if not item["after_known"]:
             consumed.add(message_id)
             state["inbound_reply_attempts"].append(message_id)
+            swallowed_as_history.append(message_id)
             continue
         first_seen = parse_inbound_time(state["inbound_seen"].get(message_id))
         if first_seen is None or first_seen > now:
             first_seen = now
             state["inbound_seen"][message_id] = now.isoformat(timespec="seconds")
         pending.append({"row": item["row"], "id": message_id, "firstSeen": first_seen})
+    if swallowed_as_history:
+        # 无声消失到此为止：哪些 id 被判成历史、为什么，必须留下一行诊断。
+        log_inbound_diagnostic({"id": swallowed_as_history[-1], "isVideo": False}, None, "none",
+                               "swallowed_as_history", "", batch_size=len(swallowed_as_history),
+                               extra={"ids": swallowed_as_history[:12]})
+        print(f"Consumed {len(swallowed_as_history)} row(s) above the known anchor as history; ids written to diagnostics.")
     if len(state["inbound_reply_attempts"]) > INBOUND_STATE_MAX_IDS:
         state["inbound_reply_attempts"] = state["inbound_reply_attempts"][-INBOUND_STATE_MAX_IDS:]
     lost = [message_id for message_id in previous_ids
@@ -2754,7 +2943,7 @@ def run_inbox(inspect_only: bool) -> int:
 def scheduled_work_due(cfg: dict) -> bool:
     now = datetime.now(SINGAPORE)
     daily_state = read_json(DAILY_BROWSE_STATE_PATH, {})
-    if daily_browse_due(cfg.get("daily_browse") or {}, daily_state, now):
+    if daily_browse_due(cfg.get("daily_browse") or {}, daily_state, now, cfg.get("autonomous_browse")):
         return True
     if not cfg["scheduled_enabled"]:
         return False

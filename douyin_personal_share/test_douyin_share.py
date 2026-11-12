@@ -37,7 +37,9 @@ from douyin_share import (
     inbound_selectors,
     read_inbound_rows,
     assign_stable_message_ids,
+    process_inbox_page,
     inbound_pending_batch,
+    INBOUND_ID_SCHEME,
     browser_profile_lock,
     clean_observation,
     latest_unsent_video,
@@ -303,6 +305,88 @@ class ShareLogicTests(unittest.TestCase):
         assigned, _, _ = assign_stable_message_ids(history, snapshot)
         self.assertFalse(assigned[0]["after_known"])
         self.assertTrue(all(item["after_known"] for item in assigned[1:]))
+
+    def _run_inbox_round(self, state, page_rows, reply_text="嗯，我在。"):
+        """One process_inbox_page call against a fake DOM that renders no data-message-id."""
+        class PollPage:
+            def evaluate(self, _script, _selectors):
+                return [dict(row) for row in page_rows]
+
+        selectors = {
+            "message_selector": ".row", "message_id_attribute": "data-message-id",
+            "incoming_selector": ".row:not(.me)", "text_selector": ".text",
+        }
+        cfg = {"recipient_handle": "dyecfcykdwea",
+               "inbound": {"min_send_gap_seconds": 20},
+               "reply_backend": {"enabled": True}}
+        outcomes = []
+
+        def fake_log(event, _video, _source, outcome, *_args, **_kwargs):
+            outcomes.append(outcome)
+
+        with patch('douyin_share.write_inbound_state'), \
+                patch('douyin_share.scroll_inbox_to_bottom'), \
+                patch('douyin_share.recent_shared_video_context', return_value=(None, "none")), \
+                patch('douyin_share.request_inbound_reply', return_value=reply_text) as request, \
+                patch('douyin_share.send_text_in_open_chat'), \
+                patch('douyin_share.log_inbound_diagnostic', side_effect=fake_log):
+            result = process_inbox_page(PollPage(), object(), cfg, selectors, state, merge_window=0)
+        return result, outcomes, request
+
+    def test_new_message_without_platform_id_is_replied_after_restart(self):
+        # Douyin stopped rendering data-message-id: rows carry no platform id, so the
+        # stable fingerprint ids must still reach the reply chain after a restart.
+        base = [{"platform_id": "", "index": 0, "text": "早上好"},
+                {"platform_id": "", "index": 1, "text": "在吗"}]
+        _, snapshot, _ = assign_stable_message_ids(base, None)
+        known = [item["id"] for item in assign_stable_message_ids(base, snapshot)[0]]
+        state = {"inbound_baseline_initialized": True,
+                 "inbound_row_snapshot": snapshot,
+                 "inbound_reply_attempts": known[:],
+                 "inbound_seen": {}}
+        appended = base + [{"platform_id": "", "index": 2, "text": "晚上吃什么"}]
+        new_id = assign_stable_message_ids(appended, snapshot)[0][-1]["id"]
+        state["inbound_id_scheme"] = INBOUND_ID_SCHEME
+        result, outcomes, request = self._run_inbox_round(state, appended)
+        self.assertEqual(result, 0)
+        self.assertEqual(request.call_args.args[2], new_id)
+        self.assertIn("reply_sent", outcomes)
+        self.assertNotIn("swallowed_as_history", outcomes)
+        self.assertTrue(state["inbound_last_reply_at"])
+        self.assertIn(new_id, state["inbound_reply_attempts"])
+
+    def test_baseline_rebuild_keeps_newest_answerable_and_logs_ids(self):
+        # State loss must not silently swallow every visible message: the baseline is
+        # recorded in diagnostics and the newest row stays answerable.
+        rows = [{"platform_id": "", "index": 0, "text": "第一条"},
+                {"platform_id": "", "index": 1, "text": "第二条"},
+                {"platform_id": "", "index": 2, "text": "第三条"}]
+        state = {}
+        result, outcomes, request = self._run_inbox_round(state, rows)
+        self.assertEqual(result, 0)
+        self.assertIn("baseline_rebuilt", outcomes)
+        self.assertIn("reply_requested", outcomes)
+        self.assertIn("reply_sent", outcomes)
+        newest = assign_stable_message_ids(rows, None)[0][-1]["id"]
+        self.assertEqual(request.call_args.args[2], newest)
+        self.assertTrue(state["inbound_last_reply_at"])
+        self.assertNotIn(newest, state["inbound_reply_attempts"][:2])
+
+    def test_history_rows_are_consumed_with_a_diagnostic_line(self):
+        base = [{"platform_id": "", "index": 0, "text": "旧话题一"},
+                {"platform_id": "", "index": 1, "text": "旧话题二"}]
+        _, snapshot, _ = assign_stable_message_ids(base, None)
+        known = [item["id"] for item in assign_stable_message_ids(base, snapshot)[0]]
+        state = {"inbound_baseline_initialized": True,
+                 "inbound_row_snapshot": snapshot,
+                 "inbound_reply_attempts": known[:],
+                 "inbound_seen": {}}
+        revealed = [{"platform_id": "", "index": 0, "text": "更早的历史"}] + base
+        state["inbound_id_scheme"] = INBOUND_ID_SCHEME
+        result, outcomes, request = self._run_inbox_round(state, revealed)
+        self.assertEqual(result, 0)
+        self.assertIn("swallowed_as_history", outcomes)
+        self.assertEqual(request.call_count, 0)
 
     def test_inbound_batch_merges_a_burst_and_caps_the_round(self):
         now = datetime(2026, 11, 11, 12, 0, tzinfo=SINGAPORE)

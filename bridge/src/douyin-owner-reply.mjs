@@ -1,7 +1,15 @@
 import { dirname } from 'node:path';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { stripStickerDirectives } from './reply-sticker-token.mjs';
 import { commitmentClaimIssue, stripInternalChatMarkers } from './reply-output-safety.mjs';
+
+// Hard ceiling for one model generation inside the gate. The python caller
+// (request_inbound_reply) aborts its HTTP request after 260 s, so this must stay
+// below it: otherwise a stuck generation would let the request die silently with no
+// failure record anywhere. On timeout the failure is appended to a durable jsonl
+// next to the state file and the error propagates, so the caller can retry with a
+// fresh (:rN) message id.
+const GATE_GENERATE_TIMEOUT_MS = 250_000;
 
 const cleanHandle = (value) => String(value ?? '').trim().replace(/^@/, '');
 
@@ -41,6 +49,36 @@ export function createDouyinOwnerReplyGate({ configuredHandle, ownerId, statePat
   }
   const inFlight = new Set();
 
+  function appendFailure(record) {
+    // 落盘失败绝不能反过来打断回复链路本身。
+    try {
+      appendFileSync(`${statePath}.failures.jsonl`, `${JSON.stringify(record)}\n`, 'utf8');
+    } catch { /* best effort */ }
+  }
+
+  const generateWithGuard = async (payload) => {
+    let timer = null;
+    try {
+      return await Promise.race([
+        generate(payload),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(
+            `Douyin reply generation timed out after ${GATE_GENERATE_TIMEOUT_MS / 1000}s`)), GATE_GENERATE_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (error) {
+      appendFailure({
+        at: new Date().toISOString(),
+        messageId: String(payload?.messageId ?? ''),
+        stage: payload?.correction ? 'correction' : 'generate',
+        error: String(error?.message ?? error).slice(0, 300),
+      });
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
   function readState() {
     try {
       const parsed = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -76,13 +114,13 @@ export function createDouyinOwnerReplyGate({ configuredHandle, ownerId, statePat
       state.consumedMessageIds.push(id);
       persist(state.consumedMessageIds);
       // 最后一道发送前兜底：抖音发送端只接受纯文本，任何 QQ 内部标记都不能进入消息正文。
-      const generated = String(await generate({ ownerId: String(ownerId), messageId: id, text: content,
+      const generated = String(await generateWithGuard({ ownerId: String(ownerId), messageId: id, text: content,
         videoContext: safeVideoContext })).trim();
       let response = stripInternalChatMarkers(stripStickerDirectives(generated)).trim();
       if (!response) throw new Error('Model returned an empty reply');
       // 没有实际结果却声称“任务已在跑/马上给你”时，纠正一次；仍不合格走明确兜底。
       if (commitmentClaimIssue(response)) {
-        const retried = String(await generate({
+        const retried = String(await generateWithGuard({
           ownerId: String(ownerId),
           messageId: `${id}:retry`,
           text: content,
