@@ -9,6 +9,20 @@
     "share_to_owner": true,
     "post_qzone": true
   },
+  "autonomous_browse": {
+    "enabled": false,
+    "check_interval_minutes": 60,
+    "start_time": "09:00",
+    "end_time": "23:00",
+    "max_browses_per_day": 10,
+    "minutes": 10,
+    "decision_url": "http://127.0.0.1:3101/douyin/autonomous-browse-check"
+  },
+  "autonomous_engagement": {
+    "enabled": false,
+    "max_likes_per_day": 2,
+    "max_comments_per_day": 1
+  },
   "scheduled_enabled": true,
   "reply_backend": {
     "enabled": false,

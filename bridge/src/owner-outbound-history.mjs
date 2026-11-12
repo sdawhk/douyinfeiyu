@@ -7,7 +7,8 @@ export const OUTBOUND_MAX_ENTRIES = 6;
 export const OUTBOUND_MAX_CHARS = 160;
 
 const SOURCE_LABELS = new Map([
-  ['proactive-greeting', '主动问候'],
+  ['proactive-greeting', '主动联系'],
+  ['proactive-thought', '主动联系'],
   ['douyin-daily', '抖音日报'],
   ['song-notice', '点歌']
 ]);
@@ -72,6 +73,6 @@ export function formatOutboundForPrompt(entries) {
  */
 export function exchangeInputFor(text) {
   const value = String(text ?? '');
-  if (/^【主动私聊主人】/.test(value)) return '（你主动发起）';
+  if (/^【(?:主动私聊主人|自主联系评估)】/.test(value)) return '（你主动发起）';
   return value.replace(/\s+/g, ' ').slice(0, 220);
 }
