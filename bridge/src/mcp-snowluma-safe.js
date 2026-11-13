@@ -31,6 +31,9 @@ import { DRAW_MODERATION_PROMPT } from './image-content-policy.mjs';
 import { inspectStickerImage } from './sticker-vision.mjs';
 import { createDrawToolQuota, decideDrawToolAccess, normalizeDrawToolArgs, DRAW_SIZE_OPTIONS } from './image-draw-tool.mjs';
 import { findImageMeta, formatSelfDrawnTag, sha256Of } from './image-gen-meta.mjs';
+import { isExactSongMatch, makeExistingSongClip, searchExistingSongs } from './song-cover.mjs';
+import { applyLiuyingVoiceDetailed, LIUYING_SINGING_VOCAL_PROFILE } from './rvc-singing.mjs';
+import { resolveSingingPitchPlan } from './rvc-pitch.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -294,8 +297,68 @@ function cleanOwnerMemoryText(value, label = '记忆内容') {
 const server = new McpServer({ name: 'snowluma-safe', version: '0.1.0' });
 
 server.tool(
+  'qq_send_song',
+  '仅主人 QQ 私聊可用。按歌名搜索现成歌曲并把选中的片段作为 QQ 语音发到当前主人私聊。mode=cover 会制作流萤音色翻唱；mode=original 发原唱。先用本工具选择具体歌曲，不要只在回复里声称已经发送。仅当主人本轮明确要求发歌/唱歌时调用；单段最多 60 秒。',
+  {
+    key: z.string().describe('当前主人私聊会话 key，格式 private:主人QQ号'),
+    token: z.string().describe('当前会话令牌'),
+    song: z.string().trim().min(1).max(80).describe('要发送的准确歌名，可包含版本信息'),
+    mode: z.enum(['cover', 'original']).default('cover').describe('cover=流萤音色翻唱；original=原唱片段'),
+    seconds: z.number().int().min(5).max(60).default(30).describe('语音片段长度，5 至 60 秒'),
+    candidate: z.number().int().min(1).max(8).default(1).describe('匹配到多个版本时选择的候选序号')
+  },
+  async ({ key, token, song, mode, seconds, candidate }) => {
+    try {
+      if (!isOwnerPrivateSession(key)) throw new Error('发送歌曲仅允许当前主人 QQ 私聊调用');
+      await authorizeRead(key, token);
+      const current = getConfig();
+      const singing = current.singing || {};
+      if (singing.coverEnabled === false) throw new Error('现成歌曲点唱当前未启用');
+
+      const results = await searchExistingSongs(song);
+      const picked = results[candidate - 1];
+      if (!picked) throw new Error(`没有第 ${candidate} 个歌曲候选，请调整歌名或候选序号`);
+      if (!isExactSongMatch(song, picked.title)) {
+        throw new Error(`候选「${picked.title}」与歌名不完全匹配；请明确歌名后再试`);
+      }
+      const clip = await makeExistingSongClip(song, {
+        candidate,
+        searchImpl: async () => results,
+        startSeconds: 0,
+        seconds
+      });
+      let audio = clip.audio;
+      if (mode === 'cover') {
+        const pitchPlan = resolveSingingPitchPlan(singing);
+        const detail = await applyLiuyingVoiceDetailed(audio, {
+          pitch: pitchPlan.pitch,
+          pitchMode: pitchPlan.mode,
+          pitchConfig: pitchPlan.config
+        });
+        audio = detail.audio;
+      }
+      const recipient = key.slice('private:'.length);
+      await onebot('send_private_msg', {
+        user_id: recipient,
+        message: [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }]
+      });
+      return { content: [{ type: 'text', text: JSON.stringify({
+        sent: true,
+        title: clip.title,
+        mode,
+        seconds: clip.seconds,
+        recipient: '当前主人私聊',
+        voiceProfile: mode === 'cover' ? LIUYING_SINGING_VOCAL_PROFILE : 'original'
+      }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `发送歌曲失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
   'douyin_browse_recommendations',
-  '仅主人 QQ 私聊可用。启动一项后台抖音浏览任务：默认在普通“推荐”流只读浏览 1–5 分钟并记录实际播放的视频。若主人本轮原话里明确指定了想看的主题（如“去刷点游戏视频”“看看猫”），必须传入 topic：1–20 字，只能取主人原话里的词或同义压缩，不许自己发明主题；带 topic 时会先搜索该主题并从结果里选视频（最多 3 分钟），搜索失败会自动改刷推荐流，结果里会写明。主人没提主题就不要传 topic。不点赞、评论、关注或发送消息。此工具快速返回 jobId；必须接着用 douyin_browse_status 查询，status=running 时稍等后继续查询，直到 completed 或 failed。不要把任务已启动说成已浏览完成。',
+  '仅主人 QQ 私聊可用。启动一项后台抖音浏览任务：默认在普通“推荐”流只读浏览 1–5 分钟并记录实际播放的视频。若主人本轮原话里明确指定了想看的主题（如“去刷点游戏视频”“看看猫”），必须传入 topic：1–20 字，只能取主人原话里的词或同义压缩，不许自己发明主题；带 topic 时会先搜索该主题并从结果里选视频（最多 3 分钟），搜索失败会自动改刷推荐流，结果里会写明。主人没提主题就不要传 topic。若收件箱监听器掉线，桥接会尝试启动本机已注册的监听任务，再排入浏览请求；启动失败时据实返回错误，不让主人手动排查进程。不点赞、评论、关注或发送消息。此工具快速返回 jobId；必须接着用 douyin_browse_status 查询，status=running 时稍等后继续查询，直到 completed 或 failed。不要把任务已启动说成已浏览完成。',
   { key: z.string(), token: z.string(), minutes: z.number().int().min(1).max(5), topic: z.string().min(1).max(20).optional() },
   async ({ key, token, minutes, topic }) => {
     try {
