@@ -19,5 +19,12 @@ listener-heartbeat.json
 browse-request*.json
 browse-response-*.json
 
+# 视频搬运解析器的独立浏览器目录与运行期日志/状态（2026-11-13 起）
+browser-profile-parser/
+playwright-temp-parser/
+logs/
+douyin-watchdog-state.json
+tag-watch-state.json
+
 # 外部工具在本目录留下的 8 位随机名临时文件（内容固定 4 字节，无扩展名）
 /[0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_]
