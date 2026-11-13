@@ -1098,9 +1098,15 @@ def send_text_in_open_chat(page, editor, message: str) -> None:
         raise RuntimeError("The exact message already appears in the conversation; refusing a duplicate send.")
     editor.fill(message)
     send_button = page.locator("svg.e2e-send-msg-btn:visible")
-    if send_button.count() != 1 or send_button.get_attribute("aria-disabled") == "true":
-        raise RuntimeError("Could not uniquely identify an enabled send button; stopping.")
-    send_button.click()
+    if send_button.count() == 1 and send_button.get_attribute("aria-disabled") != "true":
+        send_button.click()
+    else:
+        # 2026-11-13: after Douyin's latest DOM update the visible send button stopped
+        # matching reliably and every reply died here (four send_failed in one hour).
+        # Pressing Enter on the editor still delivers; the strict verification below
+        # decides whether the send really happened, so this cannot double-send.
+        print("Send button not usable this round; pressing Enter as fallback.", file=sys.stderr)
+        editor.press("Enter")
     try:
         sent_message = page.get_by_text(message, exact=True)
         sent_message.first.wait_for(state="visible", timeout=8000)
@@ -2691,7 +2697,8 @@ def deliver_inbound_batch(page, editor, cfg: dict, state: dict, batch: dict,
         send_text_in_open_chat(page, editor, reply_text)
     except (RuntimeError, PlaywrightTimeout) as exc:
         log_inbound_diagnostic(primary, video_context, context_source, "send_failed",
-                               source_message_key, batch_size=batch_size, attempt=attempt)
+                               source_message_key, batch_size=batch_size, attempt=attempt,
+                               extra={"error": f"{exc.__class__.__name__}: {exc}"[:200]})
         schedule_inbound_retry(state, batch, video_context, context_source, source_message_key, attempt)
         write_inbound_state(INBOUND_STATE_PATH, state)
         print(f"Inbound reply send failed; retry queued: {exc}", file=sys.stderr)

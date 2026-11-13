@@ -30,6 +30,7 @@ from douyin_share import (
     request_inbound_reply,
     deliver_inbound_batch,
     sanitize_outbound_text,
+    send_text_in_open_chat,
     extract_inbound_messages,
     extract_inbound_events,
     recent_shared_video_context,
@@ -112,6 +113,72 @@ class FakePage:
 
     def locator(self, _selector):
         return FakeLocator(self.text)
+
+
+class FakeSendTextPage:
+    """Minimal page/editor fakes for send_text_in_open_chat (button and Enter paths)."""
+
+    def __init__(self, button_count=1, button_disabled=None, enter_sends=True):
+        self.conversation = []
+        self.editor_text = ""
+        self.button_count = button_count
+        self.button_disabled = button_disabled
+        self.enter_sends = enter_sends
+        self.enter_presses = 0
+        self.button_clicks = 0
+
+    def get_by_text(self, text, exact=True):
+        page = self
+
+        class TextLocator:
+            def count(self):
+                return sum(1 for item in page.conversation if item == text)
+
+            @property
+            def first(self):
+                return self
+
+            def wait_for(self, state=None, timeout=None):
+                if not self.count():
+                    raise PlaywrightTimeout("message never became visible")
+
+        return TextLocator()
+
+    def locator(self, _selector):
+        page = self
+
+        class ButtonLocator:
+            def count(self):
+                return page.button_count
+
+            def get_attribute(self, _name):
+                return page.button_disabled
+
+            def click(self):
+                page.button_clicks += 1
+                page.conversation.append(page.editor_text)
+                page.editor_text = ""
+
+        return ButtonLocator()
+
+    @property
+    def editor(self):
+        page = self
+
+        class EditorLocator:
+            def fill(self, text):
+                page.editor_text = text
+
+            def press(self, key):
+                page.enter_presses += 1
+                if page.enter_sends:
+                    page.conversation.append(page.editor_text)
+                    page.editor_text = ""
+
+            def inner_text(self, timeout=None):
+                return page.editor_text
+
+        return EditorLocator()
 
 
 class ShareLogicTests(unittest.TestCase):
@@ -499,6 +566,32 @@ class ShareLogicTests(unittest.TestCase):
             self.assertEqual(state["inbound_retry_queue"][0]["attempt"], 1)
             self.assertEqual(state["inbound_retry_queue"][0]["ids"], ["msg:a"])
             self.assertEqual(log.call_args_list[-1].args[3], "send_failed")
+
+    def test_send_presses_enter_when_the_send_button_is_missing(self):
+        page = FakeSendTextPage(button_count=0)
+        send_text_in_open_chat(page, page.editor, "爸，在的")
+        self.assertEqual(page.conversation, ["爸，在的"])
+        self.assertEqual(page.enter_presses, 1)
+        self.assertEqual(page.button_clicks, 0)
+
+    def test_send_prefers_the_send_button_when_it_is_usable(self):
+        page = FakeSendTextPage(button_count=1)
+        send_text_in_open_chat(page, page.editor, "爸，在的")
+        self.assertEqual(page.conversation, ["爸，在的"])
+        self.assertEqual(page.button_clicks, 1)
+        self.assertEqual(page.enter_presses, 0)
+
+    def test_send_disabled_button_falls_back_to_enter(self):
+        page = FakeSendTextPage(button_count=1, button_disabled="true")
+        send_text_in_open_chat(page, page.editor, "爸，在的")
+        self.assertEqual(page.enter_presses, 1)
+        self.assertEqual(page.conversation, ["爸，在的"])
+
+    def test_send_fails_closed_when_enter_does_not_deliver(self):
+        page = FakeSendTextPage(button_count=0, enter_sends=False)
+        with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+            send_text_in_open_chat(page, page.editor, "爸，在的")
+        self.assertEqual(page.conversation, [])
 
     def test_reply_retry_uses_a_suffixed_id_because_the_bridge_dedupes_ids(self):
         with tempfile.TemporaryDirectory() as temp:

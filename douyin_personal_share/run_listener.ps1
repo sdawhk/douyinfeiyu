@@ -110,11 +110,19 @@ try {
     }
     # stderr used to be discarded by Task Scheduler; keep every line with a timestamp instead.
     # -u keeps stdout unbuffered so the log is usable while the listener is still running.
+    # PS 5.1 hazard: `2>&1` + $ErrorActionPreference='Stop' turns the FIRST stderr line
+    # into a terminating RemoteException that hard-kills python with exit code -1
+    # (.NET Process.Kill). Every listener death on 2026-11-13 matched a stderr line
+    # (inbound send failures, inbox refresh hiccups). Relax EAP only around the pipeline
+    # so stderr lines reach listener.log instead of murdering the listener.
+    $pipelineEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
         & $python -u (Join-Path $PSScriptRoot 'douyin_share.py') --listen-inbox 2>&1 |
             ForEach-Object { '{0} {1}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'), $_ } |
             Out-File -FilePath $logPath -Append -Encoding utf8
     } finally {
+        $ErrorActionPreference = $pipelineEap
         Write-Log ('listener process ended (exit {0}); collecting this profile''s browsers' -f $LASTEXITCODE)
         Clear-OwnPythonTree
         Clear-ProfileBrowsers 'exit'

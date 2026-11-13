@@ -19,7 +19,15 @@ if ($listener) {
 $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) { throw "Virtual environment missing. Follow README setup first." }
 # Task Scheduler discards stderr, so keep it next to stdout in a timestamped log file.
-& $python -u (Join-Path $PSScriptRoot 'douyin_share.py') --scheduled 2>&1 |
-    ForEach-Object { '{0} {1}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'), $_ } |
-    Out-File -FilePath $logPath -Append -Encoding utf8
+# Same PS 5.1 hazard as run_listener.ps1: with EAP=Stop the first stderr line
+# hard-kills python (-1). Relax EAP around the pipeline so stderr just gets logged.
+$pipelineEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & $python -u (Join-Path $PSScriptRoot 'douyin_share.py') --scheduled 2>&1 |
+        ForEach-Object { '{0} {1}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'), $_ } |
+        Out-File -FilePath $logPath -Append -Encoding utf8
+} finally {
+    $ErrorActionPreference = $pipelineEap
+}
 exit $LASTEXITCODE
