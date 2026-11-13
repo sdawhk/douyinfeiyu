@@ -388,6 +388,31 @@ class ShareLogicTests(unittest.TestCase):
         self.assertIn("swallowed_as_history", outcomes)
         self.assertEqual(request.call_count, 0)
 
+    def test_repeated_text_gets_a_fresh_id_and_is_not_silently_consumed(self):
+        # 2026-11-13 incident: the owner re-sent "测试" and the new row regenerated the
+        # already-consumed id msg:<digest>:0, so the pending loop skipped it as consumed
+        # with no diagnostic. A repeated fingerprint must mint a fresh, collision-free
+        # id and stay answerable.
+        base = [{"platform_id": "", "index": 0, "text": "测试"},
+                {"platform_id": "", "index": 1, "text": "别的话题"}]
+        _, snapshot, _ = assign_stable_message_ids(base, None)
+        known = [item["id"] for item in assign_stable_message_ids(base, snapshot)[0]]
+        state = {"inbound_baseline_initialized": True,
+                 "inbound_row_snapshot": snapshot,
+                 "inbound_reply_attempts": known[:],
+                 "inbound_seen": {}}
+        appended = base + [{"platform_id": "", "index": 2, "text": "测试"}]
+        repeated_id = assign_stable_message_ids(appended, snapshot, known)[0][-1]["id"]
+        self.assertNotEqual(repeated_id, known[0])
+        state["inbound_id_scheme"] = INBOUND_ID_SCHEME
+        result, outcomes, request = self._run_inbox_round(state, appended)
+        self.assertEqual(result, 0)
+        self.assertIn("reply_requested", outcomes)
+        self.assertIn("reply_sent", outcomes)
+        self.assertEqual(request.call_args.args[2], repeated_id)
+        self.assertNotIn("swallowed_as_history", outcomes)
+        self.assertTrue(state["inbound_last_reply_at"])
+
     def test_inbound_batch_merges_a_burst_and_caps_the_round(self):
         now = datetime(2026, 11, 11, 12, 0, tzinfo=SINGAPORE)
         pending = [

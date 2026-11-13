@@ -953,7 +953,8 @@ def inbound_row_fingerprint(row: dict) -> str:
     return "c:" + re.sub(r"\s+", " ", str(row.get("card_text", ""))).strip()
 
 
-def assign_stable_message_ids(rows: list[dict], snapshot: object) -> tuple[list[dict], list[dict], int]:
+def assign_stable_message_ids(rows: list[dict], snapshot: object,
+                              reserved_ids: object = None) -> tuple[list[dict], list[dict], int]:
     """Attach ids that survive re-rendering, window trimming, and restarts.
 
     Rows are aligned against the previous snapshot so an already-known message keeps its
@@ -991,14 +992,33 @@ def assign_stable_message_ids(rows: list[dict], snapshot: object) -> tuple[list[
             message_id = ""
         assigned.append({"row": row, "key": key, "id": message_id,
                          "after_known": last_match >= 0})
+    # Fresh ids must not collide with ids that already exist. The occurrence counter
+    # used to restart from 0 every cycle, so a new row whose fingerprint matched an
+    # already-consumed message (the owner re-sending the same text, e.g. a second
+    # "测试") regenerated that exact id and was silently skipped as consumed with no
+    # diagnostic at all (2026-11-13). Seed the counter with every id the same digest
+    # already owns in the snapshot and in the consumed set, and keep bumping the
+    # occurrence until the id is genuinely free.
+    reserved = {str(value) for value in (reserved_ids or ()) if value}
+    taken: dict[str, set[str]] = {}
+    for item in previous:
+        message_id = str(item.get("id", ""))
+        if message_id.startswith("msg:"):
+            taken.setdefault(message_id[4:36], set()).add(message_id)
     counts: dict[str, int] = {}
     for item in reversed(assigned):
         if item["id"]:
             continue
-        occurrence = counts.get(item["key"], 0)
-        counts[item["key"]] = occurrence + 1
         digest = hashlib.sha256(item["key"].encode("utf-8")).hexdigest()[:32]
-        item["id"] = f"msg:{digest}:{occurrence}"
+        owned = taken.setdefault(digest, set())
+        occurrence = counts.get(item["key"], 0)
+        message_id = f"msg:{digest}:{occurrence}"
+        while message_id in owned or message_id in reserved:
+            occurrence += 1
+            message_id = f"msg:{digest}:{occurrence}"
+        counts[item["key"]] = occurrence + 1
+        owned.add(message_id)
+        item["id"] = message_id
     new_snapshot = [{"k": item["key"], "id": item["id"]} for item in assigned][-INBOUND_ROW_SNAPSHOT_MAX:]
     return assigned, new_snapshot, matched
 
@@ -2689,7 +2709,8 @@ def process_inbox_page(page, editor, cfg: dict, selectors: dict, state: dict,
     scroll_inbox_to_bottom(page, selectors)
     rows = read_inbound_rows(page, selectors)
     cached_snapshot = state.get("inbound_row_snapshot")
-    assigned, new_snapshot, matched = assign_stable_message_ids(rows, cached_snapshot)
+    assigned, new_snapshot, matched = assign_stable_message_ids(
+        rows, cached_snapshot, state.get("inbound_reply_attempts"))
     # The stable id must live on the row itself: build_inbound_event (and everything
     # downstream - batch ids, the bridge dedupe key, consume bookkeeping) reads
     # row["id"], which read_inbound_rows fills only from the platform's
