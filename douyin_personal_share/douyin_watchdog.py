@@ -1,8 +1,9 @@
 """Lightweight self-check for the Douyin inbox link.
 
-Runs from Task Scheduler every few minutes. It never opens the Douyin browser: it only
-reads the files the listener already writes, and it reports through the QQ/OneBot private
-channel so a broken Douyin link can still reach the owner.
+Runs from Task Scheduler every minute. It never launches its own Douyin browser: it only
+reads the files the listener already writes (plus, for a captcha alert, restoring the
+listener's own Edge window so the owner can see the slider), and it reports through the
+QQ/OneBot private channel so a broken Douyin link can still reach the owner.
 
 Alerting policy: availability issues usually self-heal (the scheduled task restarts the
 listener within a minute or two), so the first sighting only starts a patience clock and
@@ -62,9 +63,9 @@ ALERT_COOLDOWN_SECONDS = 1800
 CAPTCHA_COOLDOWN_SECONDS = 6 * 3600
 # * availability issues (listener/browser) usually self-heal: the scheduled task
 #   restarts the listener within a minute or two, and the 2026-11-12 flapping showed
-#   every down/recovery pair resolving inside one 5-minute round. So the first sighting
+#   every down/recovery pair resolving inside one round. So the first sighting
 #   only starts a patience clock, and the owner is bothered after the issue has survived
-#   10 minutes = 3 consecutive failing rounds at the current 5-minute cadence.
+#   10 minutes = 10 consecutive failing rounds at the current 1-minute cadence.
 FAULT_MIN_DOWNTIME_SECONDS = 600
 PERSISTENCE_GATED_KEYS = {"listener_down", "profile_locked", "crash_loop"}
 # * a captcha line older than this stops counting as an active block: every blocked
@@ -76,7 +77,11 @@ CAPTCHA_WINDOW_SECONDS = 6 * 3600
 CAPTCHA_LINE_HINTS = ("未起播", "捣鎾")
 CAPTCHA_YES_MARKS = ("验证框=是", "=鏄")
 PLAY_OK_LINE_HINTS = ("实际播放", "疄闄呮挱")
-PLAY_OK_COUNT_RE = re.compile(r"(观察到|瀹熷埌)\s*(\d+)\s*(?:条|鏉)")
+# 2026-11-13: the original mojibake variant was mistyped (瀹熷埌) while the log actually
+# stores 瀵熷埌, so recovery lines were NEVER credited and one captcha kept re-alerting
+# for six hours after the browse had already recovered. Keep both variants listed, the
+# same way CAPTCHA_YES_MARKS does, so the check survives either pipe encoding.
+PLAY_OK_COUNT_RE = re.compile(r"(观察到|瀹熷埌|瀵熷埌)\s*(\d+)\s*(?:条|鏉)")
 
 ISSUE_REASONS = {
     "listener_down": "消息我收不到了",
@@ -90,6 +95,16 @@ ISSUE_REASONS = {
 CAPTCHA_REASON_BROWSER_DOWN = (
     "抖音那边弹了滑块验证，不过挂着的那个 Edge 窗口现在没在跑，"
     "等它被拉起来要是还卡验证，我再叫你"
+)
+# 2026-11-13: 告警发出时窗口可能已经被关掉，或页面早已跳走（那次验证早过去了）。
+# 这两种情况下再叫"帮我滑一下"只会让主人白找：改发状态说明。
+CAPTCHA_REASON_WINDOW_MISSING = (
+    "抖音那边弹了滑块验证，但挂着的那个 Edge 窗口我找不到了（可能被关掉了），"
+    "等监听器把它拉起来还卡验证的话我再叫你"
+)
+CAPTCHA_REASON_PAGE_LEFT = (
+    "抖音那边弹过滑块验证，不过挂着的 Edge 窗口现在显示的不是抖音页面，"
+    "可能已经跳走了；窗口我给你摆到前台了，你瞄一眼，没滑块就不用管"
 )
 RECOVERY_REASONS = {
     "listener_down": "消息能正常收了",
@@ -266,6 +281,79 @@ def check_profile_lock(now: datetime) -> str | None:
     return "profile_locked" if age > LOCK_STALE_SECONDS else None
 
 
+SW_RESTORE = 9
+
+
+def restore_listener_edge_window() -> tuple[bool, str | None]:
+    """Bring the listener's (usually minimized) Edge window back so the owner can see
+    the captcha the moment the alert lands.
+
+    Best effort BY DESIGN: every failure path returns (False, None) so a broken window
+    handle, a permission hiccup or a non-Windows host can never block the alert itself.
+    Returns (found, window_title); the title tells the caller whether the window still
+    shows a Douyin page (page may have navigated away during the captcha window).
+    """
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+    except AttributeError:  # not on Windows: nothing to restore
+        return False, None
+
+    found: list[tuple[int, str]] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def on_window(hwnd, _lparam):
+        try:
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0 or not user32.IsWindowVisible(hwnd):
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = buffer.value
+            if "抖音" not in title or "Microsoft Edge" not in title:
+                return True
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            process = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not process:
+                return True
+            try:
+                name = ctypes.create_unicode_buffer(260)
+                size = ctypes.c_ulong(260)
+                if kernel32.QueryFullProcessImageNameW(process, 0, name, ctypes.byref(size)):
+                    if name.value.lower().endswith("\\msedge.exe"):
+                        found.append((hwnd, title))
+            finally:
+                kernel32.CloseHandle(process)
+        except Exception:
+            pass  # window enumeration must never break the alert
+        return True
+
+    try:
+        user32.EnumWindows(on_window, None)
+    except Exception:
+        return False, None
+    if not found:
+        return False, None
+    hwnd, title = found[0]
+    try:
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass  # restore is cosmetic: the alert still goes out
+    return True, title
+
+
+def captcha_reason(browser_down: bool, window_found: bool, window_on_douyin: bool) -> str:
+    if browser_down:
+        return CAPTCHA_REASON_BROWSER_DOWN
+    if not window_found:
+        return CAPTCHA_REASON_WINDOW_MISSING
+    if not window_on_douyin:
+        return CAPTCHA_REASON_PAGE_LEFT
+    return ISSUE_REASONS["douyin_captcha"]
+
+
 def send_owner_private(text: str) -> bool:
     if DRY_RUN:
         print(f"[dry-run] would send: {text}")
@@ -290,10 +378,11 @@ def send_owner_private(text: str) -> bool:
     return isinstance(result, dict) and int(result.get("retcode", -1)) == 0
 
 
-def compose_alert(keys: list[str], repeat: bool, browser_down: bool = False) -> str:
+def compose_alert(keys: list[str], repeat: bool, browser_down: bool = False,
+                  window_found: bool = True, window_on_douyin: bool = True) -> str:
     def reason(key: str) -> str:
-        if key == "douyin_captcha" and browser_down:
-            return CAPTCHA_REASON_BROWSER_DOWN
+        if key == "douyin_captcha":
+            return captcha_reason(browser_down, window_found, window_on_douyin)
         return ISSUE_REASONS[key]
 
     reasons = "、".join(reason(key) for key in keys)
@@ -368,7 +457,16 @@ def main() -> int:
 
     if plan["toAlert"]:
         browser_down = "listener_down" in detected
-        if send_owner_private(compose_alert(plan["toAlert"], plan["repeat"], browser_down)):
+        window_found = True
+        window_on_douyin = True
+        if "douyin_captcha" in plan["toAlert"] and not browser_down:
+            # Restore-and-foreground the listener window as the alert goes out so the
+            # slider is on screen the moment the owner reads the message. Best effort:
+            # a missing/moved window only changes the message, never blocks the alert.
+            window_found, window_title = restore_listener_edge_window()
+            window_on_douyin = bool(window_title and "抖音" in window_title)
+        if send_owner_private(compose_alert(plan["toAlert"], plan["repeat"], browser_down,
+                                            window_found, window_on_douyin)):
             for key in plan["toAlert"]:
                 records.setdefault(key, {})["alertedAt"] = now.isoformat(timespec="seconds")
             print(f"Alerted owner about: {', '.join(plan['toAlert'])}")

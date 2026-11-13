@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -21,6 +22,17 @@ MOJI_PLAY_OK = ("2026-11-12T16:35:00 娴忚缁撴潫锛氳瀹熷埌 1 鏉″疄�
                 "屽叡鍐欏叆 1 鏉″叡浜汙鐪嬭褰曘€?")
 MOJI_PLAY_ZERO = ("2026-11-12T16:31:00 娴忚缁撴潫锛氳瀹熷埌 0 鏉″疄闄呮挱鏀捐揪鍒?8 绉掔殑瑙嗛锛?"
                   "屽叡鍐欏叆 0 鏉″叡浜汙鐪嬭褰曞€?")
+# 2026-11-13 实锤：listener.log 里"观察到"的真实乱码形态是 瀵熷埌（U+7035 U+71B7 U+57CC），
+# 行内还夹着 GBK 解不出的私有区字符（\ue74d 等）。上面的 MOJI_PLAY_* 是照着旧 regex 抄的
+# （瀹≠瀵），当时跟着笔误一起"测试通过"、线上却永远匹配不上——下面两行逐字符照抄日志。
+REAL_MOJI_PLAY_OK = (
+    "2026-11-13T13:04:22 娴忚\ue74d缁撴潫锛氳\ue747瀵熷埌 1 鏉″疄闄呮挱鏀捐揪鍒?8 绉掔殑瑙嗛\ue576"
+    "锛屽叡鍐欏叆 1 鏉″叡浜\ue0a5\ue747鐪嬭\ue187褰曞€?"
+)
+REAL_MOJI_PLAY_ZERO = (
+    "2026-11-13T15:05:02 娴忚缁撴潫锛氳瀵熷埌 0 鏉″疄闄呮挱鏀捐揪鍒?8 绉掔殑瑙嗛锛?"
+    "屽湪鍐欏叆 0 鏉″叡浜琚悓鐪嬭褰曞綍銆"
+)
 # 修复编码后的正常中文形态（管道修好后也能识别）。
 PLAIN_CAPTCHA = "2026-11-12T16:30:55   播放未起播：https://www.douyin.com/video/222（video=1，验证框=是，标题=x）"
 PLAIN_PLAY_OK = "2026-11-12T16:35:00 浏览结束：观察到 1 条实际播放达到 8 秒的视频，共写入 1 条共观看记录。"
@@ -59,6 +71,15 @@ class CaptchaCheckTest(unittest.TestCase):
         self.write_log([PLAIN_CAPTCHA, PLAIN_PLAY_OK])
         self.assertIsNone(self.check(at(17, 0)))
 
+    def test_real_log_mojibake_play_ok_clears_captcha(self):
+        """2026-11-13 线上事故的回归测试：真实日志乱码形态（瀵熷埌 + 私有区字符）必须被采信。"""
+        self.write_log([MOJI_CAPTCHA, REAL_MOJI_PLAY_ZERO, REAL_MOJI_PLAY_OK])
+        self.assertIsNone(self.check(at(17, 0)))
+
+    def test_real_log_mojibake_play_zero_does_not_clear_captcha(self):
+        self.write_log([MOJI_CAPTCHA, REAL_MOJI_PLAY_ZERO])
+        self.assertEqual(self.check(at(17, 0)), "douyin_captcha")
+
     def test_captcha_frame_no_is_not_an_issue(self):
         self.write_log([MOJI_CAPTCHA_NO])
         self.assertIsNone(self.check(at(17, 0)))
@@ -96,9 +117,45 @@ class CooldownAndMessageTest(unittest.TestCase):
         alive = watchdog.compose_alert(["douyin_captcha"], repeat=False, browser_down=False)
         self.assertIn("帮我手动滑", alive)
 
+    def test_captcha_alert_switches_to_status_when_window_is_missing(self):
+        alert = watchdog.compose_alert(["douyin_captcha"], repeat=False,
+                                       browser_down=False, window_found=False)
+        self.assertNotIn("帮我手动滑", alert)
+        self.assertIn("找不到了", alert)
+
+    def test_captcha_alert_switches_to_status_when_page_left_douyin(self):
+        alert = watchdog.compose_alert(["douyin_captcha"], repeat=False,
+                                       browser_down=False, window_found=True, window_on_douyin=False)
+        self.assertNotIn("帮我手动滑", alert)
+        self.assertIn("跳走", alert)
+
+    def test_captcha_alert_keeps_slide_request_when_window_restored(self):
+        alert = watchdog.compose_alert(["douyin_captcha"], repeat=False,
+                                       browser_down=False, window_found=True, window_on_douyin=True)
+        self.assertIn("帮我手动滑", alert)
+
     def test_other_messages_still_compose(self):
         watchdog.compose_alert(["listener_down"], repeat=True)
         watchdog.compose_recovery(["listener_down", "crash_loop"])
+
+
+class WindowRestoreTest(unittest.TestCase):
+    """窗口置顶必须只影响文案：任何失败都吞掉并返回 (False, None)，绝不打断告警本身。"""
+
+    def test_missing_ctypes_returns_false_without_raising(self):
+        class ExplodingWindll:
+            def __getattr__(self, _name):
+                raise AttributeError("no user32 here")
+
+        fake = SimpleNamespace(windll=ExplodingWindll())
+        with patch.object(watchdog, "ctypes", fake):
+            self.assertEqual(watchdog.restore_listener_edge_window(), (False, None))
+
+    def test_broken_user32_returns_false_without_raising(self):
+        # windll.user32 exists but has no usable EnumWindows: must degrade, not crash.
+        fake = SimpleNamespace(windll=SimpleNamespace(user32=SimpleNamespace()))
+        with patch.object(watchdog, "ctypes", fake):
+            self.assertEqual(watchdog.restore_listener_edge_window(), (False, None))
 
 
 class PlanRoundTest(unittest.TestCase):
