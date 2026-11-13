@@ -34,7 +34,9 @@ export function loadBrowseJobs(path) {
         topic: bounded(job.topic, 40),
         topicSource: job.topicSource === 'owner' ? 'owner' : 'none',
         result: bounded(job.result, 24_000),
-        error: bounded(job.error, 4_000)
+        error: bounded(job.error, 4_000),
+        // 2026-11-13: 点名浏览失败后的一次自动补投溯源；retryOf 标在补投 job 上。
+        retryOf: /^[0-9a-f-]{36}$/i.test(job.retryOf || '') ? job.retryOf : ''
       };
     }
     return jobs;
@@ -55,7 +57,8 @@ export function saveBrowseJobs(path, jobs, now = Date.now()) {
       topic: bounded(job.topic, 40),
       topicSource: job.topicSource === 'owner' ? 'owner' : 'none',
       result: bounded(job.result, 24_000),
-      error: bounded(job.error, 4_000)
+      error: bounded(job.error, 4_000),
+      retryOf: /^[0-9a-f-]{36}$/i.test(job.retryOf || '') ? job.retryOf : ''
     }]);
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp`;
@@ -81,13 +84,15 @@ export function jobView(job, now = Date.now(), { timeoutMs = BROWSE_JOB_TIMEOUT_
     };
   }
   if (job.status === 'running') return { ok: true, status: 'running', jobId: job.jobId, ...topicInfo };
+  const retryOf = /^[0-9a-f-]{36}$/i.test(job.retryOf || '') ? job.retryOf : '';
   return {
     ok: job.status === 'completed',
     status: job.status,
     jobId: job.jobId,
     ...topicInfo,
     result: job.result || '',
-    error: job.error || ''
+    error: job.error || '',
+    ...(retryOf ? { retryOf } : {})
   };
 }
 
@@ -105,6 +110,19 @@ export function settleExpiredJobs(jobs, now = Date.now(), options) {
     }
   }
   return changed;
+}
+
+/**
+ * 点名浏览（主人给了话题）失败后是否应安排一次自动补投。
+ * 2026-11-13 之前 fail-closed 一把就退出，把重试的担子丢给主人；现在失败后由桥接
+ * 侧约 10 分钟后自动补投一次，成功/失败都私聊告知结论。补投自身失败不再补。
+ */
+export function shouldRetryBrowseJob(job) {
+  if (!job || typeof job !== 'object') return false;
+  if (job.status !== 'failed') return false;
+  if (job.topicSource !== 'owner' || !job.topic) return false;  // 只有主人点名的话题才补投
+  if (job.retryOf) return false;                                // 补投自身失败不再补
+  return true;
 }
 
 /**

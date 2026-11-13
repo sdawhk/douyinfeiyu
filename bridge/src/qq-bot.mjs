@@ -25,7 +25,7 @@ import { assertGroupIdentityPrivate, groupIdentityLeak, protectedOwnerQQs, redac
 import { makePaidSongPreview, makePaidFullSong } from './paid-song-producer.mjs';
 import { loadRolePersona, personaStyleNote } from './role-card.mjs';
 import { douyinOwnerTurnPrompt, qqOwnerDouyinToolPrompt } from './douyin-owner-prompt.mjs';
-import { jobView, loadBrowseJobs, readListenerHeartbeat, saveBrowseJobs, settleExpiredJobs } from './douyin-browse-state.mjs';
+import { jobView, loadBrowseJobs, readListenerHeartbeat, saveBrowseJobs, settleExpiredJobs, shouldRetryBrowseJob } from './douyin-browse-state.mjs';
 import { normalizeBrowseTopic, readBrowseTopicBlacklist } from './douyin-topic.mjs';
 import {
   DOUYIN_VIDEO_DEFAULTS, createDouyinVideoGate, douyinFallbackText, matchDouyinShareLinks,
@@ -2970,6 +2970,76 @@ function startQzoneToolServer() {
       }
     })
     : null;
+  // 2026-11-13 之前：主人点名的话题浏览 fail-closed 一把就退出，重试担子丢回主人。
+  // 现在失败后约 10 分钟自动补投一次，成功/失败都私聊告知结论；补投自身失败不再补。
+  // 定时器只在内存里：bridge 重启会丢定时器，丢掉的补投由主人重新点名兜底，不自动累积。
+  const BROWSE_RETRY_DELAY_MS = 600_000;
+  const notifyOwnerBrowseOutcome = async (job) => {
+    if (!douyinOwnerId) return;
+    const text = job.status === 'completed'
+      ? `爸，你之前点名的「${job.topic}」我隔了一会儿又刷了一次，这次成了：\n${(job.result || '').split('\n').filter(Boolean).slice(0, 6).join('\n').slice(0, 600) || '(浏览完成)'}`
+      : `爸，「${job.topic}」我又试了一次还是没成，原因：${String(job.error || '').slice(0, 200) || '未知'}。先不再自动重试了。`;
+    try {
+      await onebot('send_private_msg', { user_id: Number(douyinOwnerId), message: [{ type: 'text', data: { text } }] });
+      log(`[douyin-browse] retry outcome sent to owner id=${job.jobId} status=${job.status}`);
+    } catch (error) {
+      log(`[douyin-browse] retry outcome notify failed id=${job.jobId}: ${error?.message ?? error}`);
+    }
+  };
+  const launchOwnerBrowseJob = ({ minutes, topic, retryOf = '' }) => {
+    const python = fileURLToPath(new URL('../../douyin_personal_share/.venv/Scripts/python.exe', import.meta.url));
+    const script = fileURLToPath(new URL('../../douyin_personal_share/douyin_share.py', import.meta.url));
+    const cwd = fileURLToPath(new URL('../../douyin_personal_share/', import.meta.url));
+    const args = [script, '--request-browse', '--minutes', String(minutes)];
+    if (topic) args.push('--topic', topic);
+    const child = spawn(python, args, { windowsHide: true, cwd });
+    const jobId = randomUUID();
+    const job = {
+      jobId, status: 'running', startedAt: Date.now(), minutes, topic,
+      topicSource: topic ? 'owner' : 'none', retryOf,
+      stdout: '', stderr: '', result: '', error: ''
+    };
+    douyinBrowseJobs.set(jobId, job);
+    saveBrowseJobs(douyinBrowseJobsPath, douyinBrowseJobs);
+    log(`[douyin-browse] job started id=${jobId} minutes=${minutes} topic=${topic || '-'} source=${job.topicSource}${retryOf ? ` retryOf=${retryOf}` : ''}`);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout = (stdout + chunk).slice(-24000); });
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr = (stderr + chunk).slice(-4000); });
+    const timer = setTimeout(() => child.kill(), 840_000);
+    const persistJob = () => saveBrowseJobs(douyinBrowseJobsPath, douyinBrowseJobs);
+    const finish = (status, extra, exitCode = null) => {
+      clearTimeout(timer);
+      Object.assign(job, extra, { status });
+      persistJob();
+      log(`[douyin-browse] job ${status} id=${jobId}${exitCode == null ? '' : ` exit=${exitCode}`}`);
+      if (status === 'failed') scheduleOwnerBrowseRetry(job);
+      if (retryOf) void notifyOwnerBrowseOutcome(job);
+    };
+    child.once('error', (error) => {
+      finish('failed', { error: error.message || '无法启动抖音浏览进程', stderr });
+    });
+    child.once('close', (code) => {
+      finish(code === 0 ? 'completed' : 'failed', {
+        stdout: stdout.trim(), stderr: stderr.trim(),
+        result: code === 0 ? stdout.trim() : '',
+        error: code === 0 ? '' : (stderr.trim() || stdout.trim() || `Douyin browse process exited (${code})`)
+      }, code);
+    });
+    return job;
+  };
+  const scheduleOwnerBrowseRetry = (job) => {
+    // 只补投主人点名的话题浏览（topicSource=owner），且同一次失败只安排一次；
+    // retryScheduledAt 只存内存，落盘会在 bridge 重启后骗读取方。
+    if (!shouldRetryBrowseJob(job) || job.retryScheduledAt) return;
+    job.retryScheduledAt = Date.now();
+    saveBrowseJobs(douyinBrowseJobsPath, douyinBrowseJobs);
+    log(`[douyin-browse] owner topic failed; one retry scheduled in 10 minutes id=${job.jobId} topic=${job.topic}`);
+    setTimeout(() => {
+      const retryJob = launchOwnerBrowseJob({ minutes: job.minutes, topic: job.topic, retryOf: job.jobId });
+      log(`[douyin-browse] retry launched id=${retryJob.jobId} retryOf=${job.jobId}`);
+    }, BROWSE_RETRY_DELAY_MS).unref?.();
+  };
   const server = createServer(async (req, res) => {
     const reply = (status, body) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(body)); };
     if (req.method !== 'POST' || !['/qzone', '/douyin/reply', '/douyin/share-latest', '/douyin/browse', '/douyin/browse-status', '/douyin/interact', '/douyin/daily-report', '/douyin/autonomous-browse-check'].includes(req.url)) return reply(404, { ok: false, error: 'not found' });
@@ -3027,46 +3097,8 @@ function startQzoneToolServer() {
             return reply(503, { ok: false, error: `抖音收件箱监听器离线，自动启动失败：${String(error?.message ?? error).slice(0, 180)}` });
           }
         }
-        const python = fileURLToPath(new URL('../../douyin_personal_share/.venv/Scripts/python.exe', import.meta.url));
-        const script = fileURLToPath(new URL('../../douyin_personal_share/douyin_share.py', import.meta.url));
-        const cwd = fileURLToPath(new URL('../../douyin_personal_share/', import.meta.url));
-        const args = [script, '--request-browse', '--minutes', String(effectiveMinutes)];
-        if (topic) args.push('--topic', topic);
-        const child = spawn(python, args, { windowsHide: true, cwd });
-        const jobId = randomUUID();
-        const job = {
-          jobId, status: 'running', startedAt: Date.now(), minutes: effectiveMinutes,
-          topic, topicSource: topic ? 'owner' : 'none',
-          stdout: '', stderr: '', result: '', error: ''
-        };
-        douyinBrowseJobs.set(jobId, job);
-        saveBrowseJobs(douyinBrowseJobsPath, douyinBrowseJobs);
-        log(`[douyin-browse] job started id=${jobId} minutes=${effectiveMinutes} topic=${topic || '-'} source=${job.topicSource}`);
-        let stdout = '';
-        let stderr = '';
-        child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout = (stdout + chunk).slice(-24000); });
-        child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr = (stderr + chunk).slice(-4000); });
-        const timer = setTimeout(() => child.kill(), 840_000);
-        const persistJob = () => saveBrowseJobs(douyinBrowseJobsPath, douyinBrowseJobs);
-        child.once('error', (error) => {
-          clearTimeout(timer);
-          job.status = 'failed';
-          job.error = error.message || '无法启动抖音浏览进程';
-          job.stderr = stderr;
-          persistJob();
-          log(`[douyin-browse] job failed id=${jobId} reason=${job.error.slice(0, 240)}`);
-        });
-        child.once('close', (code) => {
-          clearTimeout(timer);
-          job.stdout = stdout.trim();
-          job.stderr = stderr.trim();
-          job.status = code === 0 ? 'completed' : 'failed';
-          job.result = code === 0 ? stdout.trim() : '';
-          job.error = code === 0 ? '' : (stderr.trim() || stdout.trim() || `Douyin browse process exited (${code})`);
-          persistJob();
-          log(`[douyin-browse] job ${job.status} id=${jobId} exit=${code}`);
-        });
-        return reply(202, { ok: true, status: 'running', jobId, minutes: effectiveMinutes, topic, topicSource: job.topicSource });
+        const job = launchOwnerBrowseJob({ minutes: effectiveMinutes, topic });
+        return reply(202, { ok: true, status: 'running', jobId: job.jobId, minutes: effectiveMinutes, topic, topicSource: job.topicSource });
       }
       if (req.url === '/douyin/browse-status') {
         const jobId = String(body?.jobId ?? '').trim();
@@ -3074,7 +3106,11 @@ function startQzoneToolServer() {
         if (!job) return reply(404, { ok: false, error: '浏览任务不存在或已过期；bridge 重启后旧任务会按失败结论返回。' });
         // running 超过 14 分钟一律落成 failed，避免无限 running 和重复“再等等”。
         const changed = settleExpiredJobs({ [jobId]: job });
-        if (changed) saveBrowseJobs(douyinBrowseJobsPath, douyinBrowseJobs);
+        if (changed) {
+          saveBrowseJobs(douyinBrowseJobsPath, douyinBrowseJobs);
+          // 超时结算也是一种失败出口：同样安排一次补投（重入由 retryScheduledAt 挡住）。
+          scheduleOwnerBrowseRetry(job);
+        }
         const view = jobView(job);
         return reply(200, view);
       }

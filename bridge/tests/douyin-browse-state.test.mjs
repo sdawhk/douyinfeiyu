@@ -9,7 +9,8 @@ import {
   jobView,
   loadBrowseJobs,
   saveBrowseJobs,
-  settleExpiredJobs
+  settleExpiredJobs,
+  shouldRetryBrowseJob
 } from '../src/douyin-browse-state.mjs';
 
 const JOB_ID = '11111111-2222-3333-4444-555555555555';
@@ -89,6 +90,50 @@ test('corrupt or missing job state degrades to an empty table instead of crashin
     writeFileSync(path, 'not json');
     assert.deepEqual(loadBrowseJobs(path), {});
     assert.deepEqual(loadBrowseJobs(join(dir, 'missing.json')), {});
+  });
+});
+
+test('shouldRetryBrowseJob: only failed owner-topic jobs without a retry lineage get retried', () => {
+  const base = { jobId: JOB_ID, startedAt: Date.now(), minutes: 3, topic: '大肥鱼聊天', topicSource: 'owner' };
+  // 主人点名的话题浏览失败 → 补投
+  assert.equal(shouldRetryBrowseJob({ ...base, status: 'failed' }), true);
+  // 还在跑 / 成功 → 不补
+  assert.equal(shouldRetryBrowseJob({ ...base, status: 'running' }), false);
+  assert.equal(shouldRetryBrowseJob({ ...base, status: 'completed' }), false);
+  // 非点名（自主浏览）或没有话题 → 不补
+  assert.equal(shouldRetryBrowseJob({ ...base, status: 'failed', topicSource: 'none' }), false);
+  assert.equal(shouldRetryBrowseJob({ ...base, status: 'failed', topic: '' }), false);
+  // 补投自身再失败 → 不再补（防止无限链）
+  assert.equal(shouldRetryBrowseJob({ ...base, status: 'failed', retryOf: JOB_ID }), false);
+  // 坏输入不炸
+  assert.equal(shouldRetryBrowseJob(null), false);
+  assert.equal(shouldRetryBrowseJob('x'), false);
+});
+
+test('retryOf survives persistence round-trip and is exposed by jobView for tracing', () => {
+  withTempDir((dir) => {
+    const path = join(dir, 'jobs.json');
+    const now = Date.now();
+    saveBrowseJobs(path, {
+      [JOB_ID]: {
+        jobId: JOB_ID, status: 'failed', startedAt: now, minutes: 3,
+        topic: '大肥鱼聊天', topicSource: 'owner', error: 'Stopped safely',
+        retryOf: '99999999-8888-7777-6666-555555555555'
+      }
+    });
+    const job = loadBrowseJobs(path)[JOB_ID];
+    assert.equal(job.retryOf, '99999999-8888-7777-6666-555555555555');
+    const view = jobView(job, now);
+    assert.equal(view.retryOf, '99999999-8888-7777-6666-555555555555');
+    // 普通任务不带 retryOf 字段，不污染状态输出
+    const plain = jobView({ jobId: JOB_ID, status: 'completed', startedAt: now }, now);
+    assert.equal('retryOf' in plain, false);
+    // 非法形态的 retryOf 会被清空而不是原样透传
+    writeFileSync(path, JSON.stringify({
+      version: 1,
+      jobs: { [JOB_ID]: { jobId: JOB_ID, status: 'failed', startedAt: now, topic: 'x', topicSource: 'owner', retryOf: 'not-a-uuid' } }
+    }));
+    assert.equal(loadBrowseJobs(path)[JOB_ID].retryOf, '');
   });
 });
 
