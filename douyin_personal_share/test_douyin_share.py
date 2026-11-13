@@ -19,6 +19,8 @@ from douyin_share import (
     require_recipient_verification,
     select_videos,
     authenticated,
+    visible_handle_matches,
+    wait_conversation_header,
     verification_matches,
     verify_recipient,
     DAILY_WINDOWS,
@@ -63,6 +65,7 @@ from douyin_share import (
     browse_feed,
     validate_browse_topic,
 )
+import douyin_share
 from douyin_comments import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -757,7 +760,8 @@ class ShareLogicTests(unittest.TestCase):
 
     def test_verification_interstitial_title_fails_closed(self):
         page = FakePage("", "https://www.douyin.com/", "验证码中间页")
-        with self.assertRaisesRegex(RuntimeError, "requires login or verification"):
+        # 2026-11-13: 验证码中间页是风控不是登录问题——错误必须说清登录本身没事。
+        with self.assertRaisesRegex(RuntimeError, "risk-control"):
             authenticated(page)
 
     def test_browser_temp_uses_ignored_module_dir(self):
@@ -1915,6 +1919,86 @@ def _comment_item_real_dom(author, body, likes="401", badge=False,
         f'{reply_html}'
         '</div>'
     )
+
+
+class AuthenticationSplitTest(unittest.TestCase):
+    """登录失效和风控验证必须报不同的错：2026-11-13 一次风控被报成"需要登录或验证"，
+    QQ 那头照着去查登录状态，让主人白找一趟。"""
+
+    def test_scan_to_login_page_reports_login_problem(self):
+        page = FakePage("请扫码登录后继续", title="扫码登录")
+        with self.assertRaises(RuntimeError) as ctx:
+            authenticated(page)
+        self.assertIn("Not logged in", str(ctx.exception))
+        self.assertNotIn("risk-control", str(ctx.exception))
+
+    def test_risk_control_page_reports_captcha_with_login_intact(self):
+        page = FakePage("请完成安全验证 验证码", title="安全验证")
+        with self.assertRaises(RuntimeError) as ctx:
+            authenticated(page)
+        self.assertIn("risk-control", str(ctx.exception))
+        self.assertIn("login itself is fine", str(ctx.exception))
+
+    def test_clean_page_passes(self):
+        authenticated(FakePage("正常页面内容"))
+
+
+class VisibleHandleMatchesTest(unittest.TestCase):
+    def test_accepts_copy_button_on_same_line(self):
+        body = "菠萝吹雪233\n抖音号：dyecfcykdwea 复制\nIP属地：福建"
+        self.assertTrue(visible_handle_matches(body, "dyecfcykdwea"))
+
+    def test_accepts_label_and_value_on_separate_lines(self):
+        self.assertTrue(visible_handle_matches("抖音号\ndyecfcykdwea", "dyecfcykdwea"))
+
+    def test_rejects_similar_but_different_handle(self):
+        self.assertFalse(visible_handle_matches("抖音号：dyecfcykdwea2 复制", "dyecfcykdwea"))
+        self.assertFalse(visible_handle_matches("抖音号：other_handle", "dyecfcykdwea"))
+        self.assertFalse(visible_handle_matches("抖音号：dyecfcykdwea前缀", "dyecfcykdwea"))
+
+
+class ConversationHeaderWaitTest(unittest.TestCase):
+    def test_header_that_never_shows_times_out_into_runtime_error(self):
+        page = FakePage("只有一次名字")
+        with self.assertRaises(RuntimeError) as ctx:
+            wait_conversation_header(page, "菠萝吹雪233")
+        self.assertIn("does not match the verified Douyin profile", str(ctx.exception))
+
+    def test_name_present_twice_passes(self):
+        wait_conversation_header(FakePage("会话列表：菠萝吹雪233 聊天头部：菠萝吹雪233"), "菠萝吹雪233")
+
+
+class OpenInboxConversationRetryTest(unittest.TestCase):
+    """改版后会话页晚渲染：一次失败立即重试一次，不能整轮丢弃。"""
+
+    def test_retries_once_when_dom_checks_race(self):
+        calls = []
+
+        def flaky_open(page, cfg):
+            calls.append(cfg)
+            if len(calls) == 1:
+                raise RuntimeError("Opened conversation does not match the verified Douyin profile.")
+            return "editor"
+
+        armed = []
+        page = FakePage("", url="https://www.douyin.com/user/dyecfcykdwea")
+        with patch.object(douyin_share, "open_recipient_chat", flaky_open), \
+             patch.object(douyin_share, "arm_inbox_mutation_observer",
+                          lambda page, selector: armed.append(selector)):
+            editor, url = douyin_share.open_inbox_conversation(page, {"any": "cfg"},
+                                                               {"message_selector": "row.sel"})
+        self.assertEqual(editor, "editor")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(armed, ["row.sel"])
+        self.assertEqual(url, "https://www.douyin.com/user/dyecfcykdwea")
+
+    def test_raises_after_both_attempts_fail(self):
+        def always_fail(page, cfg):
+            raise RuntimeError("nope")
+
+        with patch.object(douyin_share, "open_recipient_chat", always_fail):
+            with self.assertRaises(RuntimeError):
+                douyin_share.open_inbox_conversation(FakePage(""), {}, {"message_selector": "s"})
 
 
 if __name__ == "__main__":

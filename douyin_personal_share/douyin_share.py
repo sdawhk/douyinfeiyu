@@ -81,7 +81,14 @@ DAILY_WINDOWS = (
 FEED_URL = "https://www.douyin.com/jingxuan"
 VIDEO_PATH = re.compile(r"^/video/(\d+)$")
 USER_PATH = re.compile(r"^/user/([A-Za-z0-9_-]+)")
-BLOCKED_TEXT = re.compile(r"扫码登录|验证码|安全验证|访问过于频繁|操作频繁|登录后.*继续", re.I)
+# Page text that means the login itself is gone (scan-to-login interstitials).
+LOGIN_REQUIRED_TEXT = re.compile(r"扫码登录|登录后.*继续", re.I)
+# Page text that means risk control (captcha/verification) with the login still valid.
+# 2026-11-13: these used to share one BLOCKED_TEXT and one "Login or verification is
+# required" message, which the QQ side then relayed as "go fix your login" — but the
+# account was logged in fine; only a risk-control captcha was up. Split the patterns so
+# callers (and the bridge relaying the error) can tell the two apart.
+RISK_CONTROL_TEXT = re.compile(r"验证码|安全验证|访问过于频繁|操作频繁", re.I)
 VIDEO_FOLLOWUP_TEXT = re.compile(r"(?:视频|抖音|分享|刚才|刚刚).{0,24}(?:看|看到|看见|收到|打开|刷|了吗|没有)|(?:看|看到|看见|收到|打开).{0,24}(?:视频|抖音|分享|了吗|没有)")
 VIDEO_CONTEXT_TTL = timedelta(minutes=15)
 # Inbox identity/batching policy. The page index must never take part in a message key:
@@ -147,7 +154,13 @@ def visible_handle_matches(body_text: str, expected_handle: str) -> bool:
     for index, value in enumerate(lines):
         if value in {"抖音号", "抖音ID"} and index + 1 < len(lines) and lines[index + 1] == expected_handle:
             return True
-        labeled = re.fullmatch(r"(?:抖音号|抖音ID)\s*[：:]\s*(\S+)", value, re.I)
+        # 2026-11-13: the profile page sometimes renders the copy button on the same
+        # visual line ("抖音号：dyecfcykdwea 复制"), which fullmatch rejected even though
+        # the waiter (loose containment) had already passed — that strictness gap made
+        # ~1/65 inbox refresh rounds fail with "does not show the exact configured
+        # Douyin ID". Search instead of fullmatch: the handle still has to equal the
+        # whole whitespace-delimited token, so a similar-but-different ID never matches.
+        labeled = re.search(r"(?:抖音号|抖音ID)\s*[：:]\s*(\S+)", value, re.I)
         if labeled and labeled.group(1) == expected_handle:
             return True
     return False
@@ -731,11 +744,15 @@ def authenticated(page) -> None:
     if "login" in current or "passport" in current:
         raise RuntimeError("Not logged in. Run --login and finish login manually.")
     title = page.title()
-    if BLOCKED_TEXT.search(title):
-        raise RuntimeError(f"Douyin requires login or verification (page title: {title}); stopping without sending.")
+    if LOGIN_REQUIRED_TEXT.search(title):
+        raise RuntimeError(f"Not logged in (page title: {title}); run --login again. Stopping without sending.")
+    if RISK_CONTROL_TEXT.search(title):
+        raise RuntimeError(f"Douyin risk-control verification is showing (page title: {title}); the login itself is fine. Stopping without sending.")
     text = page.locator("body").inner_text(timeout=5000)
-    if BLOCKED_TEXT.search(text):
-        raise RuntimeError("Login or verification is required; stopping without sending.")
+    if LOGIN_REQUIRED_TEXT.search(text):
+        raise RuntimeError("Not logged in; the page asks for a scan-to-login. Run --login and finish it manually.")
+    if RISK_CONTROL_TEXT.search(text):
+        raise RuntimeError("Douyin risk-control verification is blocking this page; the login itself is fine. Stopping without sending.")
 
 
 def collect_feed(page) -> list[Video]:
@@ -822,9 +839,53 @@ def open_recipient_chat(page, cfg: dict):
     candidates[0].click(no_wait_after=True)
     editor = page.locator('[contenteditable="true"]:visible').last
     editor.wait_for(state="visible", timeout=20000)
+    wait_conversation_header(page, profile_name)
     if page.get_by_text(profile_name, exact=True).count() < 2 or urlparse(page.url).path != urlparse(profile_url).path:
         raise RuntimeError("Opened conversation does not match the verified Douyin profile.")
     return editor
+
+
+def wait_conversation_header(page, profile_name: str, timeout_ms: int = 10000) -> None:
+    """Bounded wait for the profile name to appear twice (conversation list + chat header).
+
+    2026-11-13: the chat header can render later than the editor, and the previous
+    instant count check failed on exactly that race ~2/65 refresh rounds ("Opened
+    conversation does not match the verified Douyin profile"), dropping a full minute
+    of inbox polling each time. Waiting first keeps the guard assertion meaningful
+    without failing on a still-settling DOM.
+    """
+    try:
+        page.wait_for_function(
+            "name => Array.from(document.querySelectorAll('div,span,a,h1,h2,h3'))"
+            ".filter(el => el.childElementCount === 0 && (el.innerText || '').trim() === name).length >= 2",
+            arg=profile_name,
+            timeout=timeout_ms,
+        )
+    except PlaywrightTimeout as exc:
+        raise RuntimeError("Opened conversation does not match the verified Douyin profile.") from exc
+
+
+def open_inbox_conversation(page, cfg: dict, selectors: dict, attempts: int = 2):
+    """Open the owner conversation with one immediate retry, then arm the observer.
+
+    2026-11-13: the DOM checks in open_recipient_chat can race a still-rendering
+    profile page or chat panel (observed ~3% of refresh rounds); a single immediate
+    retry covers those transient states instead of dropping the round and waiting a
+    full INBOUND_REFRESH_SECONDS for the next one.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            editor = open_recipient_chat(page, cfg)
+        except (RuntimeError, PlaywrightTimeout) as exc:
+            last_error = exc
+            print(f"Opening the owner conversation failed (attempt {attempt}/{attempts}): {exc}",
+                  file=sys.stderr)
+            continue
+        arm_inbox_mutation_observer(page, selectors["message_selector"])
+        return editor, page.url
+    assert last_error is not None
+    raise last_error
 
 
 def inbound_selectors(cfg: dict) -> dict:
@@ -2945,8 +3006,7 @@ def service_browse_request(page, cfg: dict, selectors: dict):
         response = {"ok": False, "error": str(exc) or exc.__class__.__name__}
     finally:
         try:
-            editor = open_recipient_chat(page, cfg)
-            arm_inbox_mutation_observer(page, selectors["message_selector"])
+            editor = open_inbox_conversation(page, cfg, selectors)[0]
         except Exception as exc:
             detail = f"抖音收件箱恢复失败：{exc.__class__.__name__}: {exc}"
             response["restoreError"] = detail
@@ -3028,9 +3088,7 @@ def run_inbox_listener() -> int:
                     viewport={"width": 1365, "height": 900}
                 )
                 page = context.pages[0] if context.pages else context.new_page()
-                editor = open_recipient_chat(page, cfg)
-                conversation_url = page.url
-                arm_inbox_mutation_observer(page, selectors["message_selector"])
+                editor, conversation_url = open_inbox_conversation(page, cfg, selectors)
                 state = read_json(INBOUND_STATE_PATH, {"inbound_reply_attempts": []})
                 merge_window = int((cfg.get("inbound") or {}).get(
                     "merge_window_seconds", INBOUND_MERGE_WINDOW_SECONDS))
@@ -3060,9 +3118,7 @@ def run_inbox_listener() -> int:
                     if time_module.monotonic() >= next_inbox_refresh:
                         next_inbox_refresh = time_module.monotonic() + INBOUND_REFRESH_SECONDS
                         try:
-                            editor = open_recipient_chat(page, cfg)
-                            conversation_url = page.url
-                            arm_inbox_mutation_observer(page, selectors["message_selector"])
+                            editor, conversation_url = open_inbox_conversation(page, cfg, selectors)
                             next_inbox_check = 0
                         except (RuntimeError, PlaywrightTimeout) as exc:
                             print(f"Inbox refresh failed this round: {exc}", file=sys.stderr)
@@ -3090,9 +3146,9 @@ def run_inbox_listener() -> int:
                         print(f"Inbound processing crashed this round ({exc.__class__.__name__}): {exc}",
                               file=sys.stderr)
                     if page.url != conversation_url:
-                        editor = open_recipient_chat(page, cfg)
-                        conversation_url = page.url
-                    arm_inbox_mutation_observer(page, selectors["message_selector"])
+                        editor, conversation_url = open_inbox_conversation(page, cfg, selectors)
+                    else:
+                        arm_inbox_mutation_observer(page, selectors["message_selector"])
         except KeyboardInterrupt:
             print("Persistent Douyin inbox listener stopped.")
             return 0
