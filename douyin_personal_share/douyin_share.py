@@ -87,7 +87,9 @@ VIDEO_CONTEXT_TTL = timedelta(minutes=15)
 # Inbox identity/batching policy. The page index must never take part in a message key:
 # Douyin re-renders rows and trims the visible window, so an index-derived key changes
 # while the message stays the same, which is what made the bot answer one message twice.
-INBOUND_ID_SCHEME = "stable-v2"
+# stable-v3 (2026-11-13): the conversation DOM turned newest-first (new rows are
+# PREPENDED at the top), so rows are normalized to oldest-first right after reading.
+INBOUND_ID_SCHEME = "stable-v3"
 INBOUND_MERGE_WINDOW_SECONDS = 30
 INBOUND_BATCH_MAX_MESSAGES = 4
 INBOUND_BATCH_MAX_CHARS = 2000
@@ -2708,6 +2710,40 @@ def process_inbox_page(page, editor, cfg: dict, selectors: dict, state: dict,
     now = datetime.now(SINGAPORE)
     scroll_inbox_to_bottom(page, selectors)
     rows = read_inbound_rows(page, selectors)
+    # 2026-11-13: Douyin renders the conversation newest-first in the DOM - a new
+    # message is PREPENDED above the older rows (observed live: the owner's "在不" and
+    # "11" landed at list position 0, and every rule below then judged them "history
+    # above the anchor" and swallowed them without ever asking the model). The
+    # alignment snapshot, the after_known flag and "newest row = assigned[-1]" all
+    # speak oldest-first, so normalize the order right after reading instead of
+    # rewriting every rule.
+    rows = rows[::-1]
+    for position, row in enumerate(rows):
+        row["index"] = position
+    if state.get("inbound_id_scheme") != INBOUND_ID_SCHEME:
+        if state.get("inbound_id_scheme") == "stable-v2":
+            # v2 -> v3: the ids and bookkeeping stay valid, only the row ORDER
+            # semantics changed. Reverse the stored snapshot in place so alignment
+            # keeps working: nothing is re-answered, and nothing already consumed is
+            # replayed. The migration itself must leave a diagnostic trail.
+            snapshot = state.get("inbound_row_snapshot")
+            state["inbound_id_scheme"] = INBOUND_ID_SCHEME
+            if isinstance(snapshot, list):
+                state["inbound_row_snapshot"] = list(reversed(snapshot))
+            log_inbound_diagnostic({"id": "", "isVideo": False}, None, "none", "scheme_migrated",
+                                   "", extra={"from": "stable-v2", "to": INBOUND_ID_SCHEME,
+                                              "snapshotReversed": isinstance(snapshot, list)})
+            print("Inbound rows are now normalized to oldest-first; the v2 snapshot was reversed in place.")
+        else:
+            # One-time migration: `dom:<page-index>` keys cannot be compared with stable keys.
+            # The baseline is rebuilt from the currently visible rows. Consequence: messages the
+            # old bug already dropped stay unanswered, and history is never replayed.
+            state["inbound_reply_attempts"] = []
+            state["inbound_baseline_initialized"] = False
+            state["inbound_id_scheme"] = INBOUND_ID_SCHEME
+            state.pop("inbound_seen", None)
+            state.pop("inbound_retry_queue", None)
+            print("Inbound id scheme migrated; rebuilding the baseline without replying.")
     cached_snapshot = state.get("inbound_row_snapshot")
     assigned, new_snapshot, matched = assign_stable_message_ids(
         rows, cached_snapshot, state.get("inbound_reply_attempts"))
@@ -2720,16 +2756,6 @@ def process_inbox_page(page, editor, cfg: dict, selectors: dict, state: dict,
     for item in assigned:
         if item["id"]:
             item["row"]["id"] = item["id"]
-    if state.get("inbound_id_scheme") != INBOUND_ID_SCHEME:
-        # One-time migration: `dom:<page-index>` keys cannot be compared with stable keys.
-        # The baseline is rebuilt from the currently visible rows. Consequence: messages the
-        # old bug already dropped stay unanswered, and history is never replayed.
-        state["inbound_reply_attempts"] = []
-        state["inbound_baseline_initialized"] = False
-        state["inbound_id_scheme"] = INBOUND_ID_SCHEME
-        state.pop("inbound_seen", None)
-        state.pop("inbound_retry_queue", None)
-        print("Inbound id scheme migrated; rebuilding the baseline without replying.")
     # A transient empty render (chat refresh) must not erase the alignment snapshot, and an
     # empty read must not become an empty baseline: both would make the next new message
     # look like history and get consumed without any reply.

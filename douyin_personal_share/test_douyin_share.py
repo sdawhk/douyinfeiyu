@@ -307,7 +307,8 @@ class ShareLogicTests(unittest.TestCase):
         self.assertTrue(all(item["after_known"] for item in assigned[1:]))
 
     def _run_inbox_round(self, state, page_rows, reply_text="嗯，我在。"):
-        """One process_inbox_page call against a fake DOM that renders no data-message-id."""
+        """One process_inbox_page call against a fake newest-first DOM (2026-11-13:
+        Douyin prepends new rows at the top, so page_rows must be given newest-first)."""
         class PollPage:
             def evaluate(self, _script, _selectors):
                 return [dict(row) for row in page_rows]
@@ -347,7 +348,7 @@ class ShareLogicTests(unittest.TestCase):
         appended = base + [{"platform_id": "", "index": 2, "text": "晚上吃什么"}]
         new_id = assign_stable_message_ids(appended, snapshot)[0][-1]["id"]
         state["inbound_id_scheme"] = INBOUND_ID_SCHEME
-        result, outcomes, request = self._run_inbox_round(state, appended)
+        result, outcomes, request = self._run_inbox_round(state, list(reversed(appended)))
         self.assertEqual(result, 0)
         self.assertEqual(request.call_args.args[2], new_id)
         self.assertIn("reply_sent", outcomes)
@@ -362,7 +363,7 @@ class ShareLogicTests(unittest.TestCase):
                 {"platform_id": "", "index": 1, "text": "第二条"},
                 {"platform_id": "", "index": 2, "text": "第三条"}]
         state = {}
-        result, outcomes, request = self._run_inbox_round(state, rows)
+        result, outcomes, request = self._run_inbox_round(state, list(reversed(rows)))
         self.assertEqual(result, 0)
         self.assertIn("baseline_rebuilt", outcomes)
         self.assertIn("reply_requested", outcomes)
@@ -383,7 +384,7 @@ class ShareLogicTests(unittest.TestCase):
                  "inbound_seen": {}}
         revealed = [{"platform_id": "", "index": 0, "text": "更早的历史"}] + base
         state["inbound_id_scheme"] = INBOUND_ID_SCHEME
-        result, outcomes, request = self._run_inbox_round(state, revealed)
+        result, outcomes, request = self._run_inbox_round(state, list(reversed(revealed)))
         self.assertEqual(result, 0)
         self.assertIn("swallowed_as_history", outcomes)
         self.assertEqual(request.call_count, 0)
@@ -405,12 +406,43 @@ class ShareLogicTests(unittest.TestCase):
         repeated_id = assign_stable_message_ids(appended, snapshot, known)[0][-1]["id"]
         self.assertNotEqual(repeated_id, known[0])
         state["inbound_id_scheme"] = INBOUND_ID_SCHEME
-        result, outcomes, request = self._run_inbox_round(state, appended)
+        result, outcomes, request = self._run_inbox_round(state, list(reversed(appended)))
         self.assertEqual(result, 0)
         self.assertIn("reply_requested", outcomes)
         self.assertIn("reply_sent", outcomes)
         self.assertEqual(request.call_args.args[2], repeated_id)
         self.assertNotIn("swallowed_as_history", outcomes)
+        self.assertTrue(state["inbound_last_reply_at"])
+
+    def test_newest_first_dom_is_normalized_and_v2_snapshot_migrates(self):
+        # 2026-11-13 incident: Douyin started prepending new messages at the TOP of the
+        # conversation DOM. Fed straight into the anchor logic, every new message looked
+        # like "history above the known anchor" and was swallowed (owner's "在不"/"11").
+        # Rows must be normalized to oldest-first, and a v2 state's newest-first snapshot
+        # must be reversed in place so nothing is re-answered or replayed.
+        base = [{"platform_id": "", "index": 0, "text": "测试"},
+                {"platform_id": "", "index": 1, "text": "别的话题"}]
+        _, snapshot, _ = assign_stable_message_ids(base, None)  # oldest-first contract
+        known = [item["id"] for item in assign_stable_message_ids(base, snapshot)[0]]
+        state = {"inbound_baseline_initialized": True,
+                 "inbound_row_snapshot": [dict(item) for item in reversed(snapshot)],
+                 "inbound_reply_attempts": known[:],
+                 "inbound_seen": {},
+                 "inbound_id_scheme": "stable-v2"}
+        dom_rows = [{"platform_id": "", "index": 0, "text": "11"}] + \
+                   [dict(row) for row in reversed(base)]  # newest first, like the live DOM
+        expected_id = assign_stable_message_ids(
+            base + [{"platform_id": "", "text": "11"}], snapshot, known)[0][-1]["id"]
+        result, outcomes, request = self._run_inbox_round(state, dom_rows)
+        self.assertEqual(result, 0)
+        self.assertIn("scheme_migrated", outcomes)
+        self.assertIn("reply_requested", outcomes)
+        self.assertIn("reply_sent", outcomes)
+        self.assertEqual(request.call_args.args[2], expected_id)
+        self.assertNotIn("swallowed_as_history", outcomes)
+        self.assertEqual(state["inbound_id_scheme"], INBOUND_ID_SCHEME)
+        self.assertEqual([item["k"] for item in state["inbound_row_snapshot"]],
+                         ["t:测试", "t:别的话题", "t:11"])
         self.assertTrue(state["inbound_last_reply_at"])
 
     def test_inbound_batch_merges_a_burst_and_caps_the_round(self):
