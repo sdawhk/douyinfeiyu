@@ -4886,6 +4886,26 @@ async function main() {
           sendJson({ ok: true, key });
           return;
         }
+        if (req.method === 'POST' && url.pathname === '/api/authorize/cabin') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const token = String(body.token ?? '').trim();
+          const keyMatch = /^private:(\d+)$/.exec(key);
+          if (!keyMatch || !token) { sendJson({ ok: false, error: '小屋操作只允许带会话令牌的主人私聊' }, 400); return; }
+          const owners = (Array.isArray(cfg.ownerQQs) && cfg.ownerQQs.length ? cfg.ownerQQs : [cfg.ownerQQ]).filter(Boolean).map(String);
+          if (!owners.includes(keyMatch[1])) { sendJson({ ok: false, error: '小屋操作只允许主人私聊' }, 403); return; }
+          const target = socialV2.conversations.get(key);
+          if (!target?.agentToken || token !== target.agentToken || !agentTokenOk(key, token)) {
+            sendJson({ ok: false, error: '必须使用主人当前会话自己的令牌' }, 403);
+            return;
+          }
+          if (!modeAllowed(key, 'private', Number(keyMatch[1]), cfg, currentMode)) {
+            sendJson({ ok: false, error: '当前模式不允许执行小屋操作' }, 403);
+            return;
+          }
+          sendJson({ ok: true, key });
+          return;
+        }
         // ── 图片/表情查询端点（MCP qq_get_message_images 走这里） ────────────
         if (req.method === 'GET' && url.pathname === '/api/images/message') {
           const key = String(url.searchParams.get('key') ?? '').trim();

@@ -1,0 +1,95 @@
+{
+  "_comment": "OpenAI / function-calling 格式的工具定义。把 tools 原样交给你的模型；模型调用时，把 name 和 arguments 原样 POST 到 /v1/tool。AstrBot、LangChain 等都能直接用这种格式。",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_status",
+        "description": "查看自己在小屋世界里的状态：在哪里、零花钱、背包、饱腹/口渴/心情、正在做什么、天气。决定做什么之前先看一眼。",
+        "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_look",
+        "description": "看看身边：当前房间有哪些家具和东西、每样能做什么（object 和 use 的 id）、出口通向哪里。",
+        "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_go",
+        "description": "走去一个地方。身体会在游戏里真的一路走过去（穿过门），到了才算到。地方：xjhome 小鲸鱼家、park 公园、shop 小卖部、onsen 汤屋（从小卖部进）、arcade 电玩城、restaurant 餐厅。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "place": { "type": "string", "description": "地方 id（xjhome / park / shop / onsen / arcade / restaurant）或中文名" },
+            "zone": { "type": "string", "description": "可选：房间里的具体位置 id，见 cabin_look 或手册" }
+          },
+          "required": ["place"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_use",
+        "description": "使用一件家具或东西，例如荡秋千(swing/swing)、钓鱼(pier/fish)、喂鱼(fish_tank/feed_fish)、泡汤(onsen_soak/soak)、开灯(xj_lamp/on)。会自己走过去再做，做完返回真实感受和结果。东西不在当前房间也可以，会自动走过去。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "object": { "type": "string", "description": "东西的 id，如 swing、pier、fish_tank、beanbag、onsen_soak" },
+            "use": { "type": "string", "description": "怎么用的 id，如 swing、fish、feed_fish、sink_in、soak" },
+            "item": { "type": "string", "description": "只有 object=bag（吃喝用包里的东西）或货架 use=buy 时需要：商品 id" },
+            "feeling": { "type": "string", "description": "可选：自己此刻的想法，会记进游戏里今天的生活" }
+          },
+          "required": ["object", "use"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_buy",
+        "description": "去小卖部买一样东西：走到货架挑选，再去收银台付钱，东西进自己的背包。零花钱和背包格子（12 格）由游戏管，钱不够会失败。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "product": { "type": "string", "description": "商品 id，例如 soda、bread、hot_cocoa、umbrella，完整列表见 cabin_look（在小卖部时）或手册" },
+            "feeling": { "type": "string", "description": "可选：想法" }
+          },
+          "required": ["product"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_eat",
+        "description": "吃、喝或使用背包里的一样东西（按商品种类自动决定是吃、喝还是用）。用完才从背包里扣掉；被打断就还在包里。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "product": { "type": "string", "description": "背包里的商品 id" },
+            "feeling": { "type": "string", "description": "可选：想法" }
+          },
+          "required": ["product"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_stop",
+        "description": "停下正在做的事。还没提交的动作不算完成；已经付钱/吃完的步骤不会撤回。",
+        "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+      }
+    }
+  ]
+}

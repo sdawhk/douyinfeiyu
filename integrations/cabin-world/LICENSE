@@ -1,0 +1,49 @@
+Cabin World (小屋世界)
+Copyright (c) 2026 VADS
+
+This project is open source. It uses two licences: MIT for code, CC BY 4.0 for everything else.
+本项目开源，使用两种许可：代码用 MIT，其他内容用 CC BY 4.0。
+
+  Code / 代码 (MIT, full text below):
+    game scripts and scenes (game/**/*.gd, *.tscn, *.tres, *.gdshader, project.godot, export_presets.cfg),
+    bridge/, examples/, tools/, start.cmd, selfcheck.cmd
+
+  Art, game data and documentation / 美术、游戏数据、文档
+  (Creative Commons Attribution 4.0 International, CC BY 4.0):
+    images (game/assets/**/*.png, *.ico, docs/images/), game data (game/assets/**/*.json,
+    bridge/catalog.json, bridge/openai-tools.json), documentation (README.md, docs/, LICENSE-NOTES.md)
+    Full text: https://creativecommons.org/licenses/by/4.0/legalcode
+    Attribution / 署名: "Cabin World by VADS"
+
+  NOT covered by these licences / 不在以上许可范围内:
+    The Naiwa NPC sprites (shop cashier, arcade and restaurant staff): game/assets/npcs/naiwa-*.png and
+    game/assets/npcs/shop-cashier-*.png. The pixel art was drawn by VADS, but its look is based on a
+    third-party character, so VADS cannot grant rights to that design. Treat these images as
+    non-commercial fan art and replace them before any commercial use. See LICENSE-NOTES.md.
+    Naiwa 店员的像素图：像素画由 VADS 绘制，但造型参考了他人的角色，VADS 无权授权这个造型。仅作非商业同人，商用前请替换图片。
+
+  Third-party / 第三方:
+    The Godot Engine built into CabinWorld.exe is under its own MIT licence, see third-party/godot/.
+
+-------------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2026 VADS
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

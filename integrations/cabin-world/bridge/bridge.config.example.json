@@ -1,0 +1,13 @@
+{
+  "_说明": "小屋世界桥的设置。相对路径相对于本文件所在的 bridge 文件夹。各字段见 docs/INSTALL.md 第 5 节。",
+  "resident": "xiaojingyu",
+  "displayName": "小鲸鱼",
+  "hostName": "我的机器人",
+  "dataDir": "../data",
+  "gameExe": "../CabinWorld.exe",
+  "launchGame": true,
+  "http": { "port": 18790 },
+  "weather": { "mode": "virtual" },
+  "waitMs": 45000,
+  "autonomy": { "enabled": false }
+}

@@ -1,0 +1,28 @@
+{
+  "_说明": "小屋世界桥。相对路径相对于本文件所在的 bridge 文件夹。字段说明见 docs/INSTALL.md 第 5 节。",
+  "hostName": "主人",
+  "dataDir": "../data",
+  "gameExe": "../CabinWorld.exe",
+  "launchGame": true,
+  "weather": {
+    "mode": "virtual"
+  },
+  "waitMs": 45000,
+  "autonomy": {
+    "enabled": true,
+    "intervalMs": 900000,
+    "firstDelayMs": 20000
+  },
+  "chatLink": {
+    "enabled": true,
+    "log": "../data/world/cabin-log.jsonl"
+  },
+  "residents": [
+    {
+      "key": "xiaojingyu",
+      "who": "xiaojingyu",
+      "name": "大肥鱼",
+      "port": 18790
+    }
+  ]
+}

@@ -20,10 +20,11 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 
 - **QQ 侧**：`@snowluma/sdk` 的 `SnowLumaWebSocketClient`（OneBot v11 WebSocket 客户端，自动重连）
 - **DSH 侧**：复用官方 `@deepseek-ai/dsh-host-apiproxy` 的 `AbstractApiClient` 与 zod schema，桥接进程实现 Node 传输层（fetch unary + WebSocket 下行事件流）
-- **agent 自主收发 QQ**：DSH 的 MCP 客户端（`~/.dsh/profiles/web/cordis.patch.yml` 配置）接入三个 MCP server：
+- **agent 自主收发 QQ**：DSH 的 MCP 客户端（`~/.dsh/profiles/web/cordis.patch.yml` 配置）接入四个 MCP server：
   - `snowluma`（桥接自带 `src/mcp-snowluma-safe.js`）：QQ 动作**安全子集**（查状态/查群/查消息/发消息，发送强制白名单；机器人自身昵称/签名及自己 QQ 空间的动态操作仅主人私聊可用，主人已授予持续授权）
   - `snowluma-host`（桥接自带 `src/mcp-host-server.js`）：`snowluma_status` 仅主人私聊可用；`start_snowluma` / `stop_snowluma` 需显式开启 `snowluma.allowProcessControl: true` 且仅在 `closed-agent` 模式可用
   - `web-search-safe`（桥接自带 `src/mcp-web-search-safe.js`）：只读 `web_search` / `web_fetch`；搜索优先 Bing RSS，再试 Bing 网页与 DuckDuckGo，网页抓取带 SSRF 防护。明确询问“是什么梗”“梗的出处”等会先联网检索再回答。
+  - `cabin-world-safe`（桥接自带 `src/mcp-cabin-world-safe.js`）：连接桌面小屋世界 `C:\Users\admin\Desktop\小屋世界-v0.1` 的本机桥；先运行 `打开小屋.bat`，adapter 每次调用读取 `data\bridge.json` 中轮换的 token。`cabin_status`、`cabin_look` 和只读 `cabin_recent` 可在通过当前会话授权后查询；`cabin_go/use/buy/eat/stop` 仅允许 `config.json` 中主人 QQ 的私聊，并核验 token 属于该主人会话。可用 `CABIN_BRIDGE_JSON` 指定 bridge.json 路径。
 - **会话模型**：每个 QQ 会话（私聊/群）对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`
 - **性格定制**：QQ 会话默认使用 `qq-chat` agent preset（`~/.dsh/.agent-presets/qq-chat/agent.cordis.yml`），`reserved2` 使用 `qq-chat-v2`（`~/.dsh/.agent-presets/qq-chat-v2/agent.cordis.yml`）；人格与默认 DSH 一致（coding agent），仅附加 QQ 场景规则；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
 - **本地控制台**：桥接自带 Web 控制台 `http://127.0.0.1:3100`——切换运行模式（chat / closed-agent / reserved / reserved2）、设置角色、静默开关、查看活动日志、修改管理员/控制台令牌，全部即时生效；访问需要令牌（`config.json` 的 `consoleToken`，未配置时自动生成并打印在启动日志；控制台内可手动修改或重新生成）

@@ -40,6 +40,7 @@ const SAFE_PREFIXES = [
   'mcp__snowluma__',
   'mcp__snowluma-host__',
   'mcp__web-search-safe__',
+  'mcp__cabin-world-safe__',
 ]
 
 // 无害模型侧工具：todo_write 仅维护任务列表。QQ 不提供 DSH WebUI 的交互提问流程，

@@ -4,7 +4,7 @@
 // 功能：
 //   1. 安装两套 agent preset：qq-chat、qq-chat-v2
 //   2. 在 DSH profile 的 cordis.patch.yml 中挂载三个 MCP server：
-//      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe
+//      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe / mcp-cabin-world-safe
 //   3. 在 profile package.json 中注册 qq-mode-console 插件
 //
 // 用法：
@@ -73,6 +73,7 @@ function mcpBlock() {
     'mcp-snowluma': path.join(REPO_ROOT, 'src', 'mcp-snowluma-safe.js'),
     'mcp-snowluma-host': path.join(REPO_ROOT, 'src', 'mcp-host-server.js'),
     'mcp-web-search-safe': path.join(REPO_ROOT, 'src', 'mcp-web-search-safe.js'),
+    'mcp-cabin-world-safe': path.join(REPO_ROOT, 'src', 'mcp-cabin-world-safe.js'),
   };
   let out = '# === qq-bridge MCP BEGIN ===\n';
   for (const [id, script] of Object.entries(servers)) {
@@ -87,6 +88,9 @@ function mcpBlock() {
     out += `          - ${yamlSingleQuote(script)}\n`;
     if (id === 'mcp-snowluma') {
       out += `        toolCallTimeoutMs: 725000\n`;
+    }
+    if (id === 'mcp-cabin-world-safe') {
+      out += `        toolCallTimeoutMs: 220000\n`;
     }
   }
   out += '# === qq-bridge MCP END ===\n';

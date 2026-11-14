@@ -1,0 +1,2250 @@
+{
+ "format": "cabinworld-catalog/1",
+ "generated": "2026-11-10",
+ "note": "Generated from the game data. Scene ids qianxia-park / qianxia-shop are historical ids of the shared park and shop.",
+ "wallet": {
+  "start": 30,
+  "daily": 20,
+  "cap": 80,
+  "bagSlots": 12
+ },
+ "rewardCap": 150,
+ "spaces": [
+  {
+   "id": "park",
+   "scene": "qianxia-park",
+   "name": "公园",
+   "fullName": "小屋旁的公园",
+   "outdoor": true,
+   "owner": null,
+   "links": [
+    "shop",
+    "xjhome",
+    "arcade",
+    "restaurant"
+   ],
+   "zones": [
+    {
+     "id": "restaurantfront",
+     "name": "餐厅岔路入口",
+     "position": "北侧"
+    },
+    {
+     "id": "gate",
+     "name": "小屋门口",
+     "position": "左上角"
+    },
+    {
+     "id": "bench",
+     "name": "大树下的长椅",
+     "position": "左上方"
+    },
+    {
+     "id": "swing",
+     "name": "秋千",
+     "position": "上方中间"
+    },
+    {
+     "id": "slide",
+     "name": "滑滑梯",
+     "position": "右上方"
+    },
+    {
+     "id": "carousel",
+     "name": "小转马",
+     "position": "中间"
+    },
+    {
+     "id": "flowers",
+     "name": "花坛",
+     "position": "中间偏左"
+    },
+    {
+     "id": "meadow",
+     "name": "大草坪",
+     "position": "右侧"
+    },
+    {
+     "id": "pier",
+     "name": "钓鱼栈桥",
+     "position": "左下河边"
+    },
+    {
+     "id": "bridge",
+     "name": "木桥",
+     "position": "下方小河上"
+    },
+    {
+     "id": "riverbank",
+     "name": "河对岸的芦苇滩",
+     "position": "右下角"
+    },
+    {
+     "id": "shopfront",
+     "name": "小卖部门口",
+     "position": "右侧"
+    },
+    {
+     "id": "xjgate",
+     "name": "小拽家门口",
+     "position": "右上角"
+    },
+    {
+     "id": "seesaw",
+     "name": "双人跷跷板",
+     "position": "左下方"
+    },
+    {
+     "id": "rider",
+     "name": "小鲸鱼摇摇乐",
+     "position": "下方"
+    },
+    {
+     "id": "arcade_bridge",
+     "name": "通往电玩城的桥头",
+     "position": ""
+    }
+   ]
+  },
+  {
+   "id": "xjhome",
+   "scene": "xiaojingyu-home",
+   "name": "小拽家",
+   "fullName": "我们的小屋",
+   "outdoor": false,
+   "owner": [
+    "resident:xiaojingyu",
+    "resident:xiaozhuai"
+   ],
+   "links": [
+    "park"
+   ],
+   "zones": [
+    {
+     "id": "xj_door",
+     "name": "门口",
+     "position": "下方"
+    },
+    {
+     "id": "xj_bed",
+     "name": "鲸鱼床",
+     "position": "右上"
+    },
+    {
+     "id": "xj_bed2",
+     "name": "鲸鱼床（小拽的）",
+     "position": "右上"
+    },
+    {
+     "id": "xj_desk",
+     "name": "电脑桌",
+     "position": "左上"
+    },
+    {
+     "id": "xj_tank",
+     "name": "鱼缸",
+     "position": "左下"
+    },
+    {
+     "id": "xj_sofa",
+     "name": "懒人沙发",
+     "position": "右下"
+    },
+    {
+     "id": "xj_window",
+     "name": "圆窗",
+     "position": "上方"
+    },
+    {
+     "id": "xj_rug",
+     "name": "波浪地毯",
+     "position": "中间"
+    },
+    {
+     "id": "xj_shelf",
+     "name": "书架",
+     "position": "左上"
+    },
+    {
+     "id": "xj_album",
+     "name": "朋友相册",
+     "position": "右上"
+    },
+    {
+     "id": "xj_draw",
+     "name": "画架",
+     "position": "右侧"
+    },
+    {
+     "id": "xj_notes",
+     "name": "书桌",
+     "position": "下方"
+    },
+    {
+     "id": "xj_accessories",
+     "name": "手机与耳机收纳桌",
+     "position": "床边"
+    },
+    {
+     "id": "chess_xj_a",
+     "name": "波浪地毯左边",
+     "position": "中间"
+    },
+    {
+     "id": "chess_xj_b",
+     "name": "波浪地毯右边",
+     "position": "中间"
+    }
+   ]
+  },
+  {
+   "id": "shop",
+   "scene": "qianxia-shop",
+   "name": "小卖部",
+   "fullName": "公园小卖部",
+   "outdoor": false,
+   "owner": null,
+   "links": [
+    "park",
+    "onsen"
+   ],
+   "zones": [
+    {
+     "id": "shop_door",
+     "name": "店门口",
+     "position": "下方中间"
+    },
+    {
+     "id": "snacks",
+     "name": "零食货架",
+     "position": "左上"
+    },
+    {
+     "id": "drinks",
+     "name": "饮料冰柜",
+     "position": "右上"
+    },
+    {
+     "id": "daily",
+     "name": "日用品货架",
+     "position": "中间"
+    },
+    {
+     "id": "icecream",
+     "name": "冰淇淋柜",
+     "position": "左下"
+    },
+    {
+     "id": "counter",
+     "name": "收银台",
+     "position": "右下"
+    },
+    {
+     "id": "food",
+     "name": "食品架",
+     "position": "后排左侧"
+    },
+    {
+     "id": "bread",
+     "name": "面包架",
+     "position": "后排中间"
+    },
+    {
+     "id": "produce",
+     "name": "果蔬架",
+     "position": "左前方"
+    },
+    {
+     "id": "magazines",
+     "name": "杂志架",
+     "position": "前方"
+    },
+    {
+     "id": "shop_onsen_door",
+     "name": "通往汤屋的木门",
+     "position": "右上角"
+    },
+    {
+     "id": "hot_cabinet",
+     "name": "热饮柜",
+     "position": "上方，冰柜旁边"
+    },
+    {
+     "id": "bench_a",
+     "name": "长椅靠门那头",
+     "position": "右侧"
+    },
+    {
+     "id": "bench_b",
+     "name": "长椅中间",
+     "position": "右侧"
+    },
+    {
+     "id": "bench_c",
+     "name": "长椅靠收银台那头",
+     "position": "右侧"
+    }
+   ]
+  },
+  {
+   "id": "arcade",
+   "scene": "world-arcade",
+   "name": "电玩城",
+   "fullName": "星光电玩城",
+   "outdoor": false,
+   "owner": null,
+   "links": [
+    "park"
+   ],
+   "zones": [
+    {
+     "id": "arcade_door",
+     "name": "电玩城门口",
+     "position": ""
+    },
+    {
+     "id": "arcade_blocks",
+     "name": "俄罗斯方块机台",
+     "position": ""
+    },
+    {
+     "id": "arcade_mines",
+     "name": "扫雷机台",
+     "position": ""
+    },
+    {
+     "id": "arcade_xiangqi",
+     "name": "象棋机台",
+     "position": ""
+    },
+    {
+     "id": "arcade_snake",
+     "name": "贪吃蛇机台",
+     "position": ""
+    },
+    {
+     "id": "arcade_xiangqi_far",
+     "name": "象棋桌左边的位置",
+     "position": ""
+    },
+    {
+     "id": "arcade_xiangqi_near",
+     "name": "象棋桌右边的位置",
+     "position": ""
+    },
+    {
+     "id": "arcade_snake_left",
+     "name": "贪吃蛇机台左边",
+     "position": ""
+    },
+    {
+     "id": "arcade_snake_right",
+     "name": "贪吃蛇机台右边",
+     "position": ""
+    }
+   ]
+  },
+  {
+   "id": "onsen",
+   "scene": "world-onsen",
+   "name": "汤屋",
+   "fullName": "小卖部后面的汤屋",
+   "outdoor": false,
+   "owner": null,
+   "links": [
+    "shop"
+   ],
+   "zones": [
+    {
+     "id": "onsen_door",
+     "name": "门口",
+     "position": "下方"
+    },
+    {
+     "id": "onsen_lockers",
+     "name": "更衣处",
+     "position": "左下"
+    },
+    {
+     "id": "onsen_rest_a",
+     "name": "更衣室左边的长凳",
+     "position": "下方偏左"
+    },
+    {
+     "id": "onsen_rest_b",
+     "name": "更衣室右边的长凳",
+     "position": "下方偏右"
+    },
+    {
+     "id": "onsen_stairs",
+     "name": "下水的台阶",
+     "position": "大池子南边"
+    },
+    {
+     "id": "onsen_soak_a",
+     "name": "浅池上面的石座",
+     "position": "左上"
+    },
+    {
+     "id": "onsen_soak_b",
+     "name": "浅池下面的石座",
+     "position": "左侧"
+    },
+    {
+     "id": "onsen_shower_a",
+     "name": "第一间淋浴",
+     "position": "右上"
+    },
+    {
+     "id": "onsen_shower_b",
+     "name": "第二间淋浴",
+     "position": "右侧"
+    },
+    {
+     "id": "onsen_shower_c",
+     "name": "第三间淋浴",
+     "position": "右侧偏下"
+    }
+   ]
+  },
+  {
+   "id": "restaurant",
+   "scene": "world-restaurant",
+   "name": "餐厅",
+   "fullName": "公园餐厅",
+   "outdoor": false,
+   "owner": null,
+   "links": [
+    "park"
+   ],
+   "zones": [
+    {
+     "id": "gate",
+     "name": "gate",
+     "position": ""
+    },
+    {
+     "id": "hall",
+     "name": "hall",
+     "position": ""
+    },
+    {
+     "id": "kitchen",
+     "name": "kitchen",
+     "position": ""
+    },
+    {
+     "id": "pantry",
+     "name": "pantry",
+     "position": ""
+    },
+    {
+     "id": "wash",
+     "name": "wash",
+     "position": ""
+    },
+    {
+     "id": "prep",
+     "name": "prep",
+     "position": ""
+    },
+    {
+     "id": "cook_a",
+     "name": "cook_a",
+     "position": ""
+    },
+    {
+     "id": "cook_b",
+     "name": "cook_b",
+     "position": ""
+    },
+    {
+     "id": "oven",
+     "name": "oven",
+     "position": ""
+    },
+    {
+     "id": "fryer",
+     "name": "fryer",
+     "position": ""
+    },
+    {
+     "id": "sushi",
+     "name": "sushi",
+     "position": ""
+    },
+    {
+     "id": "ingredients",
+     "name": "ingredients",
+     "position": ""
+    },
+    {
+     "id": "order_a",
+     "name": "order_a",
+     "position": ""
+    },
+    {
+     "id": "order_b",
+     "name": "order_b",
+     "position": ""
+    },
+    {
+     "id": "pickup_a",
+     "name": "pickup_a",
+     "position": ""
+    },
+    {
+     "id": "pickup_b",
+     "name": "pickup_b",
+     "position": ""
+    },
+    {
+     "id": "return",
+     "name": "return",
+     "position": ""
+    },
+    {
+     "id": "water",
+     "name": "water",
+     "position": ""
+    },
+    {
+     "id": "seat-a1_use",
+     "name": "seat-a1_use",
+     "position": ""
+    },
+    {
+     "id": "seat-a2_use",
+     "name": "seat-a2_use",
+     "position": ""
+    },
+    {
+     "id": "seat-b1_use",
+     "name": "seat-b1_use",
+     "position": ""
+    },
+    {
+     "id": "seat-b2_use",
+     "name": "seat-b2_use",
+     "position": ""
+    },
+    {
+     "id": "seat-c1_use",
+     "name": "seat-c1_use",
+     "position": ""
+    },
+    {
+     "id": "seat-c2_use",
+     "name": "seat-c2_use",
+     "position": ""
+    },
+    {
+     "id": "seat-c3_use",
+     "name": "seat-c3_use",
+     "position": ""
+    },
+    {
+     "id": "seat-c4_use",
+     "name": "seat-c4_use",
+     "position": ""
+    },
+    {
+     "id": "seat-d1_use",
+     "name": "seat-d1_use",
+     "position": ""
+    },
+    {
+     "id": "seat-d2_use",
+     "name": "seat-d2_use",
+     "position": ""
+    }
+   ]
+  }
+ ],
+ "objects": [
+  {
+   "id": "restaurant",
+   "name": "餐厅设施与菜单",
+   "space": "restaurant",
+   "zone": "gate",
+   "description": "公园北边的餐厅：左边是后厨，右边找 Naiwa 店员点餐取餐，前面是餐桌。（需要高级协议 restaurant.*）",
+   "seats": null,
+   "uses": [
+    {
+     "id": "look",
+     "label": "查看餐厅",
+     "seconds": 1,
+     "effect": null,
+     "module": null
+    },
+    {
+     "id": "cook",
+     "label": "自己做菜",
+     "seconds": 1,
+     "effect": null,
+     "module": null
+    },
+    {
+     "id": "order",
+     "label": "找Naiwa点菜",
+     "seconds": 1,
+     "effect": null,
+     "module": null
+    },
+    {
+     "id": "eat",
+     "label": "端菜到桌边吃",
+     "seconds": 1,
+     "effect": null,
+     "module": null
+    },
+    {
+     "id": "sit",
+     "label": "坐下休息",
+     "seconds": 1,
+     "effect": null,
+     "module": null
+    },
+    {
+     "id": "like",
+     "label": "喜欢这道已吃过的菜",
+     "seconds": 1,
+     "effect": null,
+     "module": null
+    },
+    {
+     "id": "dislike",
+     "label": "不喜欢这道已吃过的菜",
+     "seconds": 1,
+     "effect": null,
+     "module": null
+    },
+    {
+     "id": "neutral",
+     "label": "中性评价",
+     "seconds": 1,
+     "effect": null,
+     "module": null
+    }
+   ],
+   "bridge": "advanced"
+  },
+  {
+   "id": "home_chess_xjhome",
+   "name": "小拽家地毯上的棋盘",
+   "space": "xjhome",
+   "zone": "chess_xj_a",
+   "description": "两个人才能下：坐在波浪地毯两边对弈。可以用 play 邀请对方来下。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "play",
+     "label": "下象棋",
+     "seconds": 900,
+     "effect": "chess",
+     "module": null
+    },
+    {
+     "id": "quit",
+     "label": "这局不下了",
+     "seconds": 1,
+     "effect": "chess",
+     "module": null
+    }
+   ],
+   "bridge": "advanced"
+  },
+  {
+   "id": "arcade_snake",
+   "name": "贪吃蛇机台",
+   "space": "arcade",
+   "zone": "arcade_snake",
+   "description": "贪吃蛇：吃到食物会变长，撞墙、撞自己或撞对方就出局。双人对战活到最后或先吃满15个的赢；一个人玩吃满12个算赢。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "play",
+     "label": "玩贪吃蛇",
+     "seconds": 900,
+     "effect": "typing",
+     "module": "arcade_snake"
+    },
+    {
+     "id": "quit",
+     "label": "这局不玩了",
+     "seconds": 1,
+     "effect": "typing",
+     "module": "arcade_snake"
+    }
+   ],
+   "bridge": "advanced"
+  },
+  {
+   "id": "arcade_blocks",
+   "name": "俄罗斯方块机台",
+   "space": "arcade",
+   "zone": "arcade_blocks",
+   "description": "俄罗斯方块：摆满一行就消除，方块会越落越快。消满15行算赢，堆到顶就输。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "play",
+     "label": "玩俄罗斯方块",
+     "seconds": 900,
+     "effect": "typing",
+     "module": "arcade_blocks"
+    },
+    {
+     "id": "quit",
+     "label": "这局不玩了",
+     "seconds": 1,
+     "effect": "typing",
+     "module": "arcade_blocks"
+    }
+   ],
+   "bridge": "advanced"
+  },
+  {
+   "id": "arcade_mines",
+   "name": "扫雷机台",
+   "space": "arcade",
+   "zone": "arcade_mines",
+   "description": "扫雷：9×9的格子里有10颗雷，数字表示周围有几颗雷。翻开所有没有雷的格子就赢，翻到雷就输。第一下一定安全。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "play",
+     "label": "玩扫雷",
+     "seconds": 900,
+     "effect": "typing",
+     "module": "arcade_mines"
+    },
+    {
+     "id": "quit",
+     "label": "这局不玩了",
+     "seconds": 1,
+     "effect": "typing",
+     "module": "arcade_mines"
+    }
+   ],
+   "bridge": "advanced"
+  },
+  {
+   "id": "arcade_xiangqi",
+   "name": "象棋机台",
+   "space": "arcade",
+   "zone": "arcade_xiangqi",
+   "description": "象棋：红方先走，吃掉对方的将帅或让对方无棋可走就赢。可以和电脑下，也可以和另一位住户对弈。三次重复局面算和棋，长将的一方判负。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "play",
+     "label": "玩象棋",
+     "seconds": 900,
+     "effect": "typing",
+     "module": "arcade_xiangqi"
+    },
+    {
+     "id": "quit",
+     "label": "这局不玩了",
+     "seconds": 1,
+     "effect": "typing",
+     "module": "arcade_xiangqi"
+    }
+   ],
+   "bridge": "advanced"
+  },
+  {
+   "id": "big_tree",
+   "name": "大树",
+   "space": "park",
+   "zone": "bench",
+   "description": "长椅后面一棵枝叶很密的大树，晴天在树下是一片阴凉，风大时叶子沙沙响。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "shade",
+     "label": "在树荫下乘凉",
+     "seconds": 8,
+     "effect": "leaf",
+     "module": "big-tree"
+    },
+    {
+     "id": "pick_leaf",
+     "label": "捡一片落叶",
+     "seconds": 5,
+     "effect": "leaf",
+     "module": "big-tree"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "bench",
+   "name": "木长椅",
+   "space": "park",
+   "zone": "bench",
+   "description": "大树下的木长椅，可以坐着发呆、看云。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "sit_bench",
+     "label": "坐在长椅上发呆",
+     "seconds": 10,
+     "effect": "sparkle",
+     "module": "bench"
+    },
+    {
+     "id": "watch_clouds",
+     "label": "靠在长椅上看云",
+     "seconds": 10,
+     "effect": "sparkle",
+     "module": "bench"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "swing",
+   "name": "秋千",
+   "space": "park",
+   "zone": "swing",
+   "description": "双柱木秋千，坐上去可以荡高。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "swing",
+     "label": "荡秋千",
+     "seconds": 12,
+     "effect": "swing",
+     "module": "swing"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "slide",
+   "name": "滑滑梯",
+   "space": "park",
+   "zone": "slide",
+   "description": "从梯子爬上去再滑下来，下雨后滑面会湿。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "slide",
+     "label": "爬上去滑滑梯",
+     "seconds": 9,
+     "effect": "slide",
+     "module": "slide"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "carousel",
+   "name": "小转马",
+   "space": "park",
+   "zone": "carousel",
+   "description": "手推的小转盘，转起来会有一点晕。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "spin",
+     "label": "坐小转马转圈",
+     "seconds": 10,
+     "effect": "carousel",
+     "module": "carousel"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "flower_bed",
+   "name": "花坛",
+   "space": "park",
+   "zone": "flowers",
+   "description": "开着小花的花坛，晴天常有蝴蝶。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "smell_flower",
+     "label": "凑近闻花",
+     "seconds": 6,
+     "effect": "petals",
+     "module": "flowers"
+    },
+    {
+     "id": "watch_butterfly",
+     "label": "看蝴蝶飞",
+     "seconds": 8,
+     "effect": "butterfly",
+     "module": "flowers"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "meadow",
+   "name": "大草坪",
+   "space": "park",
+   "zone": "meadow",
+   "description": "开阔的草坪，有风的时候适合放风筝，也可以躺下来。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "fly_kite",
+     "label": "在草坪上放风筝",
+     "seconds": 14,
+     "effect": "kite",
+     "module": null
+    },
+    {
+     "id": "lie_grass",
+     "label": "躺在草地上",
+     "seconds": 10,
+     "effect": "sparkle",
+     "module": null
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "pier",
+   "name": "钓鱼栈桥",
+   "space": "park",
+   "zone": "pier",
+   "description": "伸进小河的木栈桥，放着一根钓竿，钓到的鱼会放回河里。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "fish",
+     "label": "坐在栈桥上钓鱼",
+     "seconds": 16,
+     "effect": "fishing",
+     "module": "pier"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "river",
+   "name": "小河",
+   "space": "park",
+   "zone": "riverbank",
+   "description": "公园右侧的小河，桥和钓鱼栈桥通向水边。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "skip_stones",
+     "label": "打水漂",
+     "seconds": 7,
+     "effect": "stones",
+     "module": "river-east"
+    },
+    {
+     "id": "feed_ducks",
+     "label": "喂河里的鸭子",
+     "seconds": 9,
+     "effect": "ducks",
+     "module": "river-east"
+    },
+    {
+     "id": "dip_feet",
+     "label": "脱了鞋踩踩河水",
+     "seconds": 8,
+     "effect": "splash",
+     "module": null
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "bridge",
+   "name": "木桥",
+   "space": "park",
+   "zone": "bridge",
+   "description": "跨过小河的木桥，站在上面能看见流水。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "look_river",
+     "label": "趴在桥栏上看流水",
+     "seconds": 8,
+     "effect": "sparkle",
+     "module": "bridge"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "park_lamps",
+   "name": "路灯",
+   "space": "park",
+   "zone": "flowers",
+   "description": "两盏路灯，天黑后自动亮起。",
+   "seats": null,
+   "uses": [],
+   "bridge": "advanced"
+  },
+  {
+   "id": "seesaw",
+   "name": "双人跷跷板",
+   "space": "park",
+   "zone": "seesaw",
+   "description": "侧向摆放的跷跷板，左右两端各有一个座位；两人各坐一边，共用同一根木板。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "ride",
+     "label": "坐上跷跷板",
+     "seconds": 30,
+     "effect": "seesaw",
+     "module": "seesaw"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "rider",
+   "name": "鲸鱼摇摇乐",
+   "space": "park",
+   "zone": "rider",
+   "description": "装在弹簧上的小鲸鱼，可以坐上去轻轻摇。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "rock",
+     "label": "坐鲸鱼摇摇乐",
+     "seconds": 24,
+     "effect": "rider",
+     "module": "rider"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "snack_shelf",
+   "name": "零食货架",
+   "space": "shop",
+   "zone": "snacks",
+   "description": "软糖、薯片、面包、巧克力和小鱼饼干。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "逛零食货架",
+     "seconds": 5,
+     "effect": "sparkle",
+     "module": "snack-shelf"
+    },
+    {
+     "id": "buy",
+     "label": "挑零食",
+     "seconds": 3,
+     "effect": "pick",
+     "module": "snack-shelf",
+     "shelf": "snack"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "drink_fridge",
+   "name": "饮料冰柜",
+   "space": "shop",
+   "zone": "drinks",
+   "description": "亮着灯的冰柜，有汽水、牛奶、茶和水。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "看看冰柜里的饮料",
+     "seconds": 5,
+     "effect": "sparkle",
+     "module": "drink-fridge"
+    },
+    {
+     "id": "buy",
+     "label": "挑饮料",
+     "seconds": 3,
+     "effect": "pick",
+     "module": "drink-fridge",
+     "shelf": "drink"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "freezer",
+   "name": "冰淇淋柜",
+   "space": "shop",
+   "zone": "icecream",
+   "description": "冒着冷气的冰淇淋柜。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "趴在冰柜上看冰淇淋",
+     "seconds": 5,
+     "effect": "sparkle",
+     "module": "freezer"
+    },
+    {
+     "id": "buy",
+     "label": "挑冰淇淋",
+     "seconds": 3,
+     "effect": "pick",
+     "module": "freezer",
+     "shelf": "icecream"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "daily_shelf",
+   "name": "日用品货架",
+   "space": "shop",
+   "zone": "daily",
+   "description": "雨伞、纸巾、防晒霜、笔记本、发圈和创可贴。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "逛日用品货架",
+     "seconds": 5,
+     "effect": "sparkle",
+     "module": "daily-shelf"
+    },
+    {
+     "id": "buy",
+     "label": "挑日用品",
+     "seconds": 3,
+     "effect": "pick",
+     "module": "daily-shelf",
+     "shelf": "daily"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "counter",
+   "name": "收银台",
+   "space": "shop",
+   "zone": "counter",
+   "description": "两段连起来的木收银台，有收银机和购物袋；在这里结账后物品才进入自己的包。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "inspect",
+     "label": "查看收银台和购物袋",
+     "seconds": 6,
+     "effect": "sparkle",
+     "module": "counter"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "shop_window",
+   "name": "店里的窗户",
+   "space": "shop",
+   "zone": "shop_door",
+   "description": "从窗户能看到外面公园的天气。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "look_out",
+     "label": "从店里的窗户看外面",
+     "seconds": 6,
+     "effect": "sparkle",
+     "module": "shop-window"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "food_shelf",
+   "name": "食品架",
+   "space": "shop",
+   "zone": "food",
+   "description": "后排左边的食品架，和零食货架一样可以挑零食。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "看看食品架",
+     "seconds": 6,
+     "effect": "sparkle",
+     "module": "food-shelf"
+    },
+    {
+     "id": "buy",
+     "label": "挑选食品",
+     "seconds": 3,
+     "effect": "pick",
+     "module": "food-shelf",
+     "shelf": "snack"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "bread_shelf",
+   "name": "面包架",
+   "space": "shop",
+   "zone": "bread",
+   "description": "后排中间的面包架，可以看看。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "看看面包架",
+     "seconds": 6,
+     "effect": "sparkle",
+     "module": "bread-shelf"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "produce_shelf",
+   "name": "果蔬展示架",
+   "space": "shop",
+   "zone": "produce",
+   "description": "左前方的果蔬展示架，可以看看。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "看看果蔬展示架",
+     "seconds": 6,
+     "effect": "sparkle",
+     "module": "produce"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "magazine_shelf",
+   "name": "杂志展示架",
+   "space": "shop",
+   "zone": "magazines",
+   "description": "前方的杂志架，可以看看封面（封面不是可读的正文）。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "看看杂志封面",
+     "seconds": 8,
+     "effect": "sparkle",
+     "module": "magazines"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "hot_cabinet",
+   "name": "热饮柜",
+   "space": "shop",
+   "zone": "hot_cabinet",
+   "description": "挨着冰柜的保温柜，亮着暖黄的灯，有热牛奶、咖啡、拿铁、可可、姜茶、蜂蜜柠檬、绿茶和玉米奶。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "看看热饮柜里有什么",
+     "seconds": 5,
+     "effect": "sparkle",
+     "module": "hot-cabinet"
+    },
+    {
+     "id": "buy",
+     "label": "挑热饮",
+     "seconds": 3,
+     "effect": "pick",
+     "module": "hot-cabinet",
+     "shelf": "hotdrink"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "long_bench",
+   "name": "长椅",
+   "space": "shop",
+   "zone": "bench_a",
+   "description": "靠右边墙的一条长椅，能坐三个人，坐下来面朝店里。",
+   "seats": {
+    "a": "bench_a",
+    "b": "bench_b",
+    "c": "bench_c"
+   },
+   "uses": [
+    {
+     "id": "sit",
+     "label": "坐在长椅上歇一会儿",
+     "seconds": 600,
+     "effect": "bench",
+     "module": "long-bench"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "whale_bed",
+   "name": "鲸鱼床",
+   "space": "xjhome",
+   "zone": "xj_bed",
+   "description": "米白枕头、蓝色被褥的模块化木床；躺下和睡觉使用这张床。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "rest",
+     "label": "躺在鲸鱼床上发呆",
+     "seconds": 20,
+     "effect": "lie",
+     "module": "xj-bed"
+    },
+    {
+     "id": "nap",
+     "label": "钻进被子睡个午觉",
+     "seconds": 40,
+     "effect": "nap",
+     "module": "xj-bed"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "whale_bed2",
+   "name": "鲸鱼床（小拽的）",
+   "space": "xjhome",
+   "zone": "xj_bed2",
+   "description": "米白枕头、蓝色被褥的模块化木床；两张并排，这张靠右，属于小拽。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "rest",
+     "label": "躺在鲸鱼床上发呆",
+     "seconds": 20,
+     "effect": "lie",
+     "module": "xj-bed2"
+    },
+    {
+     "id": "nap",
+     "label": "钻进被子睡个午觉",
+     "seconds": 40,
+     "effect": "nap",
+     "module": "xj-bed2"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_computer",
+   "name": "电脑桌",
+   "space": "xjhome",
+   "zone": "xj_desk",
+   "description": "白色长桌上的电脑：看视频、学东西、玩小游戏、打字、上网都在这里。画画去画架，写日记去书桌。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse",
+     "label": "在电脑上冲浪",
+     "seconds": 20,
+     "effect": "typing",
+     "module": "xj-desk"
+    },
+    {
+     "id": "watch_video",
+     "label": "在电脑上看视频",
+     "seconds": 20,
+     "effect": "typing",
+     "module": "xj-desk"
+    },
+    {
+     "id": "learn",
+     "label": "在电脑上学点东西",
+     "seconds": 20,
+     "effect": "typing",
+     "module": "xj-desk"
+    },
+    {
+     "id": "game",
+     "label": "玩一局小游戏",
+     "seconds": 20,
+     "effect": "typing",
+     "module": "xj-desk"
+    },
+    {
+     "id": "type",
+     "label": "在电脑上敲字",
+     "seconds": 15,
+     "effect": "typing",
+     "module": "xj-desk"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "fish_tank",
+   "name": "鱼缸",
+   "space": "xjhome",
+   "zone": "xj_tank",
+   "description": "养着三条小鱼（橙色、黄色、红色）和几根水草，一直在冒泡。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "feed_fish",
+     "label": "给小鱼喂鱼食",
+     "seconds": 8,
+     "effect": "fishfood",
+     "module": "xj-tank"
+    },
+    {
+     "id": "watch_fish",
+     "label": "趴在鱼缸前看鱼",
+     "seconds": 10,
+     "effect": "hearts",
+     "module": "xj-tank"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "beanbag",
+   "name": "懒人沙发",
+   "space": "xjhome",
+   "zone": "xj_sofa",
+   "description": "浅蓝色的懒人沙发，坐下去会陷进去。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "sink_in",
+     "label": "陷进懒人沙发里",
+     "seconds": 20,
+     "effect": "sit",
+     "module": "xj-sofa"
+    },
+    {
+     "id": "read_comic",
+     "label": "窝在沙发上看漫画",
+     "seconds": 20,
+     "effect": "sit",
+     "module": "xj-sofa"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_corner",
+   "name": "交流角",
+   "space": "xjhome",
+   "zone": "xj_sofa",
+   "description": "懒人沙发边上的一角。使用者分享给机器人的文件、音乐可以“放”在这里（内容由你的机器人软件自己提供）。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "read_files",
+     "label": "在交流角翻看主人放来的东西",
+     "seconds": 8,
+     "effect": "sparkle",
+     "module": "xj-sofa"
+    },
+    {
+     "id": "listen_music",
+     "label": "戴上耳机听交流角里的声音",
+     "seconds": 12,
+     "effect": "headphones",
+     "module": "xj-sofa"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "round_window",
+   "name": "圆窗",
+   "space": "xjhome",
+   "zone": "xj_window",
+   "description": "木格圆窗，能看到外面的昼夜和天气。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "look_out",
+     "label": "趴在圆窗边看外面",
+     "seconds": 10,
+     "effect": "sparkle",
+     "module": "xj-window"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "wave_rug",
+   "name": "波浪地毯",
+   "space": "xjhome",
+   "zone": "xj_rug",
+   "description": "房间中间一圈一圈的蓝色波浪地毯，可以在上面打滚、转圈、伸懒腰。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "roll",
+     "label": "在地毯上打滚",
+     "seconds": 8,
+     "effect": "stars",
+     "module": null
+    },
+    {
+     "id": "dance",
+     "label": "在地毯上转圈",
+     "seconds": 6,
+     "effect": "stars",
+     "module": null
+    },
+    {
+     "id": "stretch",
+     "label": "伸个懒腰",
+     "seconds": 5,
+     "effect": "sparkle",
+     "module": null
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_plant",
+   "name": "小盆栽",
+   "space": "xjhome",
+   "zone": "xj_sofa",
+   "description": "沙发旁边开着白色小花的绿植。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "water_plant",
+     "label": "给小盆栽浇水",
+     "seconds": 7,
+     "effect": "water",
+     "module": "xj-plant-west"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_lamp",
+   "name": "吊灯",
+   "space": "xjhome",
+   "zone": "xj_rug",
+   "description": "屋子中间的暖光小吊灯，可以开、关或自动随天色。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "on",
+     "label": "开灯"
+    },
+    {
+     "id": "off",
+     "label": "关灯"
+    },
+    {
+     "id": "auto",
+     "label": "自动"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_bookshelf",
+   "name": "自己的书架",
+   "space": "xjhome",
+   "zone": "xj_shelf",
+   "description": "自己的书架，可以抽一本书翻翻，或整理一下。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "browse_book",
+     "label": "从书架上抽一本书翻翻",
+     "seconds": 8,
+     "effect": "sparkle",
+     "module": "xj-bookshelf"
+    },
+    {
+     "id": "tidy_shelf",
+     "label": "整理书架",
+     "seconds": 7,
+     "effect": "sparkle",
+     "module": "xj-bookshelf"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_rabbit",
+   "name": "白兔摆件",
+   "space": "xjhome",
+   "zone": "xj_shelf",
+   "description": "书架上的白兔摆件，可以摸摸它、擦擦灰。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "pet",
+     "label": "摸摸白兔摆件",
+     "seconds": 6,
+     "effect": "hearts",
+     "module": "xj-rabbit"
+    },
+    {
+     "id": "dust_rabbit",
+     "label": "帮白兔擦擦灰",
+     "seconds": 6,
+     "effect": "sparkle",
+     "module": "xj-rabbit"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_album",
+   "name": "朋友相册",
+   "space": "xjhome",
+   "zone": "xj_album",
+   "description": "朋友相册，可以翻看。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "flip_album",
+     "label": "翻看朋友相册",
+     "seconds": 8,
+     "effect": "hearts",
+     "module": "xj-album"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_easel",
+   "name": "画架",
+   "space": "xjhome",
+   "zone": "xj_draw",
+   "description": "画架，可以随手画几笔。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "sketch",
+     "label": "随手在画布上画几笔",
+     "seconds": 10,
+     "effect": "rainbow",
+     "module": "xj-easel"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_notes",
+   "name": "自己的书桌",
+   "space": "xjhome",
+   "zone": "xj_notes",
+   "description": "摊开的日记本和笔都在这张书桌上：写日记、翻日记都在这里，电脑桌不管这个。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "write_diary",
+     "label": "在书桌上写日记",
+     "seconds": 15,
+     "effect": "sparkle",
+     "module": "xj-desk-book"
+    },
+    {
+     "id": "read_diary",
+     "label": "翻翻自己的日记",
+     "seconds": 8,
+     "effect": "sparkle",
+     "module": "xj-desk-book"
+    },
+    {
+     "id": "doodle",
+     "label": "在本子上涂鸦",
+     "seconds": 8,
+     "effect": "sparkle",
+     "module": "xj-desk-book"
+    },
+    {
+     "id": "tidy_desk",
+     "label": "收拾书桌",
+     "seconds": 6,
+     "effect": "sparkle",
+     "module": "xj-desk-book"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_accessories",
+   "name": "收纳桌",
+   "space": "xjhome",
+   "zone": "xj_accessories",
+   "description": "床边放手机和耳机的收纳桌。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "tidy_table",
+     "label": "把收纳桌擦干净",
+     "seconds": 5,
+     "effect": "sparkle",
+     "module": "xj-accessory_table"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_phone",
+   "name": "手机",
+   "space": "xjhome",
+   "zone": "xj_accessories",
+   "description": "自己的手机，平时放在收纳桌上，可以拿起或放回。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "take",
+     "label": "拿起自己的手机",
+     "seconds": 20,
+     "effect": "phone",
+     "module": "xj-phone"
+    },
+    {
+     "id": "put_back",
+     "label": "放回手机",
+     "seconds": 4,
+     "effect": "sparkle",
+     "module": "xj-phone"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "xj_headphones",
+   "name": "耳机",
+   "space": "xjhome",
+   "zone": "xj_accessories",
+   "description": "自己的耳机，可以戴上或摘下放回。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "wear",
+     "label": "戴上耳机",
+     "seconds": 20,
+     "effect": "headphones",
+     "module": "xj-headphones"
+    },
+    {
+     "id": "remove",
+     "label": "摘下放回耳机",
+     "seconds": 4,
+     "effect": "sparkle",
+     "module": "xj-headphones"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "onsen_pool",
+   "name": "大池子",
+   "space": "onsen",
+   "zone": "onsen_stairs",
+   "description": "很大的公共温水池，从南边的台阶下水，能痛快地游泳。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "swim",
+     "label": "在大池子里游泳",
+     "seconds": 90,
+     "effect": "swim",
+     "module": "onsen-pool"
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "onsen_soak",
+   "name": "浅池石座",
+   "space": "onsen",
+   "zone": "onsen_soak_a",
+   "description": "池子左边的浅水区，有两个石座，不想游泳的话可以靠着安静地泡。",
+   "seats": {
+    "a": "onsen_soak_a",
+    "b": "onsen_soak_b"
+   },
+   "uses": [
+    {
+     "id": "soak",
+     "label": "靠在石座上安静地泡着",
+     "seconds": 120,
+     "effect": "soak",
+     "module": null
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "onsen_shower",
+   "name": "淋浴隔间",
+   "space": "onsen",
+   "zone": "onsen_shower_a",
+   "description": "右边三间带帘子的淋浴隔间，拉上帘子外面看不见。",
+   "seats": {
+    "a": "onsen_shower_a",
+    "b": "onsen_shower_b",
+    "c": "onsen_shower_c"
+   },
+   "uses": [
+    {
+     "id": "shower",
+     "label": "拉上帘子冲个澡",
+     "seconds": 40,
+     "effect": "shower",
+     "module": null
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "onsen_bench",
+   "name": "更衣室长凳",
+   "space": "onsen",
+   "zone": "onsen_rest_a",
+   "description": "更衣室里的木长凳，泡完可以歇一会儿。",
+   "seats": {
+    "a": "onsen_rest_a",
+    "b": "onsen_rest_b"
+   },
+   "uses": [
+    {
+     "id": "rest",
+     "label": "在更衣室的长凳边歇一会儿",
+     "seconds": 30,
+     "effect": "sparkle",
+     "module": null
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "onsen_locker",
+   "name": "更衣处",
+   "space": "onsen",
+   "zone": "onsen_lockers",
+   "description": "放衣服的竹篮和叠好的浴衣。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "change",
+     "label": "换上浴衣",
+     "seconds": 3,
+     "effect": "sparkle",
+     "module": null
+    },
+    {
+     "id": "change_back",
+     "label": "换回自己的衣服",
+     "seconds": 3,
+     "effect": "sparkle",
+     "module": null
+    }
+   ],
+   "bridge": "supported"
+  },
+  {
+   "id": "bag",
+   "name": "随身小包",
+   "space": "any",
+   "zone": null,
+   "description": "装着零花钱和买来的东西，吃喝用都从这里拿。",
+   "seats": null,
+   "uses": [
+    {
+     "id": "eat",
+     "label": "吃",
+     "seconds": 7,
+     "effect": "eat",
+     "module": null,
+     "shelf": "bag"
+    },
+    {
+     "id": "drink",
+     "label": "喝",
+     "seconds": 7,
+     "effect": "drink",
+     "module": null,
+     "shelf": "bag"
+    },
+    {
+     "id": "use",
+     "label": "用",
+     "seconds": 5,
+     "effect": "sparkle",
+     "module": null,
+     "shelf": "bag"
+    }
+   ],
+   "bridge": "supported"
+  }
+ ],
+ "products": [
+  {
+   "id": "gummy",
+   "name": "草莓软糖",
+   "price": 4,
+   "kind": "eat",
+   "shelf": "snack",
+   "taste": "软软的，草莓味很甜",
+   "buyAt": {
+    "object": "snack_shelf",
+    "use": "buy",
+    "zone": "snacks"
+   }
+  },
+  {
+   "id": "chips",
+   "name": "海苔薯片",
+   "price": 6,
+   "kind": "eat",
+   "shelf": "snack",
+   "taste": "咔嚓咔嚓，咸咸的有海苔香",
+   "buyAt": {
+    "object": "snack_shelf",
+    "use": "buy",
+    "zone": "snacks"
+   }
+  },
+  {
+   "id": "bread",
+   "name": "奶油面包",
+   "price": 5,
+   "kind": "eat",
+   "shelf": "snack",
+   "taste": "松软，奶油甜而不腻",
+   "buyAt": {
+    "object": "snack_shelf",
+    "use": "buy",
+    "zone": "snacks"
+   }
+  },
+  {
+   "id": "choco",
+   "name": "巧克力棒",
+   "price": 5,
+   "kind": "eat",
+   "shelf": "snack",
+   "taste": "巧克力在嘴里慢慢化开",
+   "buyAt": {
+    "object": "snack_shelf",
+    "use": "buy",
+    "zone": "snacks"
+   }
+  },
+  {
+   "id": "fishcookie",
+   "name": "小鱼饼干",
+   "price": 4,
+   "kind": "eat",
+   "shelf": "snack",
+   "taste": "小鱼形状，脆脆的，可以分给鸭子",
+   "buyAt": {
+    "object": "snack_shelf",
+    "use": "buy",
+    "zone": "snacks"
+   }
+  },
+  {
+   "id": "soda",
+   "name": "冰镇橘子汽水",
+   "price": 4,
+   "kind": "drink",
+   "shelf": "drink",
+   "taste": "气泡在舌头上炸开，冰得一激灵",
+   "cold": true,
+   "buyAt": {
+    "object": "drink_fridge",
+    "use": "buy",
+    "zone": "drinks"
+   }
+  },
+  {
+   "id": "milk",
+   "name": "草莓牛奶",
+   "price": 5,
+   "kind": "drink",
+   "shelf": "drink",
+   "taste": "甜甜的奶香",
+   "cold": true,
+   "buyAt": {
+    "object": "drink_fridge",
+    "use": "buy",
+    "zone": "drinks"
+   }
+  },
+  {
+   "id": "oolong",
+   "name": "乌龙茶",
+   "price": 4,
+   "kind": "drink",
+   "shelf": "drink",
+   "taste": "有点回甘，很解腻",
+   "cold": true,
+   "buyAt": {
+    "object": "drink_fridge",
+    "use": "buy",
+    "zone": "drinks"
+   }
+  },
+  {
+   "id": "water",
+   "name": "矿泉水",
+   "price": 2,
+   "kind": "drink",
+   "shelf": "drink",
+   "taste": "清清凉凉",
+   "cold": true,
+   "buyAt": {
+    "object": "drink_fridge",
+    "use": "buy",
+    "zone": "drinks"
+   }
+  },
+  {
+   "id": "lemontea",
+   "name": "柠檬茶",
+   "price": 4,
+   "kind": "drink",
+   "shelf": "drink",
+   "taste": "酸酸甜甜",
+   "cold": true,
+   "buyAt": {
+    "object": "drink_fridge",
+    "use": "buy",
+    "zone": "drinks"
+   }
+  },
+  {
+   "id": "hot_milk",
+   "name": "热牛奶",
+   "price": 5,
+   "kind": "drink",
+   "shelf": "hotdrink",
+   "taste": "温温的奶香，喝下去胃里都暖了",
+   "hot": true,
+   "buyAt": {
+    "object": "hot_cabinet",
+    "use": "buy",
+    "zone": "hot_cabinet"
+   }
+  },
+  {
+   "id": "hot_coffee",
+   "name": "热咖啡",
+   "price": 6,
+   "kind": "drink",
+   "shelf": "hotdrink",
+   "taste": "有点苦，提神，香味飘了一路",
+   "hot": true,
+   "buyAt": {
+    "object": "hot_cabinet",
+    "use": "buy",
+    "zone": "hot_cabinet"
+   }
+  },
+  {
+   "id": "hot_latte",
+   "name": "热拿铁",
+   "price": 7,
+   "kind": "drink",
+   "shelf": "hotdrink",
+   "taste": "奶泡绵绵的，咖啡香很柔和",
+   "hot": true,
+   "buyAt": {
+    "object": "hot_cabinet",
+    "use": "buy",
+    "zone": "hot_cabinet"
+   }
+  },
+  {
+   "id": "hot_cocoa",
+   "name": "热可可",
+   "price": 6,
+   "kind": "drink",
+   "shelf": "hotdrink",
+   "taste": "浓浓的巧克力味，甜得很安心",
+   "hot": true,
+   "buyAt": {
+    "object": "hot_cabinet",
+    "use": "buy",
+    "zone": "hot_cabinet"
+   }
+  },
+  {
+   "id": "ginger_tea",
+   "name": "红糖姜茶",
+   "price": 5,
+   "kind": "drink",
+   "shelf": "hotdrink",
+   "taste": "辣辣甜甜，从喉咙一路暖到肚子",
+   "hot": true,
+   "buyAt": {
+    "object": "hot_cabinet",
+    "use": "buy",
+    "zone": "hot_cabinet"
+   }
+  },
+  {
+   "id": "hot_honey_lemon",
+   "name": "蜂蜜柠檬热饮",
+   "price": 5,
+   "kind": "drink",
+   "shelf": "hotdrink",
+   "taste": "酸酸甜甜，热气里带着柠檬香",
+   "hot": true,
+   "buyAt": {
+    "object": "hot_cabinet",
+    "use": "buy",
+    "zone": "hot_cabinet"
+   }
+  },
+  {
+   "id": "hot_green_tea",
+   "name": "热绿茶",
+   "price": 4,
+   "kind": "drink",
+   "shelf": "hotdrink",
+   "taste": "清清淡淡，有点回甘",
+   "hot": true,
+   "buyAt": {
+    "object": "hot_cabinet",
+    "use": "buy",
+    "zone": "hot_cabinet"
+   }
+  },
+  {
+   "id": "hot_corn_milk",
+   "name": "热玉米奶",
+   "price": 6,
+   "kind": "drink",
+   "shelf": "hotdrink",
+   "taste": "甜甜的玉米香，喝着很顶饱",
+   "hot": true,
+   "buyAt": {
+    "object": "hot_cabinet",
+    "use": "buy",
+    "zone": "hot_cabinet"
+   }
+  },
+  {
+   "id": "vanilla",
+   "name": "香草冰淇淋",
+   "price": 5,
+   "kind": "eat",
+   "shelf": "icecream",
+   "taste": "冰凉绵密，香草味很浓",
+   "cold": true,
+   "buyAt": {
+    "object": "freezer",
+    "use": "buy",
+    "zone": "icecream"
+   }
+  },
+  {
+   "id": "melonbar",
+   "name": "西瓜冰棍",
+   "price": 3,
+   "kind": "eat",
+   "shelf": "icecream",
+   "taste": "咬一口全是西瓜味的冰碴",
+   "cold": true,
+   "buyAt": {
+    "object": "freezer",
+    "use": "buy",
+    "zone": "icecream"
+   }
+  },
+  {
+   "id": "umbrella",
+   "name": "透明雨伞",
+   "price": 15,
+   "kind": "use",
+   "shelf": "daily",
+   "taste": "下雨出门可以撑着，不会淋湿",
+   "keep": true,
+   "buyAt": {
+    "object": "daily_shelf",
+    "use": "buy",
+    "zone": "daily"
+   }
+  },
+  {
+   "id": "tissue",
+   "name": "小包纸巾",
+   "price": 2,
+   "kind": "use",
+   "shelf": "daily",
+   "taste": "擦擦手和脸",
+   "buyAt": {
+    "object": "daily_shelf",
+    "use": "buy",
+    "zone": "daily"
+   }
+  },
+  {
+   "id": "sunscreen",
+   "name": "防晒霜",
+   "price": 12,
+   "kind": "use",
+   "shelf": "daily",
+   "taste": "涂上凉凉的，大太阳下不容易晒伤",
+   "keep": true,
+   "buyAt": {
+    "object": "daily_shelf",
+    "use": "buy",
+    "zone": "daily"
+   }
+  },
+  {
+   "id": "notebook",
+   "name": "小笔记本",
+   "price": 6,
+   "kind": "use",
+   "shelf": "daily",
+   "taste": "蓝色封面，可以记点东西",
+   "keep": true,
+   "buyAt": {
+    "object": "daily_shelf",
+    "use": "buy",
+    "zone": "daily"
+   }
+  },
+  {
+   "id": "scrunchie",
+   "name": "发圈",
+   "price": 3,
+   "kind": "use",
+   "shelf": "daily",
+   "taste": "风大的时候把头发扎起来",
+   "keep": true,
+   "buyAt": {
+    "object": "daily_shelf",
+    "use": "buy",
+    "zone": "daily"
+   }
+  },
+  {
+   "id": "bandaid",
+   "name": "创可贴",
+   "price": 3,
+   "kind": "use",
+   "shelf": "daily",
+   "taste": "万一擦破皮可以贴上",
+   "buyAt": {
+    "object": "daily_shelf",
+    "use": "buy",
+    "zone": "daily"
+   }
+  }
+ ]
+}
