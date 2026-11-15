@@ -2,12 +2,16 @@
   "_说明": "小屋世界桥。相对路径相对于本文件所在的 bridge 文件夹。字段说明见 docs/INSTALL.md 第 5 节。",
   "hostName": "主人",
   "dataDir": "../data",
-  "gameExe": "../CabinWorld.exe",
+  "gameExe": "../CabinWorld-memory.exe",
   "launchGame": true,
   "weather": {
     "mode": "virtual"
   },
   "waitMs": 45000,
+  "panelSources": {
+    "diaryDir": "D:/deepseek/diary",
+    "ownerMemoryFile": "D:/deepseek/repo/bridge/state/owner-private-memory.json"
+  },
   "autonomy": {
     "enabled": true,
     "intervalMs": 900000,

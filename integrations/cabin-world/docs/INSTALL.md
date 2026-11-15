@@ -87,6 +87,10 @@
 
 **游戏右上角一直“离线”**：确认是用 `start.cmd` 启动的，或者手动打开游戏时 `cabinworld.ini` 的 `data=` 和桥的 `dataDir` 一致（运行 `selfcheck.cmd` 会检查）。
 
+**日记面板（可选）**：在 `bridge/bridge.config.json` 设置 `"panelSources": { "diaryDir": "D:/deepseek/diary" }`，日记面板会只为 `xiaojingyu` 读取近 30 天的 `YYYY-MM-DD.md`。路径可写绝对路径或相对于配置文件目录的路径；文件按只读方式读取，缺失或不可读时仍照常返回用量面板。示例配置默认关闭此来源。
+
+**记忆面板（可选）**：同一 `panelSources` 中设置 `"ownerMemoryFile": "D:/deepseek/repo/bridge/state/owner-private-memory.json"`。只为 `xiaojingyu` 读取主人私聊记忆中的身份、事实、经历和更正，过滤已纠正或过期的条目；群聊记忆和持续权限不显示。要在界面中看到具体条目，需要使用带记忆列表界面的游戏版本；旧版游戏只支持统计和锚点。相册仍未接入。
+
 **机器人说“做好了”，游戏里却没动**：让模型以工具返回为准；`status: running` 表示还没做完。说明书 `docs\AI-MANUAL.md` 里已经写了这条规则，请确认它在提示词里。
 
 **改角色名字 / 外观**：卡片名字来自 `game\assets\residents.json` 的 `name`，外观在 `game\assets\actors\`。改完用 `tools\build-windows.cmd` 重新导出。

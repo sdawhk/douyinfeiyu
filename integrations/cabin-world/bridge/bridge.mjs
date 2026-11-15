@@ -64,6 +64,10 @@ export function loadConfig(file) {
     weather: { mode: raw.weather?.mode === 'push' ? 'push' : 'virtual' },
     waitMs: Math.max(0, Math.min(Number(raw.waitMs ?? 45000), 600000)),
     catalog: rel(raw.catalog || path.join(HERE, 'catalog.json')),
+    panelSources: {
+      diaryDir: rel(raw.panelSources?.diaryDir) || null,
+      ownerMemoryFile: rel(raw.panelSources?.ownerMemoryFile) || null,
+    },
     chatLink: {
       enabled: raw.chatLink?.enabled !== false,
       log: rel(raw.chatLink?.log) || '',
@@ -105,7 +109,9 @@ export async function startBridge(cfg, { launch = cfg.launchGame, engineArgs = [
     onPanelDo: async () => ({ ok: false, error: '这项由机器人软件自己提供' }) });
   const autonomyLoop = createAutonomy({ rows, host, intervalMs: cfg.autonomy?.intervalMs, firstDelayMs: cfg.autonomy?.firstDelayMs, log, logFile: cfg.chatLink?.log || path.join(cfg.dataDir, 'world', 'cabin-log.jsonl') });
   for (const [i, spec] of specs.entries()) {
-    const resident = new Resident({ host, key: spec.key, who: spec.who, name: spec.name, catalog, weather });
+    const resident = new Resident({ host, key: spec.key, who: spec.who, name: spec.name, catalog, weather,
+      diaryDir: spec.key === 'xiaojingyu' ? cfg.panelSources?.diaryDir : null,
+      ownerMemoryFile: spec.key === 'xiaojingyu' ? cfg.panelSources?.ownerMemoryFile : null });
     const row = { key: spec.key, name: spec.name, port: spec.port, mirror: spec.mirror || null, resident, token: randomBytes(24).toString('hex'),
       events: [], eventSeq: 0, server: null, infoFile: null, url: null };
     resident.on('event', e => { row.events.push({ seq: ++row.eventSeq, at: Date.now(), ...e }); if (row.events.length > 200) row.events.shift(); });

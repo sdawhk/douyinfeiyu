@@ -9,6 +9,7 @@ import fs from 'node:fs'; import fsp from 'node:fs/promises'; import path from '
 import { fileURLToPath } from 'node:url';
 import { loadConfig, startBridge } from './bridge.mjs';
 import { chooseAutonomyAction } from './lib/autonomy.mjs';
+import { readDiaryRows, createDiaryReader } from './lib/diary.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2), live = args.includes('--live'), full = args.includes('--full'), show = args.includes('--show');
@@ -21,6 +22,25 @@ const check = async (name, fn) => { try { const d = await fn(); pass(name, d || 
 const assert = (v, msg) => { if (!v) throw Error(msg); };
 
 console.log('小屋世界 · 安装自检');
+await check('日记面板只读导入与边界', async () => {
+  const temp = await fsp.mkdtemp(path.join(os.tmpdir(), 'cabin-diary-selfcheck-'));
+  try {
+    const now = Date.UTC(2026, 10, 14, 4); // 北京中午
+    await fsp.writeFile(path.join(temp, '2026-11-14.md'), '# 2026-11-14\n\n## 09:15\n第一条经历\n\n## 18:40\n第二条经历\n');
+    await fsp.writeFile(path.join(temp, '2026-10-15.md'), '不应读取的第 31 天');
+    const rows = await readDiaryRows(temp, now);
+    assert(rows.length === 1 && rows[0].day === '2026-11-14' && rows[0].text.includes('## 09:15') && rows[0].text.includes('第一条经历') && rows[0].text.includes('## 18:40') && rows[0].text.includes('第二条经历') && !rows[0].text.includes('# 2026-11-14'), '同日日记没有合并，或时间标记/日期标题处理不正确');
+    let clock = now;
+    const cached = createDiaryReader(temp, () => clock, 30000);
+    assert((await cached()).length === 1, '缓存初次读取失败');
+    await fsp.writeFile(path.join(temp, '2026-11-14.md'), '更新内容');
+    assert((await cached()).length === 1, '短缓存没有生效');
+    clock += 30001;
+    assert((await cached())[0].text === '更新内容', '缓存过期后没有刷新');
+    assert((await readDiaryRows(path.join(temp, 'missing'), now)).length === 0, '缺失来源没有安全返回空列表');
+    return '同日合并且保留时间/近 30 天/短缓存/缺失文件均符合预期';
+  } finally { await fsp.rm(temp, { recursive: true, force: true }); }
+});
 const cfg = loadConfig(cfgFile);
 await check('自主选择遵守忙碌、断线、夜间和预算边界', () => {
   const catalog = JSON.parse(fs.readFileSync(cfg.catalog, 'utf8'));

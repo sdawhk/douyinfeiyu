@@ -9,6 +9,8 @@
 // Every result returned here is the game's committed answer. Nothing is invented by the bridge.
 // 规则：动作被拒绝、替换、超时或断线都不算完成；只有 action.finished 之后才把经历交给机器人记忆。
 import { EventEmitter } from 'node:events';
+import { createDiaryReader } from './diary.mjs';
+import { readOwnerMemory } from './owner-memory.mjs';
 
 const LONG_MS_CAP = 6000;   // 汤屋 / 长椅这种长时间活动，游戏里最多演 6 秒（与 VADS 一致）
 const PICK_MS = 3200, PAY_MS = 2200, EAT_MS = 4000;
@@ -24,9 +26,11 @@ export class Resident extends EventEmitter {
    * @param {object} o.catalog catalog.json
    * @param {() => object} o.weather 当前天气读数（见 weather.mjs）
    */
-  constructor({ host, key, who = key, name = key, catalog, weather, now = Date.now }) {
+  constructor({ host, key, who = key, name = key, catalog, weather, diaryDir = null, ownerMemoryFile = null, now = Date.now }) {
     super();
     Object.assign(this, { host, key, who, name, catalog, weatherNow: weather, now });
+    this.readDiary = key === 'xiaojingyu' ? createDiaryReader(diaryDir, now) : async () => [];
+    this.ownerMemoryFile = key === 'xiaojingyu' ? ownerMemoryFile : null;
     this.scope = host.forResident(key);
     this.pos = { scene: null, zone: null, x: null, y: null };
     this.state = null; this.view = null;              // 游戏 economy.result 的 state / view（只读镜像）
@@ -301,15 +305,28 @@ export class Resident extends EventEmitter {
   }
 
   // ---- 游戏侧边栏的数据 / data for the in-game side panel (panel.get) ------------------------------
-  panel(frame) {
+  async panel(frame) {
     if (frame.panel === 'activity') return { ok: true, data: { activity: [], pluginActivity: [], residents: { [this.key]: this.log } } };
     if (frame.panel === 'usage') {
       const s = this.state || {}, v = this.view || {}, day = beijingDay(this.now());
       const usedToday = Object.values(s.usage || {}).filter(u => u && u.day === day);
       const today = { count: this.log.filter(r => beijingDay(r.at) === day).length, props: usedToday.length };
-      return { ok: true, data: { products: this.catalog.products, residents: { [this.key]: { log: this.log.slice(0, 20).map(r => ({ at: r.at, text: r.name + (r.detail ? '，' + r.detail : '') })), recent: [], today, life: { ...(v.life || {}), diary: [] }, usage: s.usage || {}, foods: s.foods || {}, uses: s.uses || {}, bag: s.bag || {}, satiety: v.feeling?.satiety ?? null, hunger: v.hunger ?? null, likes: v.likes || [] } } } };
+      const diary = await this.readDiary();
+      return { ok: true, data: { products: this.catalog.products, residents: { [this.key]: { log: this.log.slice(0, 20).map(r => ({ at: r.at, text: r.name + (r.detail ? '，' + r.detail : '') })), recent: [], today, life: { ...(v.life || {}), diary }, usage: s.usage || {}, foods: s.foods || {}, uses: s.uses || {}, bag: s.bag || {}, satiety: v.feeling?.satiety ?? null, hunger: v.hunger ?? null, likes: v.likes || [] } } } };
     }
-    // 相册、记忆、日记属于机器人软件自己的功能（本插件不含记忆层）。
-    return { ok: false, error: '这项由机器人软件自己提供（相册、记忆、日记不在本插件内）' };
+    if (frame.panel === 'memory') {
+      const result = await readOwnerMemory(this.ownerMemoryFile, frame.who, this.key, this.now());
+      if (result.ok) return result;
+      const messages = {
+        resident_not_authorized: '这位住户没有接入大肥鱼的记忆',
+        memory_source_unconfigured: '还没有配置大肥鱼记忆来源',
+        memory_source_missing: '大肥鱼记忆文件不存在',
+        memory_source_unavailable: '暂时无法读取大肥鱼记忆',
+        memory_schema_invalid: '大肥鱼记忆格式暂不支持',
+      };
+      return { ok: false, error: messages[result.error] || '暂时无法读取大肥鱼记忆' };
+    }
+    // 相册属于机器人软件自己的功能，尚未接入。
+    return { ok: false, error: '相册尚未接入大肥鱼图片库' };
   }
 }

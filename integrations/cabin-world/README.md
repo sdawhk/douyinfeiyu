@@ -14,3 +14,9 @@
 自主循环在居民就位后约 20 秒首次检查，之后每 15 分钟检查；北京时间 22:00–07:00 暂停。它会按饥渴、背包、未完成愿望和天气选择游戏支持的活动。自动购买单件不超过 8 元、每日合计不超过 12 元。主人操作优先，自主活动完成后只写本地活动流水，不主动发 QQ 消息。
 
 大肥鱼 QQ 侧的安全 MCP 接入位于 `bridge/src/mcp-cabin-world-safe.js`，每次调用都会从发布包的 `data/bridge.json` 读取当前接口和轮换的 token。可通过 `CABIN_BRIDGE_JSON` 指向其他安装位置。
+
+## 日记与记忆面板
+
+`bridge.config.dafeiyu.example.json` 展示了本机使用的 `panelSources.diaryDir` 与 `panelSources.ownerMemoryFile`。桥仅为 `xiaojingyu` 只读展示近 30 天日记和主人私聊记忆，过滤已纠正、过期或低置信度的记忆；持续权限和群聊记忆不进入游戏。相册尚未接入。
+
+游戏记忆页的修改保存在 `game/ui/dock.gd`。它基于原项目 `V1.0.0` 标签：从该标签取得完整 `game/` 源码，把此文件覆盖到 `game/ui/dock.gd`，使用 Godot 4.7.2 导入并导出 Windows 游戏。游戏可执行文件及 `data/` 不纳入 Git。当前本机运行的是单独构建的 `CabinWorld-memory.exe`，原 `CabinWorld.exe` 保留作回退。
