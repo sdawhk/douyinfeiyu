@@ -146,9 +146,9 @@ rem ---- 3. dsh web + persistent watchdog ----
 echo [3/5] DSH backend
 echo       ensuring watchdog is running...
 if defined START_BOT_DRYRUN (
-  echo [dry-run] would run : start "DSHWatchdog" /MIN /D "%ROOT%" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\repo\deploy\windows\dsh-watchdog.ps1"
+  echo [dry-run] would run : start "" /B wscript.exe //B //NoLogo "%ROOT%\repo\deploy\windows\dsh-watchdog-launcher.vbs"
 ) else (
-  start "DSHWatchdog" /MIN /D "%ROOT%" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\repo\deploy\windows\dsh-watchdog.ps1"
+  start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\dsh-watchdog-launcher.vbs"
 )
 netstat -ano | findstr /R /C:":3090 .*LISTENING" >nul 2>&1
 if errorlevel 1 (

@@ -60,7 +60,7 @@ if errorlevel 1 (
 
 rem ---- 3. dsh watchdog (token captured to dshweb.out by dsh-run.ps1) ----
 echo [%date% %time%] ensuring dsh watchdog >> "%LOGDIR%\autostart.log"
-start "DSHWatchdog" /MIN /D "%ROOT%" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\repo\deploy\windows\dsh-watchdog.ps1"
+start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\dsh-watchdog-launcher.vbs"
 
 rem ---- 4. bridge watchdog (it waits for dsh, then patches token + runs bot) ----
 tasklist /FI "WINDOWTITLE eq QQBridge*" 2>nul | find /I "cmd.exe" >nul 2>&1
