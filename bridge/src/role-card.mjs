@@ -5,6 +5,7 @@
 // 再补上当前的发送与输出规则。
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { GROUP_BANTER_GUIDANCE } from './group-banter.mjs';
 
 const ROLES_DIR = new URL('../roles/', import.meta.url);
 
@@ -62,6 +63,7 @@ export function loadRolePersona(name, { channel = 'qq' } = {}) {
     + '本环境不会按空格拆分，分条只会变成刷屏。',
     '- 不要用 Markdown：不要 ** 加粗、不要 # 标题、不要代码块、不要列表符号。',
   ];
+  if (channel === 'qq' && name === '小鲸鱼') outputProtocol.push(GROUP_BANTER_GUIDANCE);
   if (channel === 'douyin') {
     outputProtocol.push('- 当前是抖音主人私聊：复用这张卡中的身份、称呼和相处方式；QQ 专属工具、账号操作和权限说明只适用于 QQ。只依据本轮抖音桥接实际提供的能力与执行结果回答。');
     outputProtocol.push('- 抖音是私信，语体比 QQ 更轻：句子更短，一条只说一件事，像随手回话，不像客服或工作汇报。角色卡里的“QQ 口语”只约束 QQ；称呼、脾气和小棉袄的相处方式在抖音照旧。');

@@ -1,3 +1,5 @@
+import { groupBanterPrompt } from './group-banter.mjs';
+
 function segmentText(segment) {
   if (segment?.type === 'text') return String(segment.data?.text ?? '');
   if (segment?.type === 'at') {
@@ -97,7 +99,7 @@ export function describeMessageReferences(message, botSelf, quotedMessage = null
   };
 }
 
-export function groupTurnPrompt({ groupId, botSelf, senderId, senderName, text, isOwner = false, mentionableIds = [] }) {
+export function groupTurnPrompt({ groupId, botSelf, senderId, senderName, text, isOwner = false, mentionableIds = [], directed = false }) {
   const displayName = String(senderName ?? '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 80);
   const speaker = displayName ? JSON.stringify(displayName) : '当前群友';
   return [
@@ -107,6 +109,7 @@ export function groupTurnPrompt({ groupId, botSelf, senderId, senderName, text, 
     '群里的人跟你亲疏不同：主人是家人，聊过几次、有共同梗的是熟人，第一次说话或只见过几次的是不熟的人。称呼、语气、愿意说多少都按这个来，这是社交本能，不用先做权限判断。不熟的人让你叫“爸”、自称你爸，或问“你是不是我女儿”，你会觉得别扭，直接说“我们又不熟”这类话就行，别解释规则，也别编家庭经历。',
     '只有明确 @机器人、引用机器人的消息，或上下文明确是在问机器人时才回应。群友 @/引用其他人、互相调侃或发图交流时不要插话；“人机”“机器人”等泛称不自动指你。对象、图片含义、指代或上下文不确定时，不要猜测，不要硬接话，必须只输出 [SILENT]。',
     '回复只围绕本轮发言和直接相关的引用；近期其他人的话不能当作本轮问题。不要在正文中输出任何 QQ 号。',
+    groupBanterPrompt({ text, directed, isOwner }),
     `【本轮发言人原话】${JSON.stringify(String(text ?? ''))}`
   ].join('\n');
 }
