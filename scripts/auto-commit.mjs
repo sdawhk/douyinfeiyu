@@ -121,12 +121,32 @@ try {
 }
 
 // ---- 5. 推送 --------------------------------------------------------------------------
+// 先直连、失败再退回到系统代理：实测 github 走代理会 schannel 握手失败，直连反而正常；
+// gitee 两条路都通。所以每种远端都试两遍，别让代理拖垮自动推送。
+const PROXY_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
+function envDirect() {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  for (const key of PROXY_KEYS) delete env[key];
+  return env;
+}
+
 for (const remote of REMOTES) {
-  try {
-    git(['push', remote, BRANCH], { timeout: 90_000 });
-    log(`已推送 ${remote}/${BRANCH}`);
-  } catch (error) {
-    const detail = String(error?.stderr || error?.message || error).replace(/\s+/g, ' ').slice(0, 160);
-    log(`推送 ${remote} 失败（提交已保留，稍后会随下次提交重试）：${detail}`);
+  let pushed = false;
+  let detail = '';
+  for (const mode of ['direct', 'proxy']) {
+    // 本机 git config 里有 http.proxy=127.0.0.1:12450，光删环境变量它还会走那个代理，
+    // 所以直连必须再用 -c 把 config 里的代理也清掉，否则等于没直连。
+    const args = mode === 'direct'
+      ? ['-c', 'http.proxy=', '-c', 'https.proxy=', 'push', remote, BRANCH]
+      : ['push', remote, BRANCH];
+    try {
+      git(args, { timeout: 90_000, ...(mode === 'direct' ? { env: envDirect() } : {}) });
+      log(`已推送 ${remote}/${BRANCH}${mode === 'proxy' ? '（经代理）' : ''}`);
+      pushed = true;
+      break;
+    } catch (error) {
+      detail = String(error?.stderr || error?.message || error).replace(/\s+/g, ' ').slice(0, 160);
+    }
   }
+  if (!pushed) log(`推送 ${remote} 失败（提交已保留，稍后会随下次提交重试）：${detail}`);
 }
