@@ -127,6 +127,12 @@ import { deleteGroupMemory, isBridgeRunning, startPersonaMaintenance } from './p
 
 const CFG_PATH = new URL('../config.json', import.meta.url);
 const cfg = JSON.parse(readFileSync(CFG_PATH, 'utf8'));
+// 群友说「闭嘴」不带时长时的默认静言时长。主人禁言仍是永久的，要主人明确解禁才恢复。
+const GROUP_MUTE_MEMBER_DEFAULT_MS = 60 * 60_000;
+function formatMuteDuration(ms) {
+  const minutes = Math.max(1, Math.round(Number(ms) / 60_000));
+  return minutes % 60 === 0 ? `${minutes / 60} 小时` : `${minutes} 分钟`;
+}
 const MODE_PATH = new URL('../state/mode.json', import.meta.url);
 function activeAgentPreset() {
   try {
@@ -4432,11 +4438,14 @@ async function processMessage(ev, deferredInfo = null) {
   if (isGroup && settingsDocument.settings.groupMuteEnabled && !isOwner(sender)) {
     const command = parseGroupMuteCommand(t0);
     if (command) {
-      setMuted(chatKey, command.muted, command.durationMs);
+      // 群友只说「闭嘴」不带时长时，默认安静一小时。以前是永久禁言，
+      // 群友一句话就能把整个群关死，只能等主人来解。
+      const durationMs = command.muted ? (command.durationMs ?? GROUP_MUTE_MEMBER_DEFAULT_MS) : null;
+      setMuted(chatKey, command.muted, durationMs);
       log(`[mute] ${command.muted ? 'muted' : 'unmuted'} by group member`, chatKey,
-        command.durationMs ? `durationMs=${command.durationMs}` : 'until-unmute');
+        durationMs ? `durationMs=${durationMs}` : 'until-unmute');
       const reply = command.muted
-        ? command.durationMs ? `好，我安静 ${Math.round(command.durationMs / 60_000)} 分钟。` : '好，这个群先安静一会儿。'
+        ? `好，我安静 ${formatMuteDuration(durationMs)}。`
         : '行吧，那我说了。';
       await sendText(target, reply, true).catch(() => {});
       return;
@@ -4462,8 +4471,13 @@ async function processMessage(ev, deferredInfo = null) {
     }
   }
 
-  // 已被禁言：完全不回应，也不自动存图。
-  if (isMuted(chatKey)) {
+  // 被 @ 就是明确在叫我：自动解除本群禁言，别让之前的静言把呼叫也挡掉。
+  if (isGroup && atMe && isMuted(chatKey)) {
+    setMuted(chatKey, false);
+    log(`[mute] auto-unmuted by mention chat=${chatKey} sender=${sender}`);
+  }
+  // 已被禁言：完全不回应，也不自动存图（@ 我的那条除外，上面已经解禁）。
+  if (!atMe && isMuted(chatKey)) {
     log(`[turn:${traceId}] skipped reason=muted chat=${chatKey}`);
     return;
   }

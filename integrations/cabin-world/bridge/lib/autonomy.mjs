@@ -30,7 +30,7 @@ function fillingRank(product) {
   return MEAL_IDS.has(product.id) ? 3 : 2;
 }
 
-export function chooseAutonomyAction({ status, resident, now = Date.now(), spent = 0, last = '', blocked = [] }) {
+export function chooseAutonomyAction({ status, resident, now = Date.now(), spent = 0, last = '', blocked = [], skipNeeds = false }) {
   if (!status?.connected || !resident?.state || resident.task) return null;
   if (resident.lastExternalActionAt && now - resident.lastExternalActionAt < 3 * 60000) return null;
   const local = new Date(now + 8 * 3600000), hour = local.getUTCHours() + local.getUTCMinutes() / 60;
@@ -56,7 +56,7 @@ export function chooseAutonomyAction({ status, resident, now = Date.now(), spent
   const needEat = satiety <= NEED_LIMIT, needDrink = hydration <= NEED_LIMIT;
   // 饿和渴同时低就按 15 分钟一个时段交替。原来是“饱腹度一低就只吃”，
   // 结果 satiety 长期卡在 38 以下，hydration 掉到 0 也永远轮不到喝水。
-  const needs = needEat && needDrink
+  const needs = skipNeeds ? '' : needEat && needDrink
     ? (Math.floor(now / TICK_MS) % 2 === 0 ? 'drink' : 'eat')
     : needEat ? 'eat' : needDrink ? 'drink' : '';
   if (needs) {
@@ -141,22 +141,20 @@ export function createAutonomy({ rows, host, intervalMs = 15 * 60000, firstDelay
   const act = async (row, attempt = 0) => {
     if (!host.connected || !row.resident.state || row.resident.task) return;
     const status = row.resident.status(), spent = loadSpent(row.key);
-    const choice = chooseAutonomyAction({ status, resident: row.resident, now: now(), spent,
+    // 刚吃完/喝完还在冷却里，就跳过进食需求去挑件别的事做。
+    // 以前是直接 return，结果它会站在小卖部收银台一动不动地等满 45 分钟。
+    const lastMeal = Math.max(lastNeedAt.get(`${row.key}:eat`) || 0, lastNeedAt.get(`${row.key}:drink`) || 0);
+    const satietyNow = Number(status.feeling?.satiety ?? 100), hydrationNow = Number(status.feeling?.hydration ?? 100);
+    const critical = satietyNow <= 10 || hydrationNow <= 10;
+    const cooling = !critical && now() - lastMeal < NEED_COOLDOWN_MS;
+    const choice = chooseAutonomyAction({ status, resident: row.resident, now: now(), spent, skipNeeds: cooling,
       last: lastAction.get(row.key) || '', blocked: [...blocked, ...skippedThisMonth()] });
     if (!choice) return;
     const resident = row.resident;
-    // 冷却只在首轮判断：买失败换下一个候选时不能被自己刚设的冷却挡住。
     if (attempt === 0 && choice.type === 'buy') {
       const product = resident.catalog.products.find(p => p.id === choice.product);
       const need = product?.kind;
-      if (need === 'eat' || need === 'drink') {
-        const critical = need === 'eat'
-          ? Number(status.feeling?.satiety ?? 100) <= 10
-          : Number(status.feeling?.hydration ?? 100) <= 10;
-        const lastAt = lastNeedAt.get(`${row.key}:${need}`) || 0;
-        if (!critical && now() - lastAt < NEED_COOLDOWN_MS) return;
-        lastNeedAt.set(`${row.key}:${need}`, now());
-      }
+      if (need === 'eat' || need === 'drink') lastNeedAt.set(`${row.key}:${need}`, now());
     }
     resident.autonomyStarting = true;
     let task;
