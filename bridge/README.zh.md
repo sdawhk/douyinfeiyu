@@ -100,6 +100,10 @@ Douyin 本地接口只监听 `127.0.0.1:3101`，并要求 `x-console-token` 与�
 
 语音回复可接本机 [GPT-SoVITS api_v2](https://github.com/RVC-Boss/GPT-SoVITS/blob/main/api_v2.py)。先按上游说明安装并启动服务，监听 `127.0.0.1:9882`，再在 `http://127.0.0.1:18902/settings` 的「克隆音色」中填写服务地址、参考音频的 Windows 绝对路径及对应的逐字原文，保存后点「测试克隆音色」。试听成功后再启用；默认仅在用户明确要求语音时使用。参考音频需事先放在本机，并确保 GPT-SoVITS 进程可以读取。合成失败时机器人发送文字。请仅使用有权使用的声音。
 
+### VoiceStudio 克隆音色
+
+可连接本机运行的 VoiceStudio OpenAI 兼容接口（默认 `http://127.0.0.1:3900/v1/audio/speech`）。在设置页「VoiceStudio 克隆音色」填写已保存的音色 ID；当前银狼音色 ID 为 `86ee630c`，模型为 `omnivoice`。启用后优先使用 VoiceStudio；合成成功时直接发送银狼音色，失败时尝试其他已启用的 TTS 并转换为流萤，只有备用合成或 RVC 也失败时才回退发送文字。选择「按概率回复」后，自动语音仅在主人私聊中按「语音回复概率」触发，其他会话仍需明确要求语音。VoiceStudio 需要保持运行，CPU 合成可能需要几分钟。请仅使用获得授权的声音。
+
 ### Edge TTS（本机直连微软）
 
 在本机运行设置页的「语音回复概率」中可调整普通回复使用语音的概率（0–100%）。将当前启用的语音服务的「回复方式」设为「按概率回复」后生效；默认 20%。明确要求语音的消息始终尝试发送语音，合成失败时回退文字。
@@ -107,6 +111,10 @@ Douyin 本地接口只监听 `127.0.0.1:3101`，并要求 `x-console-token` 与�
 Edge 音色语音由本机 18902 服务合成：优先运行本机 Python edge-tts 直连 `speech.platform.bing.com`（`src/edge-tts-local.mjs`，环境在 `D:\deepseek\state\edge-tts\venv`，不入库），失败时才回退到设置页里配置的 Worker 地址。此前依赖的 `*.workers.dev` 域名被 DNS 污染连不通，是"要求语音却只发文字"的直接原因；Worker 仅作兜底，建议重新部署到自己域名后再填。首次准备环境运行 `powershell -ExecutionPolicy Bypass -File scripts/setup-edge-tts.ps1`（脚本用 Node 拉取 wheel 后解包，绕开本机死代理 `127.0.0.1:12450` 导致的 pip 卡死）。合成默认 20 秒超时，短于桥接侧 35 秒上限。
 
 ### 原创歌曲与流萤 RVC
+
+整首翻唱优先使用同歌名、经音频哈希核验的成功片段来源；下载或人声校验失败时，在完全匹配的演唱候选中换源。英文 `Piano`、日文 `ピアノ` 等纯演奏版会被过滤，明确的钢琴弹唱保留。整首已判无人声时不再逐段重做同源；只对明确的分离程序执行异常保留逐段兼容降级，环境或未知错误直接报告。
+
+手动和自动变调都先校验整首人声。整首通过后，纯音乐前奏/间奏保留原时序与同一伴奏移调；无整首校验证据时不允许跳过歌声检查。候选全部分段成功后才提交新增缓存，续传继续固定原来源和音色。失败提示区分制作与发送，免费订单明确显示“未扣点歌单位”，部分发送和发送不确定的保护逻辑保留。
 
 歌单外的新歌点唱默认只允许主人使用；可在后台运行设置的“新歌点唱 QQ 白名单”中逐行添加 QQ，授权指定群友制作新歌与接着唱，保存后约 5 秒生效。所有人都可以查看本地歌单并点播已有成品；歌单歌曲也允许群友要求唱整首。白名单不授予 Mureka 原创或其他主人权限。“唱歌 歌名”或“翻唱 歌名”会搜索歌曲、默认从约 30 秒处截取 60 秒、转换成流萤音色并发送 QQ 语音。“原唱 歌名”只发原唱片段，所有人可用“搜歌 歌名”查看候选。自然说法支持单字歌名，例如“唱嘲”；搜索按标题边界匹配，避免把“嘲笑”当成《嘲》。搜索会排除标明伴奏、KTV、短剧等结果；歌名不完全匹配时会先列候选，不自动发错歌。确认候选可用“翻唱 雨夜 #2”等序号命令。流萤转换前会检查分离后的人声音量，过低就停止发送。先运行 `scripts/setup-singing-rvc.ps1` 准备模型，再运行 `scripts/setup-song-cover.ps1` 安装 yt-dlp 等依赖。运行设置中的“现成歌曲点唱”可独立开关，不需要 Mureka Key。B 站搜索受限时会试 YouTube；转换失败不会把原唱冒充翻唱发出。
 
@@ -223,6 +231,24 @@ qq-bridge/
     patch-snowluma-sdk.mjs  # 修补 SDK 的 ESM 打包 bug（postinstall 自动执行）
   state/                # 运行时数据（不入库）
 ```
+
+## 对话使用 DSH Our Free Model
+
+本机 QQ 对话使用 DSH Web `127.0.0.1:3090` 内的原生 `our-free-model` 提供方，当前模型为 `reflection/beam-free`。插件挂载在 `D:\deepseek\dshhome\profiles\web`，运行数据位于 `D:\deepseek\dshhome\our-free-model`，通过插件适配器直接请求上游。`18899` 是插件可选的 OpenAI 转发端口，本机未开启，主对话无需该端口。
+
+桥接 `config.json` 的 `dsh.provider/model` 与 DSH 的 `agent-default-model` 应一致。新建、复用及异常恢复后的 QQ 会话会选择配置的原生提供方。旧 `18903 → 18900` 本地代理不再是主对话依赖；`18901` 的视觉等独立能力保留。旧代理的自动晋升和策略保存不能覆盖原生提供方，18902 管理接口的状态、目录与会话测试按实际提供方工作。
+
+核验入口：DSH 的 `/api/our-free-model/summary` 与 `/bench` 使用 DSH 本机会话认证；18902 的 `/api/models/status` 应返回 `route="our-free-model"`、`effective=true`，`/api/models/test-qq` 验证原生提供方的完整 DSH 会话。接口测试不会把测试文字发送到 QQ。
+
+## 生图画风
+
+`qq_draw_image` 的 `renderStyle` 独立选择渲染画法：`legacy`（原有半厚涂）、`gentle_anime`（温柔新番）、`battle_sketch`（战斗速写）、`mono_manga`（黑白漫画）。例如指定 `renderStyle="mono_manga"`、`outfit="maid"`、`framing="bust"`，`prompt` 只写动作与场景。人物身份、换装、尾巴策略沿用现有规则。
+
+优先级为本次参数 > `config.json` 的 `imageGen.renderStyle` > `legacy`；切回 `legacy` 恢复原画法。`preset`/`stylePreset` 和 `styleRotate` 仍控制构图预设，不轮换渲染画风。新画风统一管理画法、脸部着色、光影和参考图语义；`style` 只补充兼容的细节，与所选画法冲突会报错。新画风不能与整段 `stylePrompt` 覆盖同时使用。
+
+新画风为动作场景预留提示词预算，超长描述仍可能截短并记入元数据。Seedream 的短画风负向会内联进最终请求，Qwen 使用独立负向字段。图片元数据记录 `renderStyle`、来源、模板版本、有效脸部画法与实际后端请求提示词长度；日志里的 seed 不代表后端已接收 seed。黑白档将已知本色词转成灰阶表达，最后复用项目现有 ffmpeg 输出单通道灰阶 PNG，消除脸红或彩光残留；处理失败明确返回失败。肤色头身比检测标记为不适用，不能据此视为比例合格。
+
+本地三风格预览：运行 `node scripts/preview-render-styles.mjs --output <输出目录>`，通过项目生图与内容审核链路生成三张图，并写入 `previews.json`；可用 `--style gentle_anime` 等参数只生成一档。
 
 ## 已知限制
 

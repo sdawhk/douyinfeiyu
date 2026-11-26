@@ -18,7 +18,7 @@ const DOUYIN_SHARE_NOISE_PATTERNS = [
 ];
 
 export const DOUYIN_VIDEO_DEFAULTS = {
-  maxVideoMB: 95,
+  maxVideoMB: 28,
   cooldownSeconds: 60,
   dedupMinutes: 30,
   responseTimeoutMs: 360_000,
@@ -119,7 +119,7 @@ export function writeDouyinVideoRequest({ requestDir, url, maxVideoMB }) {
   const id = randomUUID().replace(/-/g, '');
   const created = Date.now();
   const name = `req-${String(created).padStart(15, '0')}-${id}.json`;
-  const payload = { id, urls: [url], maxVideoMB: Number(maxVideoMB) || DOUYIN_VIDEO_DEFAULTS.maxVideoMB, created_at: created };
+  const payload = { id, urls: [url], maxMB: Number(maxVideoMB) || DOUYIN_VIDEO_DEFAULTS.maxVideoMB, created_at: created };
   mkdirSync(paths.queueDir, { recursive: true });
   writeFileSync(join(paths.queueDir, name), JSON.stringify(payload), 'utf8');
   return id;

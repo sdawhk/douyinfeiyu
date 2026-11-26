@@ -28,8 +28,9 @@ export function inferEdgeSpeechStyle(text, voice = 'zh-CN-XiaoxiaoNeural') {
 }
 
 export async function synthesizeEdgeSpeech(text, config, fetchImpl = fetch) {
-  const input = String(text || '').trim().slice(0, 1000);
+  const input = String(text || '').trim();
   if (!input) throw new Error('语音文本为空');
+  if (Array.from(input).length > 1000) throw new Error('Edge TTS 单段最多支持 1000 字；请先分段');
   const voice = config?.voice || 'zh-CN-XiaoxiaoNeural';
   const style = config?.style || inferEdgeSpeechStyle(input, voice);
   const response = await fetchImpl(edgeTtsEndpoint(config), {

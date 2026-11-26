@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makePaidFullSong, makePaidSongPreview } from '../src/paid-song-producer.mjs';
+import { STEM_SEPARATION_FAILED, songSourceError } from '../src/song-source-errors.mjs';
 
 const FRAME_SIZE = Math.floor(144 * 128_000 / 44_100);
 function mp3(seconds) {
@@ -74,7 +75,7 @@ test('full-song auto mode detects once and reuses the same shift for all three s
   assert.equal(result.voiceVariant, 'rvc:5:clear-v5');
 });
 
-test('full-song auto mode falls back to shift=0 when whole-song stems fail', async () => {
+test('full-song auto mode falls back to shift=0 only for an explicit separator execution failure', async () => {
   const saved = [];
   const applied = [];
   const result = await makePaidFullSong('精确歌曲名', {
@@ -83,7 +84,7 @@ test('full-song auto mode falls back to shift=0 when whole-song stems fail', asy
     makeSegments: async () => ({ title: '精确歌曲名', url: 'https://source.test/song',
       sourceIdentity: 'https://source.test/song#sha256=stable', duration: 30, sourceAudio: mp3(30),
       segments: [{ segmentIndex: 0, startSeconds: 0, seconds: 30, audio: mp3(30) }] }),
-    prepareStems: async () => { throw new Error('demucs failed'); },
+    prepareStems: async () => { throw songSourceError(STEM_SEPARATION_FAILED, 'demucs failed'); },
     applyVoice: async (audio, options) => { applied.push(options); return { audio: mp3(30), pitchShift: 0 }; },
     loadOutput: () => null,
     saveOutput: (options) => saved.push(options),

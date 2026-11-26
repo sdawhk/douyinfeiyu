@@ -1,11 +1,12 @@
-import { isExactSongMatch, makeExistingSongClip, makeExistingSongSegments, searchExistingSongs } from './song-cover.mjs';
+import { isExactSongMatch, isVocalSongSource, makeExistingSongClip, makeExistingSongSegments, searchExistingSongs } from './song-cover.mjs';
 import {
   applyLiuyingVoiceDetailed, LIUYING_SINGING_VOCAL_PROFILE, LIUYING_SINGING_VOCAL_VARIANT,
   prepareLiuyingSongStems, renderLiuyingSegmentFromStems
 } from './rvc-singing.mjs';
-import { getSongOutputPath, loadAutoSongOutput, loadSongOutput, saveSongOutput } from './song-output-cache.mjs';
+import { findCachedSongInPlaylist, getSongOutputPath, loadAutoSongOutput, loadAutoSongSegments, loadSongOutput, saveSongOutput } from './song-output-cache.mjs';
 import { resolveSingingPitchPlan } from './rvc-pitch.mjs';
 import { inspectMp3Duration } from './song-library.mjs';
+import { NO_AUDIBLE_VOCALS, STEM_SEPARATION_FAILED, SONG_SOURCE_UNAVAILABLE, canRetrySongSource, songSourceError } from './song-source-errors.mjs';
 
 function verifyDuration(audio, expectedSeconds, label) {
   const actual = inspectMp3Duration(audio);
@@ -72,7 +73,8 @@ export async function makePaidSongPreview(query, { getSettings, searchImpl = sea
 export async function makePaidFullSong(query, { getSettings, searchImpl = searchExistingSongs,
   makeSegments = makeExistingSongSegments, applyVoice = applyLiuyingVoiceDetailed, loadOutput = loadSongOutput,
   saveOutput = saveSongOutput, outputPath = getSongOutputPath, resume = null,
-  prepareStems = prepareLiuyingSongStems, renderSegment = renderLiuyingSegmentFromStems, logger = console } = {}) {
+  prepareStems = prepareLiuyingSongStems, renderSegment = renderLiuyingSegmentFromStems,
+  findCachedSource = findCachedSongInPlaylist, logger = console } = {}) {
   const plan = singingSettings(getSettings);
   if (resume) {
     if (!resume.sourceIdentity || !resume.title || !resume.voiceVariant || !Array.isArray(resume.segments) || !resume.segments.length) {
@@ -97,59 +99,96 @@ export async function makePaidFullSong(query, { getSettings, searchImpl = search
       pitchShift: Number.isInteger(parsedShift) ? parsedShift : plan.pitch, pitchMode: 'resume',
       pitchInfo: null, segments };
   }
-  const results = await searchImpl(query);
-  const exact = results.filter((item) => isExactSongMatch(query, item.title));
-  if (!exact.length) throw new Error('没有找到与所点歌名完全匹配的音源，请提供准确歌名');
-  const source = await makeSegments(query, { chunkSeconds: 60, searchImpl: async () => exact });
-  if (!exact.some((item) => item.url === source.url) || !source.sourceIdentity) throw new Error('整首音源不在完全匹配候选中或缺少稳定来源标识');
-  // 整首只算一次 shift：先分离整首人声/伴奏，检测一次，所有分段复用同一个值。
-  let shift = plan.pitch;
-  let effectiveMode = plan.mode;
-  let pitchInfo = null;
-  let stems = null;
   if (plan.mode === 'auto') {
-    if (!Buffer.isBuffer(source.sourceAudio)) {
-      logger.warn?.('[paid-song] auto pitch skipped: whole-song audio unavailable; using shift=0 for every segment');
-      shift = 0;
-    } else {
-      try {
-        stems = await prepareStems(source.sourceAudio, { pitchConfig: plan.config, logger });
-        shift = Number.isInteger(stems.pitchShift) ? stems.pitchShift : 0;
-        pitchInfo = stems.pitchInfo ?? null;
-      } catch (error) {
-        logger.warn?.(`[paid-song] whole-song stems failed; falling back to per-segment shift=0: ${error?.message ?? error}`);
-        shift = 0;
-        stems = null;
-      }
+    const cached = loadAutoSongSegments(query, { profile: LIUYING_SINGING_VOCAL_PROFILE });
+    if (cached) {
+      for (const segment of cached.segments) verifyDuration(segment.audio, segment.seconds, '缓存整首分段');
+      logger.info?.(`[paid-song] full cache hit; reusing ${cached.segments.length} segments for ${query}`);
+      return { title: cached.title, sourceIdentity: cached.sourceIdentity, duration: cached.duration,
+        voiceVariant: cached.voiceVariant, pitchShift: cached.pitchShift, pitchMode: 'auto',
+        pitchInfo: null, segments: cached.segments };
     }
   }
-  const voiceVariant = LIUYING_SINGING_VOCAL_VARIANT(shift);
-  const segments = [];
-  try {
-    for (const segment of source.segments) {
-      const cacheOptions = { query, mode: 'ai', candidate: 1, startSeconds: segment.startSeconds,
-        seconds: segment.seconds, voiceVariant, sourceIdentity: source.sourceIdentity,
-        segmentIndex: segment.segmentIndex, pitch: shift, pitchMode: effectiveMode };
-      const cached = loadOutput(cacheOptions);
-      let audio = cached?.audio;
-      if (!audio) {
-        if (stems) {
-          audio = await renderSegment(stems, { startSeconds: segment.startSeconds,
-            seconds: segment.seconds, tag: `segment-${segment.segmentIndex}`, logger });
-        } else {
-          const result = await applyVoice(segment.audio, { pitch: shift, pitchMode: 'manual', pitchConfig: plan.config });
-          audio = audioOf(result);
+  const known = findCachedSource(query);
+  const preferred = known?.url && isExactSongMatch(query, known.title) ? known : null;
+  let results;
+  try { results = await searchImpl(query); }
+  catch (error) {
+    if (!preferred) throw error;
+    logger.warn?.('[paid-song] search unavailable; trying the verified cached song source');
+    results = [];
+  }
+  const seen = new Set();
+  const exact = [preferred, ...results].filter((item) => {
+    if (!item?.url || seen.has(item.url) || !isExactSongMatch(query, item.title)
+        || !isVocalSongSource(query, item.title)) return false;
+    seen.add(item.url);
+    return true;
+  }).slice(0, 8);
+  if (!exact.length) throw new Error('没有找到与所点歌名完全匹配的演唱音源，请提供准确歌名');
+  const failures = [];
+  for (const [index, candidate] of exact.entries()) {
+    let stems = null;
+    try {
+      // 每次只允许一个明确来源；无歌声时才能转到下一个，避免同一坏源重做。
+      logger.info?.(`[paid-song] full source attempt=${index + 1}/${exact.length} title=${candidate.title} url=${candidate.url}`);
+      const source = await makeSegments(query, { chunkSeconds: 60, searchImpl: async () => [candidate] });
+      if (source.url !== candidate.url || !source.sourceIdentity) throw new Error('整首音源不在当前完全匹配候选中或缺少稳定来源标识');
+      logger.info?.(`[paid-song] full source selected duration=${source.duration}s identity=${source.sourceIdentity}`);
+      let shift = plan.pitch;
+      let pitchInfo = null;
+      if (Buffer.isBuffer(source.sourceAudio)) {
+        try {
+          stems = await prepareStems(source.sourceAudio, { pitchConfig: plan.config,
+            pitchShift: plan.mode === 'auto' ? null : plan.pitch, logger });
+          shift = Number.isInteger(stems.pitchShift) ? stems.pitchShift : plan.pitch;
+          pitchInfo = stems.pitchInfo ?? null;
+        } catch (error) {
+          // 无歌声、环境和未知错误不再当成变调失败；仅明确的分离执行失败受控降级。
+          if (error.code !== STEM_SEPARATION_FAILED) throw error;
+          shift = plan.mode === 'auto' ? 0 : plan.pitch;
+          logger.warn?.(`[paid-song] whole-song separator execution failed; trying per-segment conversion shift=${shift}`);
         }
+      } else if (plan.mode === 'auto') {
+        logger.warn?.('[paid-song] whole-song audio unavailable; using shift=0 for every segment');
+        shift = 0;
       }
-      verifyDuration(audio, segment.seconds, cached ? '缓存分段' : '流萤分段');
-      if (!cached) saveOutput({ ...cacheOptions, title: source.title, source: source.source,
-        duration: source.duration }, audio);
-      segments.push({ segmentIndex: segment.segmentIndex, startSeconds: segment.startSeconds,
-        seconds: segment.seconds, audio, cachePath: outputPath(cacheOptions) });
+      const voiceVariant = LIUYING_SINGING_VOCAL_VARIANT(shift);
+      const segments = [];
+      const pending = [];
+      for (const segment of source.segments) {
+        const cacheOptions = { query, mode: 'ai', candidate: 1, startSeconds: segment.startSeconds,
+          seconds: segment.seconds, voiceVariant, sourceIdentity: source.sourceIdentity,
+          segmentIndex: segment.segmentIndex, pitch: shift, pitchMode: plan.mode };
+        const cached = loadOutput(cacheOptions);
+        let audio = cached?.audio;
+        if (!audio) {
+          if (stems) audio = await renderSegment(stems, { startSeconds: segment.startSeconds,
+            seconds: segment.seconds, tag: `segment-${segment.segmentIndex}`, logger });
+          else {
+            const result = await applyVoice(segment.audio, { pitch: shift, pitchMode: 'manual', pitchConfig: plan.config });
+            audio = audioOf(result);
+          }
+        }
+        verifyDuration(audio, segment.seconds, cached ? '缓存分段' : '流萤分段');
+        if (!cached) pending.push({ options: { ...cacheOptions, title: source.title,
+          url: source.url, source: source.source, duration: source.duration }, audio });
+        segments.push({ segmentIndex: segment.segmentIndex, startSeconds: segment.startSeconds,
+          seconds: segment.seconds, audio, cachePath: outputPath(cacheOptions) });
+      }
+      // 当前候选全部制作完成才提交新增缓存，不把失败候选的半成品当成整首。
+      for (const item of pending) saveOutput(item.options, item.audio);
+      return { title: source.title, sourceIdentity: source.sourceIdentity, duration: source.duration,
+        voiceVariant, pitchShift: shift, pitchMode: plan.mode, pitchInfo, segments };
+    } catch (error) {
+      if (!canRetrySongSource(error)) throw error;
+      failures.push({ title: candidate.title, url: candidate.url, code: error.code });
+      logger.warn?.(`[paid-song] full source rejected code=${error.code} title=${candidate.title} url=${candidate.url}; trying next candidate`);
+    } finally {
+      if (stems) await stems.close?.();
     }
-  } finally {
-    if (stems) await stems.close?.();
   }
-  return { title: source.title, sourceIdentity: source.sourceIdentity, duration: source.duration,
-    voiceVariant, pitchShift: shift, pitchMode: effectiveMode, pitchInfo, segments };
+  const noVocals = failures.some((item) => item.code === NO_AUDIBLE_VOCALS);
+  throw songSourceError(noVocals ? NO_AUDIBLE_VOCALS : SONG_SOURCE_UNAVAILABLE,
+    noVocals ? '已尝试匹配音源，但未取得可用于翻唱的清晰歌声' : '匹配歌曲音源暂时无法下载或核验', { attempts: failures });
 }

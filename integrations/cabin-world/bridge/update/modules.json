@@ -1,0 +1,189 @@
+{
+  "version": 1,
+  "release": "1.1.0",
+  "note": "Independent installation choices. Every 1.1 module is optional; the installing AI explains update/keep for each item and applies only the user’s choices. Core bug fixes are always included. Existing choices are preserved. No in-game 1.1 module panel.",
+  "modules": [
+    {
+      "id": "add-bots",
+      "name": "新增机器人",
+      "default": true,
+      "ask": true,
+      "summary": "可以往小屋世界里加入更多机器人，每位都有自己的房间。",
+      "changes": [
+        "设置 → 住户 → 新增住户 / 分配房间",
+        "每位新住户有稳定编号和自己的名字，钱、背包、日记、房间布局分开保存",
+        "房间可以用小鲸鱼家的布局，或用地图编辑器做的房间",
+        "机器人也可以用 cabin_add_resident 自己添加"
+      ],
+      "looksDifferent": "新加的住户会出现在世界里",
+      "touches": "存档里新增住户；已有住户不变",
+      "upgradeDefault": false,
+      "offSummary": "暂不启用新增住户入口；已有住户和家保留"
+    },
+    {
+      "id": "settings-ui",
+      "name": "新版设置界面",
+      "default": true,
+      "ask": true,
+      "summary": "设置分成 常用 / 住户 / 外观 / 音频 四页，住户用头像卡片管理。",
+      "changes": [
+        "四个分页，说明更短",
+        "住户卡片：改名、暂停探索、开关灯",
+        "家具布置的目录改成两列图片"
+      ],
+      "looksDifferent": "设置窗口的样子不同",
+      "touches": "不改存档",
+      "upgradeDefault": false,
+      "offSummary": "保留旧设置界面"
+    },
+    {
+      "id": "arcade-renovated",
+      "name": "新电玩城",
+      "default": true,
+      "ask": true,
+      "summary": "电玩城整体翻新：木框黄铜机台、星光地毯、分区矮墙，多一台俄罗斯方块机。",
+      "changes": [
+        "整个电玩城换成新的装修和布局",
+        "第二台俄罗斯方块机，两个人可以同时开局",
+        "实时画面可以并排显示两场对局"
+      ],
+      "looksDifferent": "整个电玩城都不一样（关掉则保留 1.0 的车站风电玩城）",
+      "touches": "电玩城的家具布局：旧布局保留，自己摆的家具会先收进收纳",
+      "upgradeDefault": false,
+      "offSummary": "保留旧车站风电玩城"
+    },
+    {
+      "id": "furniture-rotation",
+      "name": "家具转向与新家具图",
+      "default": true,
+      "ask": true,
+      "summary": "家具布置里选中家具按 R 就能转向；餐厅、小卖部、小鲸鱼家里的一部分家具换成重新画的四向版本。",
+      "changes": [
+        "F6 家具布置里按 R 转向（正、左、背、右）",
+        "55 件家具有四向图",
+        "餐厅的桌椅、小卖部的货架、家里的书桌电脑等换成新画的版本"
+      ],
+      "looksDifferent": "餐厅、小卖部和小鲸鱼家的部分家具画法不同（关掉则保留 1.0 的家具图和朝向）",
+      "touches": "家具布局的位置保留；朝向默认保持原来的正面",
+      "upgradeDefault": false,
+      "offSummary": "保留旧家具图和固定朝向"
+    },
+    {
+      "id": "gomoku",
+      "name": "五子棋",
+      "default": true,
+      "ask": true,
+      "summary": "棋桌上多了五子棋：15×15，五子连珠获胜，可以和电脑或另一位住户下。",
+      "changes": [
+        "和象棋共用一张棋桌",
+        "机器人用 play_gomoku 开局",
+        "每一步由游戏规则决定，不额外调用模型"
+      ],
+      "looksDifferent": "棋桌上多一个选择",
+      "touches": "不改存档",
+      "upgradeDefault": false,
+      "offSummary": "暂不增加五子棋；象棋继续可用"
+    },
+    {
+      "id": "furniture-workshop",
+      "name": "家具工坊",
+      "default": true,
+      "ask": true,
+      "summary": "自己做家具：三步填写设置、放上图片、配上机器人动作。",
+      "changes": [
+        "F6 家具布置里的“家具制作”",
+        "支持四向图片和机器人动作",
+        "可以把自制家具的功能交给机器人软件处理"
+      ],
+      "looksDifferent": "只增加，不改原来的家具",
+      "touches": "存档里新增 furniture-made 文件夹",
+      "upgradeDefault": false,
+      "offSummary": "暂不启用家具工坊；已制作的家具数据保留"
+    },
+    {
+      "id": "map-editor",
+      "name": "地图编辑器",
+      "default": true,
+      "ask": true,
+      "summary": "在设置里打开地图编辑器，可以做新的房间和户外地图，也可以改建现有房间。",
+      "changes": [
+        "室内和户外地图、房间之间的连接",
+        "四套配色、导入自己的地板和墙纸",
+        "改建现有房间：草稿和应用分开，可以恢复原房间",
+        "AI 也能用命令在后台编辑地图"
+      ],
+      "looksDifferent": "只有你应用改建后的房间才会变",
+      "touches": "只在应用改建时修改对应房间，并先备份",
+      "upgradeDefault": false,
+      "offSummary": "暂不启用地图编辑器；已保存的房间和草稿不删除"
+    },
+    {
+      "id": "character-motion",
+      "name": "新角色动作",
+      "default": true,
+      "ask": true,
+      "summary": "角色更灵动：八方向走路、坐下站起的过渡、闲着时的小动作、心情写在身上、新的思考动作。",
+      "changes": [
+        "伸懒腰、东张西望、打哈欠、看手机",
+        "开心时轻轻蹦跳，累了走得慢",
+        "思考时有四方向的思考动作"
+      ],
+      "looksDifferent": "角色的动作和以前不同",
+      "touches": "不改存档",
+      "upgradeDefault": false,
+      "offSummary": "保留旧角色动作"
+    },
+    {
+      "id": "seasons",
+      "name": "四季与节日",
+      "default": true,
+      "ask": true,
+      "summary": "按真实日期分春夏秋冬，节日时房间里会有小装饰，小卖部有当季商品。",
+      "changes": [
+        "季节和节日的小摆件",
+        "7 种当季商品，只在对应季节出售"
+      ],
+      "looksDifferent": "房间里会出现季节装饰",
+      "touches": "不改存档；背包里已有的当季商品照常能用",
+      "upgradeDefault": false,
+      "offSummary": "不增加季节装饰与当季上架规则"
+    },
+    {
+      "id": "seaside-path",
+      "name": "家旁海边",
+      "default": true,
+      "ask": true,
+      "summary": "从小鲸鱼家南门出去，沿小路可以走到海边看海、听浪、玩沙。",
+      "changes": [
+        "一条新的步行小路",
+        "海边活动会记进生活和心情"
+      ],
+      "looksDifferent": "家外面多一条可以走的路",
+      "touches": "不改存档",
+      "upgradeDefault": false,
+      "offSummary": "保留原有家门路线，暂不开放海边小路"
+    },
+    {
+      "id": "pocket-money-50",
+      "name": "每天 50 零花钱",
+      "default": true,
+      "ask": true,
+      "summary": "每天发 50 零花钱，最多存到 300（1.0 是每天 20、最多 80）。",
+      "changes": [
+        "每天补 50",
+        "最多存到 300，礼物和游戏赢的钱不受上限",
+        "不会扣掉已有的钱"
+      ],
+      "looksDifferent": "不会",
+      "touches": "只改每天补钱的规则",
+      "upgradeDefault": false,
+      "offSummary": "保留原零花钱规则"
+    }
+  ],
+  "installationPolicy": {
+    "askEach": true,
+    "unanswered": "keep-current-or-classic",
+    "coreFixes": "always",
+    "selectionSurface": "installing-ai-or-update.cmd"
+  }
+}

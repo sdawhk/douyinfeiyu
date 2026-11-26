@@ -1,26 +1,86 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { beijingDay } from './resident.mjs';
 
-const NEED_LIMIT = 38, BUY_LIMIT = 8, DAILY_LIMIT = 12;
+// 自主活动只受单件不超过 8 元和钱包余额约束；每日累计上限已取消
+// （主人给的是每天 50 元零花钱，12 元的自我限额会让他饿一整天）。
+const NEED_LIMIT = 38, BUY_LIMIT = 8;
+// 刚吃过/喝过就别马上再来一次：饱腹增益不够大时，光看阈值会一个小时买四五次，
+// 上午就把一天的零花钱花光。真掉到 10 以下则不受冷却限制。
+const NEED_COOLDOWN_MS = 45 * 60000;
+// 低于这个温度就不买冰的：之前 12℃ 的天也照吃西瓜冰棍，日志里写着“冰得牙齿一酸”。
+const COLD_WEATHER_C = 18;
+// 高于这个温度就不买热的：夏天 30℃ 端一杯热咖啡同样不合理。
+const HOT_WEATHER_C = 26;
+// 口味分掉到 -2 就是游戏自己判定的“吃腻了”，选品时先避开。
+const TIRED_SCORE = -2;
+const TICK_MS = 900000;
 const activities = [
   ['swing', 'swing'], ['flower_bed', 'smell_flower'], ['bench', 'watch_clouds'],
   ['xj_bookshelf', 'browse_book'], ['beanbag', 'read_comic'], ['round_window', 'look_out'],
   ['fish_tank', 'watch_fish'], ['wave_rug', 'stretch'], ['big_tree', 'shade'],
 ];
 
-export function chooseAutonomyAction({ status, resident, now = Date.now(), spent = 0, last = '' }) {
+// 真正能当一顿饭的商品；其余 snack 只是嘴馋（薯片 6 块也不顶饱）。
+const MEAL_IDS = new Set(['zongzi', 'mooncake', 'tangyuan', 'hot_pot_snack', 'roast_chestnut', 'qingtuan']);
+
+/** 吃掉之后能不能顶饱：冰品最差，正餐/主食最好，普通零食居中。 */
+function fillingRank(product) {
+  if (product.shelf === 'icecream') return 1;
+  return MEAL_IDS.has(product.id) ? 3 : 2;
+}
+
+export function chooseAutonomyAction({ status, resident, now = Date.now(), spent = 0, last = '', blocked = [] }) {
   if (!status?.connected || !resident?.state || resident.task) return null;
   if (resident.lastExternalActionAt && now - resident.lastExternalActionAt < 3 * 60000) return null;
   const local = new Date(now + 8 * 3600000), hour = local.getUTCHours() + local.getUTCMinutes() / 60;
   if (hour >= 22 || hour < 7) return null;
 
+  const dead = new Set(blocked);
+
   const satiety = Number(status.feeling?.satiety ?? 100), hydration = Number(status.feeling?.hydration ?? 100);
-  const needs = satiety <= NEED_LIMIT ? 'eat' : hydration <= NEED_LIMIT ? 'drink' : '';
+  const weather = status.weather || {};
+  const tastes = status.feeling?.tastes || {};
+  const wallet = Number(status.wallet ?? 0);
+  const temp = Number(weather.temp);
+  const coldWeather = Number.isFinite(temp) && temp <= COLD_WEATHER_C;
+  const warmWeather = Number.isFinite(temp) && temp >= HOT_WEATHER_C;
+  const tiredOf = id => Number(tastes?.[id]?.score ?? 0) <= TIRED_SCORE;
+  const beats = product => !dead.has(product.id) && !tiredOf(product.id)
+    && !(coldWeather && product.cold === true)
+    && !(warmWeather && product.shelf === 'hotdrink');
+  // 饮品按“冷天喝热的、热天喝凉的”排，别拿 fillingRank 把热咖啡顶到夏天第一位。
+  const fitRank = product => needs === 'drink'
+    ? (coldWeather ? (product.shelf === 'hotdrink' ? 3 : 2) : warmWeather ? (product.shelf === 'drink' ? 3 : 2) : 2)
+    : fillingRank(product);
+  const needEat = satiety <= NEED_LIMIT, needDrink = hydration <= NEED_LIMIT;
+  // 饿和渴同时低就按 15 分钟一个时段交替。原来是“饱腹度一低就只吃”，
+  // 结果 satiety 长期卡在 38 以下，hydration 掉到 0 也永远轮不到喝水。
+  const needs = needEat && needDrink
+    ? (Math.floor(now / TICK_MS) % 2 === 0 ? 'drink' : 'eat')
+    : needEat ? 'eat' : needDrink ? 'drink' : '';
   if (needs) {
-    const inBag = resident.bagList().find(p => p.kind === needs);
+    const bagList = resident.bagList();
+    const inBag = bagList.filter(p => p.kind === needs && beats(p))[0]
+      || bagList.find(p => p.kind === needs);
     if (inBag) return { type: 'eat', product: inBag.id, reason: needs === 'eat' ? '有点饿了，吃点东西' : '有点渴了，喝点水' };
-    const product = resident.catalog.products.filter(p => p.kind === needs && p.price <= BUY_LIMIT && p.price + spent <= DAILY_LIMIT && p.price <= (status.wallet ?? 0)).sort((a, b) => a.price - b.price)[0];
-    if (product) return { type: 'buy', product: product.id, price: product.price, reason: '买些便宜的' };
+
+    const affordable = resident.catalog.products.filter(p => p.kind === needs
+      && p.price <= BUY_LIMIT && p.price <= wallet);
+    const preferred = affordable.filter(beats);
+    // 有得挑就买能顶饱的（粽子、关东煮、面包），没得挑才退回最便宜的；
+    // 同一档里挑便宜的，一天 12 币的额度才够吃上两顿；按时段轮换，别顿顿一样。
+    // 退回时也要避开游戏里根本不存在的商品，否则会反复撞同一堵墙。
+    const fallbackPool = affordable.filter(p => !dead.has(p.id));
+    const pool = (preferred.length ? preferred : fallbackPool)
+      .sort((a, b) => fitRank(b) - fitRank(a) || a.price - b.price || a.id.localeCompare(b.id));
+    const top = pool.slice(0, Math.min(3, pool.length));
+    const product = top.length ? top[Math.floor(now / TICK_MS) % top.length] : null;
+    if (product) {
+      return { type: 'buy', product: product.id, price: product.price,
+        reason: needs === 'drink' ? '有点渴，买点喝的'
+          : fillingRank(product) >= 3 ? '饿了，想吃点顶饱的' : '饿了，买点吃的' };
+    }
   }
 
   const wishes = (status.wishes || []).filter(w => !w.done);
@@ -33,7 +93,6 @@ export function chooseAutonomyAction({ status, resident, now = Date.now(), spent
     return { type: 'use', object, use, reason: '想完成一个小愿望' };
   }
 
-  const weather = status.weather || {};
   let choices = activities.filter(([id, use]) => resident.objects.get(id)?.bridge === 'supported' && resident.objects.get(id).uses.some(u => u.id === use));
   if (weather.rain > .25) choices = choices.filter(([id]) => !['swing', 'flower_bed', 'big_tree'].includes(id));
   if (weather.wind > 2.2) choices = choices.filter(([id]) => id !== 'swing');
@@ -45,20 +104,60 @@ export function chooseAutonomyAction({ status, resident, now = Date.now(), spent
 }
 
 export function createAutonomy({ rows, host, intervalMs = 15 * 60000, firstDelayMs = 20000, log = () => {}, now = Date.now, logFile = '' }) {
-  let timer = null, lastAction = new Map(), spentToday = new Map();
+  let timer = null, lastAction = new Map(), spentToday = new Map(), lastNeedAt = new Map();
   const day = () => beijingDay(now());
+  // 桥接目录里的商品表可能比游戏新：买一次报“没有这个东西”，就把这个 id 记下来，
+  // 免得每次重启都对着同一件不存在的商品白跑一趟。
+  const blockedFile = logFile ? path.join(path.dirname(logFile), 'autonomy-blocked.json') : '';
+  const blocked = new Set();
+  if (blockedFile) {
+    try { for (const id of JSON.parse(fs.readFileSync(blockedFile, 'utf8'))) blocked.add(String(id)); } catch { /* 还没记录过 */ }
+  }
+  const rememberBlocked = id => {
+    if (!blockedFile || blocked.has(id)) return;
+    blocked.add(id);
+    try { fs.writeFileSync(blockedFile, JSON.stringify([...blocked], null, 1), 'utf8'); } catch { /* 写不进去不影响本轮 */ }
+  };
+  // “没有这个东西”是真不存在，可以永久拉黑；节令商品报的是“本月暂未上架”，
+  // 只是这个月不卖，下个月还得再试，所以按月份记，跨月自动恢复。
+  const outOfSeasonFile = logFile ? path.join(path.dirname(logFile), 'autonomy-out-of-season.json') : '';
+  const outOfSeason = new Map();
+  if (outOfSeasonFile) {
+    try { for (const [id, month] of Object.entries(JSON.parse(fs.readFileSync(outOfSeasonFile, 'utf8')))) outOfSeason.set(String(id), String(month)); } catch { /* 还没记录过 */ }
+  }
+  const monthKey = () => beijingDay(now()).slice(0, 7);
+  const skippedThisMonth = () => [...outOfSeason].filter(([, month]) => month === monthKey()).map(([id]) => id);
+  const rememberOutOfSeason = id => {
+    if (!outOfSeasonFile || outOfSeason.get(id) === monthKey()) return;
+    outOfSeason.set(id, monthKey());
+    try { fs.writeFileSync(outOfSeasonFile, JSON.stringify(Object.fromEntries(outOfSeason), null, 1), 'utf8'); } catch { /* 同上 */ }
+  };
   const loadSpent = key => {
     const today = day(); if (spentToday.has(key) && spentToday.get(key).day === today) return spentToday.get(key).amount;
     let amount = 0;
     try { for (const line of fs.readFileSync(logFile, 'utf8').split(/\r?\n/)) { try { const e = JSON.parse(line); if (e.fish === key && e.source === 'autonomy' && beijingDay(e.ts) === today) amount += Number(e.spent) || 0; } catch { /* 略过损坏行 */ } } } catch { /* 日志尚不存在 */ }
     spentToday.set(key, { day: today, amount }); return amount;
   };
-  const act = async row => {
+  const act = async (row, attempt = 0) => {
     if (!host.connected || !row.resident.state || row.resident.task) return;
     const status = row.resident.status(), spent = loadSpent(row.key);
-    const choice = chooseAutonomyAction({ status, resident: row.resident, now: now(), spent, last: lastAction.get(row.key) || '' });
+    const choice = chooseAutonomyAction({ status, resident: row.resident, now: now(), spent,
+      last: lastAction.get(row.key) || '', blocked: [...blocked, ...skippedThisMonth()] });
     if (!choice) return;
     const resident = row.resident;
+    // 冷却只在首轮判断：买失败换下一个候选时不能被自己刚设的冷却挡住。
+    if (attempt === 0 && choice.type === 'buy') {
+      const product = resident.catalog.products.find(p => p.id === choice.product);
+      const need = product?.kind;
+      if (need === 'eat' || need === 'drink') {
+        const critical = need === 'eat'
+          ? Number(status.feeling?.satiety ?? 100) <= 10
+          : Number(status.feeling?.hydration ?? 100) <= 10;
+        const lastAt = lastNeedAt.get(`${row.key}:${need}`) || 0;
+        if (!critical && now() - lastAt < NEED_COOLDOWN_MS) return;
+        lastNeedAt.set(`${row.key}:${need}`, now());
+      }
+    }
     resident.autonomyStarting = true;
     let task;
     try {
@@ -73,7 +172,17 @@ export function createAutonomy({ rows, host, intervalMs = 15 * 60000, firstDelay
     if (task.status === 'done') {
       if (choice.type === 'buy') spentToday.set(row.key, { day: day(), amount: spent + (task.result?.price ?? choice.price) });
       log(`${row.name} 自主活动完成：${task.label}`);
-    } else log(`${row.name} 自主活动未完成：${task.label}（${task.error || task.status}）`);
+    } else {
+      log(`${row.name} 自主活动未完成：${task.label}（${task.error || task.status}）`);
+      // 游戏端不认这件商品：记下来，并在同一个时段里换下一个候选，不用再等十五分钟。
+      if (choice.type === 'buy') {
+        const error = String(task.error || '');
+        if (/没有这个东西|不存在|not found|unknown/i.test(error)) rememberBlocked(choice.product);
+        else if (/暂未上架|未上架|时令/i.test(error)) rememberOutOfSeason(choice.product);
+        else return;
+        if (attempt < 2) return act(row, attempt + 1);
+      }
+    }
   };
   const tick = () => { if (!host.connected) return; for (const row of rows) void act(row).catch(e => log(`自主活动异常：${e.message}`)); };
   return {

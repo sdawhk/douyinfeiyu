@@ -6,15 +6,97 @@
       "function": {
         "name": "cabin_status",
         "description": "查看自己在小屋世界里的状态：在哪里、零花钱、背包、饱腹/口渴/心情、正在做什么、天气。决定做什么之前先看一眼。",
-        "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填为默认住户。不要填写显示名字。"
+            }
+          },
+          "additionalProperties": false
+        }
       }
     },
     {
       "type": "function",
       "function": {
         "name": "cabin_look",
-        "description": "看看身边：当前房间有哪些家具和东西、每样能做什么（object 和 use 的 id）、出口通向哪里。",
-        "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+        "description": "看看身边：当前房间有哪些家具和东西、每样能做什么（object 和 use 的 id）、出口通向哪里。跨房间找功能请用 cabin_catalog；不需要把每件家具注册成工具。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填为默认住户。不要填写显示名字。"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_catalog",
+        "description": "搜索所有可访问房间的家具及动作（含新增家具），无关键词按稳定编号分页，不按常用程度删减。发现后用 cabin_use 执行。可搜五子棋、日记、钓鱼等，找不到时清空关键词翻页。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填为默认住户。不要填写显示名字。"
+            },
+            "query": {
+              "type": "string",
+              "description": "名称、说明或动作关键词；留空列出全部"
+            },
+            "space": {
+              "type": "string",
+              "description": "可选房间编号，如 arcade、xjhome、park"
+            },
+            "object": {
+              "type": "string",
+              "description": "可选精确物件编号"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "首页0；下一页用返回的 nextOffset"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "description": "每页数量，默认20"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_task",
+        "description": "按任务编号查询当前住户的真实完成回执。running 仍在执行；done 才表示成功；failed 不能报成功。不要反复调用 cabin_use 重开同一任务。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填为默认住户。不要填写显示名字。"
+            },
+            "taskId": {
+              "type": "string",
+              "description": "cabin_use / cabin_go 返回的 taskId"
+            }
+          },
+          "required": [
+            "taskId"
+          ],
+          "additionalProperties": false
+        }
       }
     },
     {
@@ -25,10 +107,22 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "place": { "type": "string", "description": "地方 id（xjhome / park / shop / onsen / arcade / restaurant）或中文名" },
-            "zone": { "type": "string", "description": "可选：房间里的具体位置 id，见 cabin_look 或手册" }
+            "place": {
+              "type": "string",
+              "description": "地方 id（xjhome / park / shop / onsen / arcade / restaurant）或中文名"
+            },
+            "zone": {
+              "type": "string",
+              "description": "可选：房间里的具体位置 id，见 cabin_look 或手册"
+            },
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填为默认住户。不要填写显示名字。"
+            }
           },
-          "required": ["place"],
+          "required": [
+            "place"
+          ],
           "additionalProperties": false
         }
       }
@@ -37,16 +131,55 @@
       "type": "function",
       "function": {
         "name": "cabin_use",
-        "description": "使用一件家具或东西，例如荡秋千(swing/swing)、钓鱼(pier/fish)、喂鱼(fish_tank/feed_fish)、泡汤(onsen_soak/soak)、开灯(xj_lamp/on)。会自己走过去再做，做完返回真实感受和结果。东西不在当前房间也可以，会自动走过去。",
+        "description": "使用家具或街机。不知道 object/use 先调用 cabin_catalog 搜索，不能因为当前房间没列出就断言没有。对局由本地游戏自动推进；running 未完成，用 cabin_task 查询。写日记传 text，餐厅建议 cabin_restaurant。普通家具立即返回任务回执，不必等20秒；可自主指定持续活动的durationSeconds或随时结束。",
         "parameters": {
           "type": "object",
           "properties": {
-            "object": { "type": "string", "description": "东西的 id，如 swing、pier、fish_tank、beanbag、onsen_soak" },
-            "use": { "type": "string", "description": "怎么用的 id，如 swing、fish、feed_fish、sink_in、soak" },
-            "item": { "type": "string", "description": "只有 object=bag（吃喝用包里的东西）或货架 use=buy 时需要：商品 id" },
-            "feeling": { "type": "string", "description": "可选：自己此刻的想法，会记进游戏里今天的生活" }
+            "object": {
+              "type": "string",
+              "description": "东西的 id，如 swing、pier、fish_tank、beanbag、onsen_soak"
+            },
+            "use": {
+              "type": "string",
+              "description": "怎么用的 id，如 swing、fish、feed_fish、sink_in、soak"
+            },
+            "item": {
+              "type": "string",
+              "description": "只有 object=bag（吃喝用包里的东西）或货架 use=buy 时需要：商品 id"
+            },
+            "feeling": {
+              "type": "string",
+              "description": "可选：自己此刻的想法，会记进游戏里今天的生活"
+            },
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填为默认住户。不要填写显示名字。"
+            },
+            "text": {
+              "type": "string",
+              "description": "写日记的正文，1–2000字；不得杜撰已保存"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "npc",
+                "solo",
+                "duo",
+                "join"
+              ],
+              "description": "电玩城贪吃蛇/象棋/五子棋：npc 与 NPC 对战（只需一个机器人）；solo 兼容同义。duo 等待另一个真实住户，join 加入；家中棋盘需两位住户。扫雷/方块用 solo。"
+            },
+            "durationSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600,
+              "description": "休闲活动持续秒数：0表示一直保持，直到自主finish/stop或断线；其余1–3600秒"
+            }
           },
-          "required": ["object", "use"],
+          "required": [
+            "object",
+            "use"
+          ],
           "additionalProperties": false
         }
       }
@@ -59,10 +192,22 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "product": { "type": "string", "description": "商品 id，例如 soda、bread、hot_cocoa、umbrella，完整列表见 cabin_look（在小卖部时）或手册" },
-            "feeling": { "type": "string", "description": "可选：想法" }
+            "product": {
+              "type": "string",
+              "description": "商品 id，例如 soda、bread、hot_cocoa、umbrella，完整列表见 cabin_look（在小卖部时）或手册"
+            },
+            "feeling": {
+              "type": "string",
+              "description": "可选：想法"
+            },
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填为默认住户。不要填写显示名字。"
+            }
           },
-          "required": ["product"],
+          "required": [
+            "product"
+          ],
           "additionalProperties": false
         }
       }
@@ -75,10 +220,22 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "product": { "type": "string", "description": "背包里的商品 id" },
-            "feeling": { "type": "string", "description": "可选：想法" }
+            "product": {
+              "type": "string",
+              "description": "背包里的商品 id"
+            },
+            "feeling": {
+              "type": "string",
+              "description": "可选：想法"
+            },
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填为默认住户。不要填写显示名字。"
+            }
           },
-          "required": ["product"],
+          "required": [
+            "product"
+          ],
           "additionalProperties": false
         }
       }
@@ -87,8 +244,362 @@
       "type": "function",
       "function": {
         "name": "cabin_stop",
-        "description": "停下正在做的事。还没提交的动作不算完成；已经付钱/吃完的步骤不会撤回。",
-        "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+        "description": "随时取消自己当前未提交的动作，含走路、游戏和家具，不必等固定秒数。action=finish 则只提前结束正在进行的休闲活动并记录已发生的体验；任务最终结果仍查cabin_task。已提交的付款/吃完等不能撤销。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填为默认住户。不要填写显示名字。"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "stop",
+                "finish"
+              ],
+              "description": "stop取消（默认）；finish主动结束休闲活动并收尾"
+            },
+            "reason": {
+              "type": "string",
+              "description": "自己决定或用户要求结束的原因"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_residents",
+        "description": "列出住户编号、显示名字、各自房间和可用室内地图",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_add_resident",
+        "description": "新增一位机器人，分配独立默认房间。相同编号不会重复新增，不会创建或复制AI人格/记忆。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "mapId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_assign_room",
+        "description": "为新增住户换为地图编辑器保存的室内地图。该住户先走去公园；房内还有别人时拒绝。mapId 留空恢复默认房间。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号（不填使用默认住户）"
+            },
+            "mapId": {
+              "type": "string"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_rename",
+        "description": "修改显示名字，保留住户编号、背包、日记与身份。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号（不填使用默认住户）"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_invite",
+        "description": "邀请另一位已接入住户来自己家，返回客人可使用的地点和棋盘编号；不会自动走动或发送聊天消息。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号（不填使用默认住户）"
+            },
+            "guest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "guest"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_restaurant",
+        "description": "查菜单或实际点餐、做菜、吃饭、入座；等待完成回执，不要把 accepted/running 当作已吃完。点餐和做菜将菜放入背包，吃饭另用 eat。like/dislike/neutral 需 dish 与 feeling，生成食后评价事件；长期记忆由宿主提供。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号（不填使用默认住户）"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "menu",
+                "status",
+                "order",
+                "cook",
+                "eat",
+                "sit",
+                "cancel",
+                "like",
+                "dislike",
+                "neutral"
+              ]
+            },
+            "dish": {
+              "type": "string"
+            },
+            "feeling": {
+              "type": "string",
+              "description": "食后评价的主观理由，1–300字；只可评价自己实际吃过的菜"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_furniture",
+        "description": "查看当前可访问房间中已摆放的自制家具，以及为自己配置的动作。装饰家具没有可执行动作。使用返回的object编号和use编号调用cabin_use。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；省略为默认住户。"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_update_plan",
+        "description": "安装或升级小屋世界 1.1 时首先调用。逐项列出可选内容、更新/保留原版的区别、外观变化与存档影响。让用户分别选择，不能将同意升级理解为同意所有外观变化。只读，不修改任何文件。",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_update_apply",
+        "description": "仅按用户逐项明确给出的选择启用或关闭 1.1 内容；不回答的项目保持当前状态，首次未选择保留原版。可只选择一部分，不自动全开。先备份旧数据和选择，返回 ok 后才算生效配置已写入；重启游戏后采用。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "modules": {
+              "type": "object",
+              "description": "要改的模块：{\"模块id\": true 打开 / false 关闭}，没写的模块保持不变。模块 id 用 cabin_update_plan 返回的 id。",
+              "additionalProperties": {
+                "type": "boolean"
+              }
+            },
+            "reason": {
+              "type": "string",
+              "description": "用户为什么这样选（可选，一句话，写进回执）"
+            }
+          },
+          "required": [
+            "modules"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_update_undo",
+        "description": "撤销最近一次模块更改，恢复到更改前的选择。用户说改回去、不想要刚才的更改时用。同样需要重启游戏生效。",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_process",
+        "description": "管理自己的一个主活动和多个副活动。身体活动只执行一项，其余排队；chat/think/read是由你实际执行的认知或交流活动。可自主promote改变主次，stop中断，finish正常收尾；list返回真实状态。长期休息在arguments中传durationSeconds:0。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填使用默认住户"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "start",
+                "promote",
+                "stop",
+                "finish"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "description": "活动编号；promote也可填chat/think/read"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "body",
+                "chat",
+                "think",
+                "read"
+              ]
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "primary",
+                "secondary"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string",
+              "enum": [
+                "cabin_go",
+                "cabin_use",
+                "cabin_buy",
+                "cabin_eat",
+                "cabin_restaurant"
+              ]
+            },
+            "arguments": {
+              "type": "object",
+              "description": "身体工具参数；actor由当前住户强制绑定"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_rename_home",
+        "description": "修改自建住户私人房间的名称，名字1–32字，不改变住户名字、编号或家具。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填使用默认住户"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 32,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cabin_remove_resident",
+        "description": "按用户明确意愿删除自建住户及私人房间，恢复资料保留。不能删除内置住户；访客必须先离开，尚未完成的付款不能撤销。confirm须与actor完全一致。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "type": "string",
+              "description": "住户稳定编号；不填使用默认住户"
+            },
+            "confirm": {
+              "type": "string",
+              "description": "需要删除的住户准确编号，用于防止误删"
+            }
+          },
+          "required": [
+            "actor",
+            "confirm"
+          ],
+          "additionalProperties": false
+        }
       }
     }
   ]

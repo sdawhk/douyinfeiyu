@@ -30,6 +30,7 @@ export function publicSettings(config) {
   const xfyunTts = config.xfyunTts || {};
   const edgeTts = config.edgeTts || {};
   const voiceClone = config.voiceClone || {};
+  const voiceStudio = config.voiceStudio || {};
   const speechRvc = config.speechRvc || {};
   const singing = config.singing || {};
   const replyControl = config.replyControl || {};
@@ -69,13 +70,16 @@ export function publicSettings(config) {
       url: edgeTts.workerUrl || edgeTts.url || 'https://tts.wangwangit.com', voice: edgeTts.voice || 'zh-CN-XiaoxiaoNeural' },
     voiceClone: { enabled: voiceClone.enabled === true, mode: ['always', 'probability'].includes(voiceClone.mode) ? voiceClone.mode : 'requested',
       endpoint: voiceClone.endpoint || 'http://127.0.0.1:9882', refAudio: voiceClone.refAudio || '', refText: voiceClone.refText || '' },
+    voiceStudio: { enabled: voiceStudio.enabled === true, mode: ['always', 'probability'].includes(voiceStudio.mode) ? voiceStudio.mode : 'requested',
+      endpoint: voiceStudio.endpoint || 'http://127.0.0.1:3900', model: voiceStudio.model || 'omnivoice', voiceId: voiceStudio.voiceId || '' },
     speechRvc: { enabled: speechRvc.enabled === true, pitch: Number.isInteger(speechRvc.pitch) ? speechRvc.pitch : 0 },
     autoSticker: config.autoSticker !== false,
     groupMuteEnabled: config.groupMuteEnabled === true,
-    groupReplyCooldownMs: config.groupReplyCooldownMs ?? 20_000,
+    groupReplyCooldownMs: config.groupReplyCooldownMs ?? 120_000,
     messageBatch: {
       enabled: config.messageBatch?.enabled !== false,
       idleMs: config.messageBatch?.idleMs ?? 5_000,
+      privateIdleMs: config.messageBatch?.privateIdleMs ?? 1_000,
       maxMs: config.messageBatch?.maxMs ?? 15_000
     },
     groupAffinity: {
@@ -124,8 +128,8 @@ export function publicSettings(config) {
       enabled: owner.enabled !== false,
       idleMs: owner.idleMs ?? 7_200_000,
       checkIntervalMs: owner.checkIntervalMs ?? 900_000,
-      cooldownMs: owner.cooldownMs ?? 14_400_000,
-      maxPerDay: owner.maxPerDay ?? 3,
+      cooldownMs: owner.cooldownMs ?? 7_200_000,
+      maxPerDay: owner.maxPerDay ?? 4,
       startHour: owner.startHour ?? 9,
       endHour: owner.endHour ?? 22
     },
@@ -171,6 +175,7 @@ export function validateSettings(value) {
   const singing = value.singing || {};
   const edgeTts = value.edgeTts || {};
   const voiceClone = value.voiceClone || {};
+  const voiceStudio = value.voiceStudio || {};
   const speechRvc = value.speechRvc || {};
   const replyControl = value.replyControl;
   const imageGen = value.imageGen;
@@ -224,6 +229,17 @@ export function validateSettings(value) {
   if (voiceClone.enabled && (!voiceClone.refAudio.trim() || !voiceClone.refText.trim())) {
     throw Object.assign(new Error('启用克隆音色前，请填写参考音频路径和逐字原文'), { status: 400 });
   }
+  if (!['requested', 'always', 'probability'].includes(voiceStudio.mode ?? 'requested')) throw Object.assign(new Error('VoiceStudio 语音触发方式无效'), { status: 400 });
+  if (typeof voiceStudio.endpoint !== 'string' || voiceStudio.endpoint.length > 250) throw Object.assign(new Error('VoiceStudio 服务地址无效'), { status: 400 });
+  try {
+    const url = new URL(voiceStudio.endpoint);
+    if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+      || url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new Error();
+  } catch { throw Object.assign(new Error('VoiceStudio 服务地址只接受本机 HTTP 地址'), { status: 400 }); }
+  if (typeof voiceStudio.model !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(voiceStudio.model)) throw Object.assign(new Error('VoiceStudio 模型 ID 无效'), { status: 400 });
+  if (typeof voiceStudio.voiceId !== 'string' || voiceStudio.voiceId.length > 128
+    || (voiceStudio.voiceId && !/^[a-z0-9][a-z0-9._-]*$/i.test(voiceStudio.voiceId))) throw Object.assign(new Error('VoiceStudio 音色 ID 无效'), { status: 400 });
+  if (voiceStudio.enabled && !voiceStudio.voiceId.trim()) throw Object.assign(new Error('启用 VoiceStudio 前，请填写音色 ID'), { status: 400 });
   const speechRvcPitch = integer(speechRvc.pitch ?? 0, -12, 12, '普通语音流萤变调');
   const disabled = [...new Set(value.groupInterjectionDisabled.map(String))];
   if (disabled.length > 100 || disabled.some((id) => !/^\d{5,20}$/.test(id))) {
@@ -238,7 +254,7 @@ export function validateSettings(value) {
   const commentThreshold = integer(qs.commentThreshold, 0, 100, '评论好感度门槛');
   if (commentThreshold < likeThreshold) throw Object.assign(new Error('评论门槛不能低于点赞门槛'), { status: 400 });
   if (typeof ownerCardLike.time !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(ownerCardLike.time)) throw Object.assign(new Error('给主人名片点赞的时间格式无效'), { status: 400 });
-  if (batch.maxMs < batch.idleMs) throw Object.assign(new Error('最长等待不能短于连续消息等待时间'), { status: 400 });
+  if (batch.maxMs < Math.max(batch.idleMs, batch.privateIdleMs ?? 1_000)) throw Object.assign(new Error('最长等待不能短于私聊或群聊的连续消息等待时间'), { status: 400 });
   const protectedGroups = [...new Set((Array.isArray(groupAffinity.protectedGroups) ? groupAffinity.protectedGroups : []).map(String))];
   if (protectedGroups.length > 100 || protectedGroups.some((id) => !/^\d{5,20}$/.test(id))) throw Object.assign(new Error('群好感度保护名单无效'), { status: 400 });
   const warnAt = integer(groupAffinity.warnAt, 1, 49, '群好感度警告分数');
@@ -281,13 +297,16 @@ export function validateSettings(value) {
     edgeTts: { enabled: boolean(edgeTts.enabled ?? false, 'Edge TTS'), mode: edgeTts.mode, url: edgeTts.url.trim(), voice: edgeTts.voice },
     voiceClone: { enabled: boolean(voiceClone.enabled ?? false, '克隆音色'), mode: voiceClone.mode,
       endpoint: voiceClone.endpoint.trim(), refAudio: voiceClone.refAudio.trim(), refText: voiceClone.refText.trim() },
+    voiceStudio: { enabled: boolean(voiceStudio.enabled ?? false, 'VoiceStudio 语音回复'), mode: voiceStudio.mode ?? 'requested',
+      endpoint: voiceStudio.endpoint.trim(), model: voiceStudio.model.trim(), voiceId: voiceStudio.voiceId.trim() },
     speechRvc: { enabled: boolean(speechRvc.enabled ?? false, '普通语音流萤转换'), pitch: speechRvcPitch },
     autoSticker: value.autoSticker === undefined ? undefined : boolean(value.autoSticker, '自动收录表情'),
     groupMuteEnabled: value.groupMuteEnabled === undefined ? false : boolean(value.groupMuteEnabled, '群友闭嘴开关'),
     groupReplyCooldownMs: integer(value.groupReplyCooldownMs, 0, 300_000, '群聊冷却时间'),
     messageBatch: {
       enabled: boolean(batch.enabled, '连续消息合并'),
-      idleMs: integer(batch.idleMs, 1_000, 15_000, '连续消息等待时间'),
+      idleMs: integer(batch.idleMs, 1_000, 15_000, '群聊连续消息等待时间'),
+      privateIdleMs: integer(batch.privateIdleMs ?? 1_000, 250, 15_000, '私聊连续消息等待时间'),
       maxMs: integer(batch.maxMs, 5_000, 30_000, '连续消息最长等待')
     },
     groupAffinity: {
@@ -337,7 +356,7 @@ export function validateSettings(value) {
       idleMs: integer(o.idleMs, 1_800_000, 604_800_000, '主人空闲时间'),
       checkIntervalMs: integer(o.checkIntervalMs, 300_000, 86_400_000, '私聊检查间隔'),
       cooldownMs: integer(o.cooldownMs, 3_600_000, 604_800_000, '私聊冷却时间'),
-      maxPerDay: integer(o.maxPerDay, 1, 20, '每日上限'),
+      maxPerDay: integer(o.maxPerDay, 1, 4, '每日上限'),
       startHour,
       endHour
     },
@@ -400,6 +419,7 @@ export function saveSettingsDocument(expectedVersion, value, configPath = CONFIG
   config.edgeTts = { ...config.edgeTts, ...settings.edgeTts,
     workerUrl: settings.edgeTts.url, url: 'http://127.0.0.1:18902' };
   config.voiceClone = { ...config.voiceClone, ...settings.voiceClone };
+  config.voiceStudio = { ...config.voiceStudio, ...settings.voiceStudio };
   config.speechRvc = { ...config.speechRvc, ...settings.speechRvc };
   config.voiceReplyProbability = settings.voiceReplyProbability;
   if (settings.autoSticker !== undefined) config.autoSticker = settings.autoSticker;

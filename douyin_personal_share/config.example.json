@@ -2,6 +2,17 @@
   "recipient_profile_url": "",
   "recipient_handle": "",
   "daily_max": 5,
+  "direct_browse": {
+    "enabled": false,
+    "dailyEnabled": false,
+    "dailyTime": "20:30",
+    "autonomousEnabled": false,
+    "startHour": 9,
+    "endHour": 23,
+    "maxAutonomousPerDay": 10,
+    "shareToOwner": true,
+    "postQzone": false
+  },
   "daily_browse": {
     "enabled": false,
     "time": "20:30",

@@ -22,19 +22,22 @@ test('QQ and non-owner douyin turns keep the previous prompt (empty append)', ()
   assert.equal(douyinOwnerTurnPrompt({ channel: 'douyin', isDouyinOwnerTurn: false }), '');
 });
 
-test('QQ owner private turn keeps the original four Douyin tool rules verbatim', () => {
+test('QQ owner private turn uses direct Douyin browsing rules', () => {
   const prompt = qqOwnerDouyinToolPrompt({ ownerPrivateTurn: true, hasToolSession: true });
   assert.equal(prompt, QQ_OWNER_DOUYIN_TOOL_RULES);
   for (const marker of ['【主人抖音浏览】', '【抖音互动建议】', '【抖音点赞与评论】', '【抖音视频分享】']) {
     assert.ok(prompt.includes(marker), `missing ${marker}`);
   }
-  assert.ok(prompt.includes('douyin_browse_recommendations'));
+  assert.ok(prompt.includes('douyin_direct_browse'));
+  assert.ok(prompt.includes('小屋电脑'));
+  assert.ok(prompt.includes('action=search'));
+  assert.ok(!prompt.includes('douyin_browse_recommendations'));
   assert.equal(qqOwnerDouyinToolPrompt({ ownerPrivateTurn: true, hasToolSession: false }), '');
   assert.equal(qqOwnerDouyinToolPrompt({ ownerPrivateTurn: false, hasToolSession: true }), '');
 });
 
 test('QQ owner prompt explains topic usage and honest fallback wording', () => {
-  for (const phrase of ['【抖音浏览主题】', '必须带 topic', '不许自己发明主题', '改刷推荐流', '按你的要求从搜索页刷的']) {
+  for (const phrase of ['【抖音浏览主题】', 'topic', '只能取爸本轮原话', 'querySource=self', 'topicFallback=true', '改刷推荐流']) {
     assert.ok(QQ_OWNER_DOUYIN_TOOL_RULES.includes(phrase), `missing ${phrase}`);
   }
 });

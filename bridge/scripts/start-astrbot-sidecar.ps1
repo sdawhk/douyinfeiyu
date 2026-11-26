@@ -9,6 +9,16 @@ if (-not (Test-Path $UvPath) -or -not (Test-Path (Join-Path $AstrBotRoot 'data\c
     throw 'Sidecar is not set up. Run setup-astrbot-sidecar.ps1 first.'
 }
 
+# Keep ordinary QQ replies in qq-bot; this sidecar only handles plugin commands.
+# Windows PowerShell 5.1's JSON parser rejects some valid nested config arrays;
+# use Node (also required by this installation) to parse and patch the JSON.
+$sidecarConfigFile = Join-Path $AstrBotRoot 'data\cmd_config.json'
+$nodePath = 'C:\Program Files\nodejs\node.exe'
+if (-not (Test-Path -LiteralPath $nodePath)) { throw "Node runtime not found: $nodePath" }
+$configPatcher = Join-Path $PSScriptRoot 'disable-astrbot-provider.mjs'
+& $nodePath $configPatcher $sidecarConfigFile
+if ($LASTEXITCODE -ne 0) { throw 'Could not validate or patch AstrBot sidecar config.' }
+
 $env:UV_CACHE_DIR = Join-Path $StateRoot 'cache'
 $env:TMP = Join-Path $StateRoot 'tmp'
 $env:TEMP = $env:TMP

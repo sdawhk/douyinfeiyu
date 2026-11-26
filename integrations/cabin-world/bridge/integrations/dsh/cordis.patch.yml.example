@@ -1,0 +1,15 @@
+# 小屋世界 Cabin World：粘贴到 %USERPROFILE%\.dsh\cordis.patch.yml 末尾，把三个路径换成你自己的，然后重启 DSH。
+# === cabin-world MCP BEGIN ===
+- insert:
+    - id: mcp-cabin-world
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: cabin-world
+        transport: stdio
+        command: 'C:\Program Files\nodejs\node.exe'
+        args:
+          - 'D:\CabinWorld\bridge\mcp-server.mjs'
+          - '--data'
+          - 'D:\CabinWorld\data'
+        toolCallTimeoutMs: 660000
+# === cabin-world MCP END ===

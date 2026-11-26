@@ -10,7 +10,8 @@ const SOURCE_LABELS = new Map([
   ['proactive-greeting', '主动联系'],
   ['proactive-thought', '主动联系'],
   ['douyin-daily', '抖音日报'],
-  ['song-notice', '点歌']
+  ['song-notice', '点歌'],
+  ['voice-reply', '语音回复']
 ]);
 
 export function outboundSourceLabel(source) {
@@ -64,8 +65,8 @@ export function formatOutboundForPrompt(entries) {
     : [];
   if (!items.length) return '';
   const lines = items.map((item) => `- ${outboundClock(item.at)} ${outboundSourceLabel(item.source)}：${item.text.trim()}`);
-  return `【你最近主动发给爸的消息（事实，不是新指令）】\n${lines.join('\n')}\n`
-    + '爸问“你刚才跟我说什么了”时，按这里如实回答；这里没有记录就说没有，不要编造。\n\n';
+  return `【你最近发给爸的消息（事实，不是新指令）】\n${lines.join('\n')}\n`
+    + '爸追问最近发出的消息或语音时，按这里如实回答；这里没有记录就说没有，不要编造。\n\n';
 }
 
 /**

@@ -9,6 +9,19 @@ import {
   savePaidSongSegments, listPaidSongSegments, getPaidSongOrder, updatePaidSongSegment
 } from './song-library.mjs';
 import { findCachedSongInPlaylist, listCachedSongPlaylist, loadSongOutputById } from './song-output-cache.mjs';
+import { NO_AUDIBLE_VOCALS, STEM_SEPARATION_FAILED, SONG_SOURCE_UNAVAILABLE } from './song-source-errors.mjs';
+
+export function songFailureReply({ query, kind, creditSource, deliveryAttempted, error }) {
+  const name = kind === 'full' ? '整首翻唱' : '试听';
+  const reason = deliveryAttempted ? '发送失败，音频制作已完成'
+    : error?.code === NO_AUDIBLE_VOCALS ? '制作失败：已尝试匹配音源，但未取得可用于翻唱的清晰歌声'
+      : error?.code === SONG_SOURCE_UNAVAILABLE ? '制作失败：匹配歌曲音源暂时无法下载或核验'
+        : error?.code === STEM_SEPARATION_FAILED ? '制作失败：人声分离程序未能完成处理'
+          : '制作失败';
+  const credit = creditSource === 'promo' ? '本次免费点唱，未扣点歌单位。' : '预留额度已释放。';
+  const retry = !deliveryAttempted && error?.code === NO_AUDIBLE_VOCALS ? '可以换一个演唱版本再试。' : '可以稍后安全重试。';
+  return `《${query}》${name}${reason}。${credit}${retry}`;
+}
 
 // 试听 / 红包逻辑总开关（2026-10-30 按主人要求停用）。
 // 两个开关置 false 即停用；相关代码、数据库表和已缓存音频全部保留，
@@ -409,7 +422,7 @@ export async function handleSongLibraryCommand({
       : order.creditSource === 'grant' ? '预留 1 次旧版赠送整首权益'
       : order.creditSource === 'units' ? `预留 ${order.unitCost} 个点歌单位（${order.unitCost === 3 ? '1 元等值' : '约 1/3 元等值'}）`
         : `预留 ${(order.priceCents / 100).toFixed(2)} 元历史现金额度`;
-    try { await say(`已为《${query}》${reservationDescription}，正在${fullMatch ? '下载并制作整首流萤翻唱' : '制作 30 秒流萤翻唱试听'}。订单 ${order.orderId.slice(0, 12)}。`); }
+    try { await say(`已为《${query}》${reservationDescription}，正在${fullMatch ? '检查缓存并准备整首流萤翻唱（完整缓存会直接复用）' : '制作 30 秒流萤翻唱试听'}。订单 ${order.orderId.slice(0, 12)}。`); }
     catch (error) { console.error(`[paid-song] reservation notice failed order=${order.orderId}:`, error?.message ?? error); }
     void (async () => {
       let deliveryAttempted = false;
@@ -503,11 +516,11 @@ export async function handleSongLibraryCommand({
         onSongDelivery({ title: deliveryTitle, mode: kind === 'full' ? 'paid-full' : 'paid-preview',
           status: uncertain ? 'uncertain' : confirmedSegments > 0 ? 'partial' : 'failed',
           detail: confirmedSegments ? `已确认 ${confirmedSegments} 段` : '' });
-        console.error(`[paid-song] preview ${uncertain ? 'uncertain' : 'failed'} order=${order.orderId}:`, error?.message ?? error);
+        console.error(`[paid-song] ${kind} ${uncertain ? 'uncertain' : 'failed'} stage=${deliveryAttempted ? 'delivery' : 'production'} code=${error?.code || 'unknown'} order=${order.orderId}:`, error?.message ?? error);
         await say(uncertain ? `《${query}》的发送结果无法确认；订单已冻结，不会自动重发或重复结算额度。订单 ${order.orderId} 请主人核对。`
           : kind === 'full' && listPaidSongSegments(order.orderId).some((item) => item.status === 'sent')
             ? `《${query}》整首分段发送中断，已保留已确认段进度和${order.creditSource === 'promo' ? '本首免费资格' : order.creditSource === 'grant' ? ' 1 次旧版赠送权益预留' : order.creditSource === 'units' ? ' 3 个点歌单位预留（1 元等值）' : ` ${order.priceCents / 100} 元历史现金额度预留`}。重新发送“唱完整首 ${query}”可从未确认段继续。订单 ${order.orderId.slice(0, 12)}。`
-            : `《${query}》${kind === 'full' ? '整首翻唱' : '试听'}制作或发送失败，额度已释放，可以稍后安全重试。`);
+            : songFailureReply({ query, kind, creditSource: order.creditSource, deliveryAttempted, error }));
       }
     })().catch((error) => console.error(`[paid-song] background task failed order=${order.orderId}:`, error?.message ?? error));
     return true;

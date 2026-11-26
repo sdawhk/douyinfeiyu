@@ -1,12 +1,12 @@
-// 本地模型代理自检：18901/18903 静默消失时，DSH 每次生成都会卡到超时，
-// 机器人只会吐“刚卡了一下”。这里做两件事：先把代理拉起来，拉不起来再用
+// 本地模型代理自检：按当前提供方选择依赖，避免把已绕过的旧对话代理判成断线。
+// 代理不可用时先尝试拉起，拉不起来再用
 // 平常语气私聊告诉主人，恢复后补一句闭环。
 
 import { connect } from 'node:net';
 
 export const MODEL_PROXY_INTERVAL_MS = 60_000;
 
-// 两个代理互相独立：18901 是 keys 管理入口，18903 是 DSH 会话实际使用的路由。
+// 两个代理互相独立：18901 供视觉等能力，18903 只在旧本地对话提供方下使用。
 export const MODEL_PROXY_ENTRIES = [
   {
     port: 18901,
@@ -19,6 +19,13 @@ export const MODEL_PROXY_ENTRIES = [
     logFile: 'D:\\deepseek\\logs\\model-router.log'
   }
 ];
+
+// 原生 Our Free Model 在 DSH 进程内请求上游，不依赖旧的 18903 对话代理。
+// 18901 仍供视觉等独立能力使用。
+export function modelProxyEntriesFor(config = {}) {
+  return MODEL_PROXY_ENTRIES.filter((entry) => entry.port !== 18903
+    || !['our-free-model', 'our-free-model-region'].includes(config.provider));
+}
 
 const START_COOLDOWN_MS = 2 * 60_000;
 const NOTIFY_COOLDOWN_MS = 15 * 60_000;

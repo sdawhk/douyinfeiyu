@@ -6,9 +6,12 @@
   "dataDir": "../data",
   "gameExe": "../CabinWorld.exe",
   "launchGame": true,
-  "http": { "port": 18790 },
-  "weather": { "mode": "virtual" },
+  "http": {
+    "port": 18790
+  },
+  "weather": {
+    "mode": "virtual"
+  },
   "waitMs": 45000,
-  "panelSources": { "diaryDir": null, "ownerMemoryFile": null },
-  "autonomy": { "enabled": false }
+  "residents": []
 }

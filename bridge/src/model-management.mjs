@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirS
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { NodeApiClient } from './dsh-client-020.js';
+import { isNativeConversationProvider } from './conversation-model.mjs';
 
 const POLICY_FILE = process.env.MODEL_POLICY_FILE || 'D:\\deepseek\\state\\model-policy.json';
 const DSH_PATCH_FILE = process.env.DSH_PATCH_FILE || 'D:\\deepseek\\dshhome\\profiles\\web\\cordis.patch.yml';
@@ -19,11 +20,17 @@ function atomicWrite(file, value) {
   try { renameSync(temp, file); }
   catch (error) { try { unlinkSync(temp); } catch {} throw error; }
 }
+export function parseDshModelRoute(source) {
+  const block = source.match(/- id: agent-default-model\r?\n[\s\S]*?(?=\r?\n- id: |$)/)?.[0] || '';
+  const scalar = (key) => (block.match(new RegExp(`^\\s+${key}:\\s*(\\S+)`, 'm'))?.[1] || '').replace(/^['"]|['"]$/g, '');
+  const provider = scalar('provider');
+  const baseURL = isNativeConversationProvider(provider) ? ''
+    : source.match(/- id: llm-pi-ai\r?\n[\s\S]*?\bbaseURL:\s*(\S+)/)?.[1] || '';
+  return { provider, model: scalar('model'), baseURL };
+}
 function dshConfig() {
   const source = readFileSync(DSH_PATCH_FILE, 'utf8');
-  const block = source.match(/- id: agent-default-model\r?\n[\s\S]*?(?=\r?\n- id: |$)/)?.[0] || '';
-  const provider = source.match(/- id: llm-pi-ai\r?\n[\s\S]*?\bbaseURL:\s*(\S+)/)?.[1] || '';
-  return { source, model: block.match(/^\s+model:\s*(\S+)/m)?.[1] || '', baseURL: provider };
+  return { source, ...parseDshModelRoute(source) };
 }
 function defaultPolicy() {
   return { version: 0, primary: dshConfig().model || 'reflection/beam-free', fallbacks: [],
@@ -48,13 +55,24 @@ async function clearProxyModelCooldown(model) {
 export async function modelStatus() {
   const saved = readPolicy();
   const dsh = dshConfig();
+  if (isNativeConversationProvider(dsh.provider)) {
+    let registered = false;
+    try {
+      const client = await dshClient();
+      const catalog = await client.call('session/modelCatalog', {});
+      registered = catalog?.groups?.some((group) => group.id === dsh.provider
+        && group.models?.some((entry) => entry.id === dsh.model)) === true;
+    } catch {}
+    return { saved, dsh: { provider: dsh.provider, defaultModel: dsh.model, baseURL: null },
+      route: dsh.provider, proxy: null, effective: registered };
+  }
   let proxy = null;
   try {
     const result = await fetch(`${PROXY_URL}/_models`, { signal: AbortSignal.timeout(2500) });
     if (result.ok) proxy = await result.json();
   } catch {}
   const route = dsh.baseURL === `${PROXY_URL}/v1` ? 'proxy' : 'direct';
-  return { saved, dsh: { defaultModel: dsh.model, baseURL: dsh.baseURL }, route,
+  return { saved, dsh: { provider: dsh.provider, defaultModel: dsh.model, baseURL: dsh.baseURL }, route,
     proxy: proxy && { online: true, policy: proxy.policy, lastActivity: proxy.lastActivity, lastSuccess: proxy.lastSuccess,
       recentRequests: proxy.recentRequests || [],
       cooling: proxy.cooling, keys: proxy.keys },
@@ -72,6 +90,15 @@ function providerPath(upstream, path) {
   return /\/api\/paas\/v\d+$/i.test(upstream) ? path.replace(/^\/v1(?=\/)/, '') : path;
 }
 export async function modelCatalog() {
+  const route = dshConfig();
+  if (isNativeConversationProvider(route.provider)) {
+    const client = await dshClient();
+    const catalog = await client.call('session/modelCatalog', {});
+    return { provider: route.provider, credentialsAvailable: true,
+      models: (catalog.groups || []).filter((group) => group.id === route.provider)
+        .flatMap((group) => (group.models || []).map((entry) => ({ id: entry.id, name: entry.name || entry.id,
+          owner: route.provider, cost: /(?:^|[/:_-])free(?:$|[/:_-])/.test(entry.id) ? 'free' : 'unknown' }))) };
+  }
   const entries = keys();
   if (!entries.length) throw new Error('没有可用的模型凭据');
   const results = await Promise.all(entries.map(async (entry) => {
@@ -103,6 +130,20 @@ function streamHasContent(frame) {
 }
 export async function testModel(model) {
   if (!MODEL_ID.test(model || '')) throw Object.assign(new Error('模型 ID 格式无效'), { status: 400 });
+  const route = dshConfig();
+  if (isNativeConversationProvider(route.provider)) {
+    const started = Date.now();
+    try {
+      const client = await dshClient();
+      const response = await fetch(`${client.baseUrl}/api/our-free-model/bench`, {
+        method: 'POST', headers: { 'content-type': 'application/json', cookie: client.cookie, origin: client.baseUrl },
+        body: JSON.stringify({ model }), signal: AbortSignal.timeout(60_000)
+      });
+      const result = await response.json();
+      return { provider: route.provider, model, ok: response.ok && result.ok === true,
+        elapsedMs: Date.now() - started, ...(!response.ok || !result.ok ? { reason: safeFailure(result.error || '原生提供方模型测试失败') } : {}) };
+    } catch (error) { return { provider: route.provider, model, ok: false, elapsedMs: Date.now() - started, reason: safeFailure(error) }; }
+  }
   const entries = keys();
   if (!entries.length) throw new Error('没有可用的模型凭据');
   const started = Date.now();
@@ -171,26 +212,29 @@ async function dshClient() {
   if (!token) throw new Error('无法取得 DSH 运行令牌');
   return new NodeApiClient('http://127.0.0.1:3090', { launchToken: token }).connect();
 }
-async function waitForDshModel(dsh, model) {
+async function waitForDshModel(dsh, model, provider = 'dsh') {
   for (let attempt = 0; attempt < 10; attempt++) {
     const catalog = await dsh.call('session/modelCatalog', {});
-    if (catalog?.groups?.some((group) => group.id === 'dsh' && group.models?.some((entry) => entry.id === model))) return;
+    if (catalog?.groups?.some((group) => group.id === provider && group.models?.some((entry) => entry.id === model))) return;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   throw new Error(`DSH 尚未加载模型 ${model}`);
 }
-export async function testQQSessionChain(model = readPolicy().primary) {
+export async function testQQSessionChain(model) {
+  const route = dshConfig();
+  const provider = isNativeConversationProvider(route.provider) ? route.provider : 'dsh';
+  model ||= isNativeConversationProvider(provider) ? route.model : readPolicy().primary;
   if (!MODEL_ID.test(model || '')) throw Object.assign(new Error('模型 ID 格式无效'), { status: 400 });
   const started = Date.now();
   let dsh;
   let sessionId;
   try {
     dsh = await dshClient();
-    await waitForDshModel(dsh, model);
+    await waitForDshModel(dsh, model, provider);
     const session = await dsh.sessions.create({ request: { cwd: process.cwd(), agentPreset: 'qq-chat' } });
     sessionId = session?.sessionId;
     if (!sessionId) throw new Error('DSH 未返回测试会话 ID');
-    await dsh.sessions.selectModel({ sessionId, provider: 'dsh', model });
+    await dsh.sessions.selectModel({ sessionId, provider, model });
     await dsh.sessions.prompt({ request: {
       sessionId,
       requestId: `qq-chain-test-${Date.now()}`,
@@ -222,14 +266,14 @@ export async function testQQSessionChain(model = readPolicy().primary) {
       const text = (final?.data?.message?.content ?? [])
         .filter((block) => block?.type === 'text' && typeof block.text === 'string')
         .map((block) => block.text).join('').trim();
-      if (text) return { model, ok: true, elapsedMs: Date.now() - started };
+      if (text) return { provider, model, ok: true, elapsedMs: Date.now() - started, sample: text.slice(0, 80) };
     }
     throw new Error('QQ 会话链路等待纯文字回复超时（75 秒）');
   } catch (error) {
     if (dsh && sessionId) {
       try { await dsh.sessions.cancel({ request: { sessionId } }); } catch {}
     }
-    return { model, ok: false, elapsedMs: Date.now() - started, reason: safeFailure(error) };
+    return { provider, model, ok: false, elapsedMs: Date.now() - started, reason: safeFailure(error) };
   }
 }
 function updatedDshSource(source, model) {
@@ -243,6 +287,9 @@ function updatedDshSource(source, model) {
   return routed.replace(/(        models:\r?\n)/, `$1          - id: ${model}\n            name: ${model}\n`);
 }
 export async function saveModelPolicy(input) {
+  if (isNativeConversationProvider(dshConfig().provider)) {
+    throw Object.assign(new Error('当前对话使用 DSH Our Free Model，请在 DSH 中切换模型；旧代理策略不能覆盖原生提供方'), { status: 409 });
+  }
   const current = readPolicy();
   const next = validatePolicy(input, current);
   const primaryTest = await testModel(next.primary);
@@ -291,6 +338,9 @@ export async function saveModelPolicy(input) {
 }
 
 export async function syncPromotedModel(model) {
+  if (isNativeConversationProvider(dshConfig().provider)) {
+    return { ok: true, skipped: true, reason: 'native-provider-active' };
+  }
   const policy = readPolicy();
   if (policy.primary !== model) throw Object.assign(new Error('模型已被其他请求切换，请刷新状态'), { status: 409 });
 

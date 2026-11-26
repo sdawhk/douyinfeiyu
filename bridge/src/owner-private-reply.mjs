@@ -1,6 +1,11 @@
 /** Parse an explicit owner request to answer an unanswered private message. */
 export function parseOwnerPrivateReplyRequest(text) {
   const value = String(text ?? '').trim();
+  // A question about whether anything is awaiting a reply is informational,
+  // not authorization to start a catch-up send or to ask for a target.
+  if (/(?:有没(?:有)?|有没有|是否|能不能|可以吗|能否|有无)/u.test(value)
+    && /(?:私聊|私信)/u.test(value)
+    && /[吗么？?]\s*[。！!]*$/u.test(value)) return null;
   if (!/(?:私聊|私信|好友消息|漏回|没回|未回复|之前.*消息)/i.test(value)
     || !/(?:回复|回一下|回覆|补回|补个回复|答复)/i.test(value)) return null;
 
@@ -8,11 +13,13 @@ export function parseOwnerPrivateReplyRequest(text) {
   let targetHint = numeric;
   if (!targetHint) {
     const namedPatterns = [
-      /(?:回复|回一下|回覆|补回|答复)\s*(?:一下\s*)?(?:给\s*)?([\p{L}\p{N}_-]{2,24}?)(?=\s*(?:之前|前几天|最近|发来的?|私聊|私信|漏回|没回|未回复|的消息|消息|$))/u,
+      /(?:回复|回一下|回覆|补回|答复)\s*(?:一下\s*)?(?:给\s*)?([\s\S]{2,40}?)(?=\s*(?:之前|前几天|最近|发来的?|私聊|私信|漏回|没回|未回复|的消息|消息|$))/u,
       /([\p{L}\p{N}_-]{2,24}?)\s*(?:之前|前几天|最近)?\s*(?:给你|向你)发(?:了)?(?:消息|信息)/u
     ];
     for (const pattern of namedPatterns) {
-      const candidate = value.match(pattern)?.[1]?.trim();
+      const candidate = value.match(pattern)?.[1]
+        ?.replace(/^[\s\p{P}\p{S}“”‘’《》【】「」『』]+|[\s\p{P}\p{S}“”‘’《》【】「」『』]+$/gu, '')
+        .trim();
       if (candidate && !/^(?:之前|前几天|最近|私聊|私信|消息|信息|一下|那个|这个|漏掉|漏回)$/u.test(candidate)) {
         targetHint = candidate;
         break;

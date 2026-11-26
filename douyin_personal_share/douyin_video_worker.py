@@ -74,6 +74,29 @@ def prepare_browser_temp() -> Path:
     return chosen
 
 
+def edge_executable_path() -> str:
+    """Find Edge in standard locations or its versioned EdgeCore directory."""
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
+        / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
+        / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+    ]
+    edge_core = Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Microsoft" / "EdgeCore"
+    if edge_core.is_dir():
+        candidates.extend(
+            folder / "msedge.exe"
+            for folder in sorted(edge_core.iterdir(), key=lambda item: item.name, reverse=True)
+            if folder.is_dir() and re.match(r"\d+(?:\.\d+)+$", folder.name)
+        )
+    executable = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if executable is None:
+        raise RuntimeError("Microsoft Edge was not found in the standard or EdgeCore install folders")
+    return str(executable)
+
+
 def write_json_atomic(path: Path, payload: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -241,7 +264,7 @@ def download_video(play_url: str, destination: Path, max_bytes: int, timeout: in
 def process_request(payload: dict, cfg: dict) -> dict:
     request_id = str(payload.get("id"))
     share_url = str((payload.get("urls") or [""])[0])
-    max_mb = int(payload.get("maxMB") or 95)
+    max_mb = int(payload.get("maxMB") or 28)
     max_bytes = max_mb * 1024 * 1024
     timeout_ms = int(cfg.get("page_timeout_ms") or 45_000)
     download_timeout = int(cfg.get("download_timeout") or 300)
@@ -256,7 +279,7 @@ def process_request(payload: dict, cfg: dict) -> dict:
         try:
             with sync_playwright() as playwright:
                 context = playwright.chromium.launch_persistent_context(
-                    str(profile_dir), channel="msedge", headless=headless)
+                    str(profile_dir), executable_path=edge_executable_path(), headless=headless)
                 try:
                     page = context.pages[0] if context.pages else context.new_page()
                     aweme_id = resolve_aweme_id(page, share_url, timeout_ms)

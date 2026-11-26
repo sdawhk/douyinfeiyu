@@ -14,6 +14,7 @@ import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { readSettingsDocument } from './bot-settings.mjs';
 import { hasStickerDirective, stripStickerDirectives } from './reply-sticker-token.mjs';
 import { canReply } from './reply-control.mjs';
+import { buildLifeContext } from './companion-life.mjs';
 import { collectExistingGroupIds, initializeGroupInterjectionSettings, isGroupInterjectionEnabled, setGroupInterjectionEnabled } from './group-interjection-settings.mjs';
 import { handleRedPacketCandidateNotice, handleSongLibraryCommand, isSongLibraryCommand, normalizeSongCommandText, shouldRouteSongLibraryCommand } from './song-library-commands.mjs';
 import { markFreeQuotaExemptSenders } from './song-library.mjs';
@@ -25,6 +26,7 @@ import { imageGenModuleFingerprint, logImageGenModuleFingerprint } from './image
 import { makePaidSongPreview, makePaidFullSong } from './paid-song-producer.mjs';
 import { isMuted, groupKey, privateKey } from './mute.mjs';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
+import { NodeApiClient as Dsh020HealthClient } from './dsh-client-020.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
 import { assertGroupIdentityPrivate, groupIdentityLeak, protectedOwnerQQs, redactProtectedGroupIds } from './group-identity-privacy.mjs';
@@ -1480,6 +1482,7 @@ async function main() {
 
   // DSH 侧
   const api = new NodeApiClient(cfg.dsh.baseUrl);
+  const dshHealth = new Dsh020HealthClient(cfg.dsh.baseUrl, { launchToken: cfg.dsh.launchToken ?? '' });
   const collectors = new Map(); // sessionId -> turn collector
   const sendToolSucceededSessions = new Set(); // sessionId：当前 turn 内 MCP 发送类工具至少成功一次
   const v2TurnStartAt = new Map(); // sessionId -> timestamp：reserved2 turn 开始时间，用于判断是否“无行动”
@@ -1749,12 +1752,29 @@ async function main() {
       flushingQueue = false;
     }
   };
+  let dshCheckPromise = null;
   const checkDsh = async () => {
+    if (dshCheckPromise) return dshCheckPromise;
+    dshCheckPromise = (async () => {
     let ok = false;
     try {
-      await api.host.describe({});
+      await dshHealth.connect();
+      await dshHealth.host.describe({});
       ok = true;
-    } catch {}
+    } catch {
+      // DSH 重启会轮换启动令牌；先从启动日志读取新令牌，再重建认证 Cookie。
+      try {
+        const tokenLog = fs.readFileSync('D:\\deepseek\\logs\\dshweb.out');
+        const logText = tokenLog[0] === 0xff && tokenLog[1] === 0xfe
+          ? tokenLog.toString('utf16le') : tokenLog.toString('utf8');
+        const tokenMatch = logText.match(/token=([A-Za-z0-9_-]+)/);
+        if (tokenMatch && tokenMatch[1] !== dshHealth.launchToken) dshHealth.launchToken = tokenMatch[1];
+        dshHealth.cookie = '';
+        await dshHealth.connect();
+        await dshHealth.host.describe({});
+        ok = true;
+      } catch {}
+    }
     if (ok) {
       await refreshMode();
       if (!dshReady) {
@@ -1797,6 +1817,8 @@ async function main() {
       dshReady = false;
       log('⚠️ DSH 不可用（重启中？），QQ 消息将入队等待');
     }
+    })().finally(() => { dshCheckPromise = null; });
+    return dshCheckPromise;
   };
   function startDshWatch() {
     if (dshCheckStarted) return;
@@ -3017,6 +3039,7 @@ async function main() {
             currentWakeConfig: st.wakeConfig,
             wakeSafety: computeWakeSafetyV2(st.wakeConfig),
             memory: formatMemoryV2(st),
+            life: buildLifeContext({ text: [...st.recentMessages].reverse().find((m) => m && !m.isSelf)?.text || '' }),
             participation: formatParticipationV2(st),
             slang: {
               enabled: cfg.slang?.enabled !== false,
@@ -7787,6 +7810,7 @@ async function main() {
     const proactiveLine = '【积极性】不要习惯性潜水：群里有你能接的话题就主动参与，偶尔插一句别人的话题也很正常；只有确实没话可说、对方已明确结束、或长时间没人说话时才潜水。\n\n';
     const preSleepLine = `【沉睡前强制等待】除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；短等待（30秒/60秒/180秒）不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
     const lastMsg = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf);
+    const lifeLine = buildLifeContext({ text: lastMsg?.text || '' });
     const lastAiMin = st.lastAiReplyAt ? Math.max(0, Math.round((Date.now() - Number(st.lastAiReplyAt)) / 60000)) : null;
     const statusBits = [`未读 ${(st.unread || []).length} 条`];
     if (lastMsg) statusBits.push(`最近一条来自 ${String(lastMsg.sender || '未知')}：${String(lastMsg.text || lastMsg.plain || '').slice(0, 30)}`);
@@ -7807,7 +7831,7 @@ async function main() {
     if (wcTr.anyMessage) wcTriggers.push('任意消息');
     if (Number(wcTr.probability) > 0) wcTriggers.push(`概率${wcTr.probability}`);
     const wakeLine = `【当前唤醒】${wcMode}，${wcTime}${wcTriggers.length ? `；触发：${wcTriggers.join('/')}` : ''}\n\n`;
-    const base = roleLine + tokenLine + crossSessionLine + antiAiLine + proactiveLine + stickerLine + localPackLine + cadenceLine + preSleepLine + statusLine + wakeLine + memoryLine + participationLine;
+    const base = roleLine + tokenLine + crossSessionLine + antiAiLine + proactiveLine + stickerLine + localPackLine + cadenceLine + preSleepLine + statusLine + wakeLine + memoryLine + participationLine + (lifeLine ? `${lifeLine}\n\n` : '');
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看你的角色、推荐值、可用工具和当前状态，然后用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -8121,6 +8145,8 @@ async function main() {
     if (TOOL_SIDECAR) return;
     if (cfg.socialV2?.proactive?.enabled === false) return;
     if (socialV2.paused || currentMode !== 'reserved2') return;
+    // 私聊由 qq-bot 的主人/高好感好友主动联系评估负责，避免在这里重复唤醒所有私聊。
+    if (!key.startsWith('group:')) return;
     if (key.startsWith('group:') && !isGroupInterjectionEnabled(key.slice(6))) return;
     if (!isSessionAllowedInCurrentMode(key)) return;
     const st = getSocialV2State(key);

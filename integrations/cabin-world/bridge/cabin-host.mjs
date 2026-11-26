@@ -68,7 +68,7 @@ export class CabinHost extends EventEmitter {
         if(frame.type==='ping'){this.send({type:'pong'});continue;}
         if(frame.type==='panel.get'||frame.type==='panel.do'){void this.panel(frame,socket);continue;}
         const item=this.pending.get(frame.id);
-        if(item&&item.replyType===frame.type){
+        if(item&&item.replyType===frame.type&&(!item.actor||frame.actor===undefined||frame.actor===item.actor)&&(!item.accept||item.accept(frame))){
           this.pending.delete(frame.id);clearTimeout(item.timer);
           if(frame.ok===false||frame.denied===true||frame.replaced===true){const error=Error(frame.error||'Game action refused or replaced');error.frame=frame;item.reject(error);}else item.resolve(frame);
         }
@@ -78,7 +78,9 @@ export class CabinHost extends EventEmitter {
   }
   send(frame){
     if(!this.connected)throw Error('Game is not connected');
-    const line=JSON.stringify(frame)+'\n';if(Buffer.byteLength(line)>MAX_LINE)throw Error('Frame exceeds 1 MiB');
+    const line=JSON.stringify(frame)+'\n';
+    const limit=frame.type==='furniture.do'&&frame.action==='import'?34*1024*1024:MAX_LINE;
+    if(Buffer.byteLength(line)>limit)throw Error('Frame exceeds allowed size');
     this.socket.write(line);
   }
   sendClock(){this.send({type:'clock',now:this.clock()});this.lastClock=Date.now();}
@@ -91,13 +93,13 @@ export class CabinHost extends EventEmitter {
       return {actor,result};
     }});
   }
-  request(type,fields={}, {replyType,timeoutMs=15000}={}){
+  request(type,fields={}, {replyType,timeoutMs=15000,accept=null}={}){
     if(!replyType)return Promise.reject(Error('replyType is required'));
     if(!this.connected)return Promise.reject(Error('Game is not connected'));
     const id=randomUUID();
     return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>{this.pending.delete(id);reject(Error('Game request timed out; outcome unknown, reconcile before retrying'));},timeoutMs);timer.unref();
-      this.pending.set(id,{replyType,resolve,reject,timer});
+      this.pending.set(id,{replyType,resolve,reject,timer,accept,actor:fields.actor});
       try{this.send({...fields,type,id});}catch(error){clearTimeout(timer);this.pending.delete(id);reject(error);}
     });
   }

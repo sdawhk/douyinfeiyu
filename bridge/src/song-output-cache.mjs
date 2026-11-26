@@ -152,6 +152,59 @@ export function loadAutoSongOutput(options, { root = CACHE_ROOT, profile = '' } 
   return null;
 }
 
+// 完整歌曲分段命中时，必须在重新搜索、下载全曲或分离人声前一次性确认整组缓存完整。
+export function loadAutoSongSegments(query, { root = CACHE_ROOT, profile = '', mode = 'ai', candidate = 1 } = {}) {
+  if (!profile || mode !== 'ai') return null;
+  const wantedQuery = comparableSongName(query);
+  if (!wantedQuery) return null;
+  let names;
+  try { names = readdirSync(root).filter((name) => /^[a-f0-9]{64}\.json$/.test(name)); }
+  catch { return null; }
+  const groups = new Map();
+  for (const name of names) {
+    try {
+      const meta = JSON.parse(readFileSync(path.join(root, name), 'utf8'));
+      const variant = normalized(meta.voiceVariant);
+      const variantMatch = variant.match(/^rvc:(-?\d+):(.+)$/u);
+      if (meta.id !== name.slice(0, -5) || meta.mode !== mode || meta.pitchMode !== 'auto'
+          || comparableSongName(meta.query) !== wantedQuery
+          || Number(meta.candidate ?? 1) !== Number(candidate)
+          || !meta.sourceIdentity || !Number.isInteger(meta.segmentIndex) || meta.segmentIndex < 0
+          || !Number.isFinite(meta.startSeconds) || !Number.isFinite(meta.seconds) || meta.seconds <= 0
+          || !Number.isFinite(meta.duration) || meta.duration <= 0
+          || !meta.title || !variantMatch || variantMatch[2] !== normalized(profile)) continue;
+      const key = JSON.stringify([meta.sourceIdentity, variant, meta.title, meta.duration]);
+      const group = groups.get(key) ?? [];
+      group.push(meta);
+      groups.set(key, group);
+    } catch { /* 损坏的元数据不能组成整首缓存。 */ }
+  }
+  const complete = [];
+  for (const group of groups.values()) {
+    group.sort((a, b) => a.segmentIndex - b.segmentIndex);
+    if (!group.length || group.some((meta, index) => meta.segmentIndex !== index)) continue;
+    let expectedStart = 0;
+    let valid = true;
+    for (const meta of group) {
+      if (Math.abs(meta.startSeconds - expectedStart) > 0.1) { valid = false; break; }
+      expectedStart += meta.seconds;
+    }
+    if (!valid || Math.abs(expectedStart - group[0].duration) > 1.5) continue;
+    const segments = group.map((meta) => {
+      const cached = loadSongOutputById(meta.id, { root });
+      return cached ? { segmentIndex: meta.segmentIndex, startSeconds: meta.startSeconds,
+        seconds: meta.seconds, audio: cached.audio, cachePath: paths(meta.id, root).audio } : null;
+    });
+    if (segments.some((segment) => !segment)) continue;
+    const variantMatch = normalized(group[0].voiceVariant).match(/^rvc:(-?\d+):/u);
+    complete.push({ title: group[0].title, sourceIdentity: group[0].sourceIdentity,
+      duration: group[0].duration, voiceVariant: group[0].voiceVariant,
+      pitchShift: Number(variantMatch[1]), segments, at: Math.max(...group.map((meta) => Number(meta.at) || 0)) });
+  }
+  complete.sort((a, b) => b.at - a.at);
+  return complete[0] ?? null;
+}
+
 export function saveSongOutput(options, audio, { root = CACHE_ROOT } = {}) {
   if (!Buffer.isBuffer(audio) || audio.length < 1024 || audio.length > MAX_AUDIO_BYTES) {
     throw new Error('歌曲缓存音频为空或超过 QQ 语音大小限制');

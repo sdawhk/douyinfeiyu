@@ -94,6 +94,48 @@ test('buildPersonaContext injects time, preferences, divergence rules and anchor
   assert.match(text, /鲸团团：在。/);
 });
 
+test('group context offers bounded stable opinions as optional and ignores unrelated views', () => {
+  const text = buildPersonaContext({ chatKey: 'g123', isGroup: true, senderId: '456', text: '今天下雨了', now: Date.now() });
+  assert.match(text, /【你自己的稳定看法：仅供选择，先判断是否与本轮语义相关；无关就忽略，不要硬套】/);
+  assert.match(text, /接得上比答得全重要（群聊不是考试）/);
+  assert.match(text, /不知道就直说（编一个更难看）/);
+});
+
+test('owner style feedback is explicit, canonical, and scoped by private or group chat', () => {
+  const now = new Date(2026, 10, 9, 12, 0).getTime();
+  observePersonaTurn({ chatKey: 'p-style', isOwner: true, userText: '别老反问', reply: '好', now });
+  observePersonaTurn({ chatKey: 'g-style', isGroup: true, isOwner: true, userText: '你这句太冲了', reply: '我收一下', now });
+  observePersonaTurn({ chatKey: 'p-style', isOwner: true, userText: '今天上海太冷了，天气真差', reply: '是啊', now });
+  observePersonaTurn({ chatKey: 'p-style', isOwner: true, userText: '这个视频太长了', reply: '嗯', now });
+  observePersonaTurn({ chatKey: 'p-style', isOwner: true, userText: '你看这个视频太长了', reply: '嗯', now });
+  observePersonaTurn({ chatKey: 'p-style', isOwner: true, userText: '这件衣服太短了', reply: '嗯', now });
+  observePersonaTurn({ chatKey: 'p-style', isOwner: true, userText: '你说这件衣服太短了', reply: '嗯', now });
+  observePersonaTurn({ chatKey: 'p-style', isOwner: true, userText: '普通聊天，不是评价你的语气', reply: '嗯', now });
+  observePersonaTurn({ chatKey: 'p-style', isOwner: true, userText: '你刚才回复太长了', reply: '好', now });
+  observePersonaTurn({ chatKey: 'd-style', isOwner: true, channel: 'douyin', userText: '你刚才回复太短了', reply: '好', now });
+
+  const stored = readFileSync(join(stateDir, 'persona-preferences.json'), 'utf8');
+  assert.match(stored, /fewerQuestions/);
+  assert.match(stored, /softer/);
+  assert.match(stored, /concise/);
+  assert.doesNotMatch(stored, /fuller/);
+  assert.doesNotMatch(stored, /太冷|太长|太短|别老反问|你这句太冲|普通聊天/);
+
+  const ownerPrivate = buildPersonaContext({ chatKey: 'p-style', isOwner: true, text: '在吗', now });
+  assert.match(ownerPrivate, /【主人明确表达过的语气偏好/);
+  assert.match(ownerPrivate, /少用连续反问/);
+  assert.match(ownerPrivate, /表达更简洁/);
+  assert.doesNotMatch(ownerPrivate, /语气放柔和些/);
+
+  const sameGroup = buildPersonaContext({ chatKey: 'g-style', isGroup: true, isOwner: true, text: '在吗', now });
+  assert.match(sameGroup, /语气放柔和些/);
+  assert.doesNotMatch(sameGroup, /少用连续反问/);
+  const groupMember = buildPersonaContext({ chatKey: 'g-style', isGroup: true, isOwner: false, senderId: '42', text: '在吗', now });
+  assert.match(groupMember, /语气放柔和些/);
+  const otherGroup = buildPersonaContext({ chatKey: 'g-other', isGroup: true, isOwner: true, text: '在吗', now });
+  assert.doesNotMatch(otherGroup, /主人明确表达过的语气偏好/);
+});
+
 test('few-shot is only included on the first persona turn', () => {
   const text = buildPersonaContext({ chatKey: 'p1', text: '在吗', includeExamples: false });
   assert.doesNotMatch(text, /【语气示例/);
@@ -189,13 +231,17 @@ test('proactiveGroupDecision can be hard disabled per group', () => {
   assert.deepEqual(proactiveGroupDecision('456', Date.now(), () => 0), { allow: false, reason: 'disabled' });
 });
 
-test('proactiveGroupDecision respects probability and daily cap', () => {
+test('proactiveGroupDecision respects probability without limiting daily attempts', () => {
   const noon = new Date(2026, 10, 8, 12, 0).getTime();
   assert.equal(proactiveGroupDecision('790', noon, () => 0).reason, 'probability');
-  const first = proactiveGroupDecision('789', noon, () => 0);
-  assert.equal(first.allow, true);
-  assert.equal(first.reason, 'proactive');
-  assert.equal(proactiveGroupDecision('789', noon, () => 0).reason, 'daily-cap');
+  writeState('persona-activity.json', { proactive: { '2026-11-08': { '789': 10 } } });
+  for (let i = 0; i < 12; i += 1) {
+    assert.deepEqual(proactiveGroupDecision('789', noon, () => 0), { allow: true, reason: 'proactive' });
+  }
+  const activity = JSON.parse(readFileSync(join(stateDir, 'persona-activity.json'), 'utf8'));
+  assert.equal(activity.proactive['2026-11-08']['789'], 22);
+  const night = new Date(2026, 10, 8, 3, 0).getTime();
+  assert.equal(proactiveGroupDecision('790', night, () => 0).reason, 'quiet-hours');
 });
 
 test('open loops are scoped to the current group speaker', () => {

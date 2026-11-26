@@ -12,7 +12,7 @@ if not errorlevel 1 (
   goto loop
 )
 echo [%date% %time%] AstrBot sidecar starting >> "%LOGDIR%\astrbot-sidecar.log"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\repo\bridge\scripts\start-astrbot-sidecar.ps1" >> "%LOGDIR%\astrbot-sidecar.log" 2>&1
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "%ROOT%\repo\bridge\scripts\start-astrbot-sidecar.ps1" >> "%LOGDIR%\astrbot-sidecar.log" 2>&1
 echo [%date% %time%] AstrBot sidecar exited with code %errorlevel%; retrying >> "%LOGDIR%\astrbot-sidecar.log"
 timeout /t 5 /nobreak >nul
 goto loop

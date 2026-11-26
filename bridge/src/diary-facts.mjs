@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { outboundSourceLabel } from './owner-outbound-history.mjs';
+import { cabinLogPath, readCabinExperiences, cabinExperienceLine } from './companion-life.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BRIDGE_STATE_DIR = path.resolve(HERE, '..', 'state');
@@ -61,7 +62,10 @@ export function collectDiaryFacts({
   sinceAt = 0,
   recentRepliesPath = DEFAULT_RECENT_REPLIES_PATH,
   douyinMemoryPath = DEFAULT_DOUYIN_MEMORY_PATH,
-  songJournalPath = DEFAULT_SONG_JOURNAL_PATH
+  songJournalPath = DEFAULT_SONG_JOURNAL_PATH,
+  cabinLogFile = cabinLogPath(),
+  cabinResident,
+  now = Date.now()
 } = {}) {
   const window = dayWindow(dayKey);
   const key = `p${ownerId}`;
@@ -78,6 +82,9 @@ export function collectDiaryFacts({
     songCount: 0,
     songSentCount: 0,
     songLastAt: 0,
+    cabin: [],
+    cabinCount: 0,
+    cabinLastAt: 0,
     hasFacts: false
   };
 
@@ -143,14 +150,25 @@ export function collectDiaryFacts({
   facts.songSentCount = songHits.filter((item) => item.status === 'sent').length;
   facts.songLastAt = songHits.reduce((max, item) => Math.max(max, Number(item.at) || 0), 0);
 
+  const cabin = readCabinExperiences({ logFile: cabinLogFile, resident: cabinResident, now,
+    sinceAt: Math.max(window.start, cut), untilAt: window.end });
+  const labels = new Map();
+  for (const event of cabin) labels.set(event.label, event);
+  facts.cabin = [...labels.values()].sort((a, b) => a.at - b.at).slice(-4);
+  facts.cabinCount = labels.size;
+  facts.cabinLastAt = cabin.at(-1)?.at || 0;
   facts.hasFacts = facts.chat.lines.length > 0 || facts.outbound.length > 0
-    || facts.douyin.length > 0 || facts.songs.length > 0;
+    || facts.douyin.length > 0 || facts.songs.length > 0 || facts.cabin.length > 0;
   return facts;
 }
 
 /** 交给模型的“事实清单”文本；没有素材时明确写“没有”。 */
 export function factsToPromptText(facts) {
   const lines = [];
+  if (facts.cabin?.length) {
+    lines.push('【小屋世界中已完成的游戏活动｜不是现实生活；不补写未记录的见闻】');
+    for (const event of facts.cabin) lines.push(`- ${cabinExperienceLine(event, { detail: false })}`);
+  }
   if (facts.chat?.lines?.length) {
     lines.push('【和爸的真实聊天】');
     for (const item of facts.chat.lines) {

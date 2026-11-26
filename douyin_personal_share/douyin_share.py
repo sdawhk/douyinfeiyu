@@ -67,6 +67,9 @@ INTERACTION_STATE_PATH = ROOT / "interaction-state.json"
 PROFILE_LOCK_PATH = ROOT / ".browser-profile.lock"
 BROWSE_REQUEST_PATH = ROOT / "browse-request.json"
 BROWSE_ACTIVE_PATH = ROOT / "browse-request-active.json"
+DIRECT_BROWSE_REQUEST_PATH = ROOT / "direct-browse-request.json"
+DIRECT_CABIN_BRIDGE_PATH = Path(os.environ.get(
+    "CABIN_BRIDGE_JSON", r"C:\Users\admin\Desktop\小屋世界-v0.1\data\bridge.json"))
 LISTENER_HEARTBEAT_PATH = ROOT / "listener-heartbeat.json"
 LOCAL_TEMP_DIR = ROOT / "playwright-temp"
 VIDEO_ANALYZER = ROOT.parent / "bridge" / "scripts" / "analyze-douyin-video.mjs"
@@ -184,6 +187,29 @@ def prepare_browser_temp() -> Path:
     os.environ["TEMP"] = str(chosen)
     os.environ["TMP"] = str(chosen)
     return chosen
+
+
+def edge_executable_path() -> str | None:
+    """Find the installed Edge binary, including the versioned EdgeCore layout."""
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
+        / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
+        / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+    ]
+    edge_core = Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Microsoft" / "EdgeCore"
+    if edge_core.is_dir():
+        candidates.extend(
+            folder / "msedge.exe"
+            for folder in sorted(edge_core.iterdir(), key=lambda item: item.name, reverse=True)
+            if folder.is_dir() and re.match(r"\d+(?:\.\d+)+$", folder.name)
+        )
+    executable = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if executable is None:
+        raise RuntimeError("Microsoft Edge was not found in the standard or EdgeCore install folders")
+    return str(executable)
 
 
 _last_heartbeat_write = 0.0
@@ -1365,7 +1391,7 @@ def interact_with_video(action: str, video_url: str, comment_text: str = "", dry
     prepare_browser_temp()
     with sync_playwright() as playwright, browser_profile_lock(wait_seconds=300):
         context = playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR), channel="msedge", headless=False,
+            str(PROFILE_DIR), executable_path=edge_executable_path(), headless=False,
             viewport={"width": 1365, "height": 900}
         )
         try:
@@ -1904,7 +1930,7 @@ def browse_session(minutes: int, wait_seconds: int = 0,
     with sync_playwright() as playwright, browser_profile_lock(wait_seconds=wait_seconds):
         try:
             context = playwright.chromium.launch_persistent_context(
-                str(PROFILE_DIR), channel="msedge", headless=False,
+                str(PROFILE_DIR), executable_path=edge_executable_path(), headless=False,
                 viewport={"width": 1365, "height": 900}
             )
         except Exception as exc:
@@ -2196,7 +2222,7 @@ def run_share_latest() -> int:
 
     with sync_playwright() as playwright, browser_profile_lock(wait_seconds=300):
         context = playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR), channel="msedge", headless=False,
+            str(PROFILE_DIR), executable_path=edge_executable_path(), headless=False,
             viewport={"width": 1365, "height": 900}
         )
         try:
@@ -2226,7 +2252,7 @@ def run(login_only: bool, enable_send: bool, verify_only: bool, max_items: int) 
         require_recipient_verification(cfg, read_json(VERIFICATION_PATH, {}))
     with sync_playwright() as playwright, browser_profile_lock():
         context = playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR), channel="msedge", headless=False,
+            str(PROFILE_DIR), executable_path=edge_executable_path(), headless=False,
             viewport={"width": 1365, "height": 900}
         )
         try:
@@ -2606,7 +2632,7 @@ def run_scheduled(poll_inbox: bool = True) -> int:
         prepare_browser_temp()
         with sync_playwright() as playwright, browser_profile_lock():
             context = playwright.chromium.launch_persistent_context(
-                str(PROFILE_DIR), channel="msedge", headless=False,
+                str(PROFILE_DIR), executable_path=edge_executable_path(), headless=False,
                 viewport={"width": 1365, "height": 900}
             )
             try:
@@ -3025,6 +3051,218 @@ def service_browse_request(page, cfg: dict, selectors: dict):
     return editor, page.url
 
 
+def direct_cabin_computer_active(task_id: str) -> bool:
+    """Fail closed when the matching resident is no longer using the computer."""
+    try:
+        info = json.loads(DIRECT_CABIN_BRIDGE_PATH.read_text(encoding="utf-8"))
+        url = str(info["url"]).rstrip("/") + "/v1/tool"
+        if urlparse(url).hostname not in ("127.0.0.1", "localhost", "::1"):
+            return False
+        request = urllib.request.Request(
+            url, data=b'{"name":"cabin_status","arguments":{}}',
+            headers={"Authorization": "Bearer " + str(info["token"]),
+                     "Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            status = json.load(response)
+        return (status.get("connected") is True
+                and status.get("position", {}).get("space") == "xjhome"
+                and status.get("position", {}).get("zone") == "xj_desk"
+                and (status.get("doing") or {}).get("id") == task_id)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, urllib.error.URLError):
+        return False
+
+
+def direct_cabin_stop_if_active(task_id: str) -> None:
+    if not direct_cabin_computer_active(task_id):
+        return
+    try:
+        info = json.loads(DIRECT_CABIN_BRIDGE_PATH.read_text(encoding="utf-8"))
+        request = urllib.request.Request(
+            str(info["url"]).rstrip("/") + "/v1/tool",
+            data=b'{"name":"cabin_stop","arguments":{}}',
+            headers={"Authorization": "Bearer " + str(info["token"]),
+                     "Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+    except (OSError, ValueError, KeyError, urllib.error.URLError):
+        pass
+
+
+def service_direct_browse_command(page, cfg: dict, selectors: dict, session: dict | None):
+    """Execute one model-selected, read-only browser step in the logged-in listener."""
+    if not DIRECT_BROWSE_REQUEST_PATH.is_file():
+        if session and time_module.monotonic() - session["last_command"] > 90:
+            direct_cabin_stop_if_active(session["cabin_task_id"])
+            editor, url = open_inbox_conversation(page, cfg, selectors)
+            return None, (editor, url)
+        return session, None
+    active = DIRECT_BROWSE_REQUEST_PATH.with_name("direct-browse-request-active.json")
+    try:
+        os.replace(DIRECT_BROWSE_REQUEST_PATH, active)
+    except OSError:
+        return session, None
+    command = {}
+    restore = None
+    try:
+        command = json.loads(active.read_text(encoding="utf-8"))
+        action = command.get("action")
+        sid = str(command.get("sessionId") or "")
+        if not re.fullmatch(r"[0-9a-f-]{36}", sid):
+            raise RuntimeError("浏览会话编号无效")
+        if action == "start":
+            if session:
+                raise RuntimeError("已有浏览会话")
+            cabin_task_id = str(command.get("cabinTaskId") or "")
+            if not cabin_task_id or not direct_cabin_computer_active(cabin_task_id):
+                raise RuntimeError("大肥鱼尚未使用小屋电脑")
+            topic = validate_browse_topic(command.get("topic", ""), cfg)
+            if topic:
+                found = collect_search_videos(page, topic, limit=SEARCH_MAX_LIMIT,
+                                              timeout_seconds=45,
+                                              entry=(cfg.get("browse_topics") or {}).get(
+                                                  "search_entry", DEFAULT_SEARCH_ENTRY))
+                items = found.get("items") or []
+                candidates = [Video(item["url"], item.get("title", ""), item.get("author", ""))
+                              for item in items] if items else collect_feed(page)
+            else:
+                candidates = collect_feed(page)
+            if not direct_cabin_computer_active(cabin_task_id):
+                raise RuntimeError("大肥鱼已离开小屋电脑，浏览未启动")
+            candidates.sort(key=lambda video: not bool(video.title.strip()))
+            session = {"id": sid, "cabin_task_id": cabin_task_id,
+                       "candidates": candidates, "watched": [],
+                       "search_count": 1 if topic else 0,
+                       "search_terms": [topic] if topic else [],
+                       "last_command": time_module.monotonic()}
+            result = {"ok": True, "topic": topic,
+                      "querySource": "owner" if topic else "none",
+                      "searchesRemaining": 2 - session["search_count"],
+                      "topicFallback": bool(topic and not items) if topic else False}
+        else:
+            if not session or session["id"] != sid:
+                raise RuntimeError("浏览会话不存在或已过期")
+            session["last_command"] = time_module.monotonic()
+            if action == "feed":
+                if not direct_cabin_computer_active(session["cabin_task_id"]):
+                    raise RuntimeError("大肥鱼已离开小屋电脑，不能刷新抖音")
+                session["candidates"] = collect_feed(page)
+                if not direct_cabin_computer_active(session["cabin_task_id"]):
+                    raise RuntimeError("大肥鱼已离开小屋电脑，浏览已中断")
+                session["candidates"].sort(key=lambda video: not bool(video.title.strip()))
+                result = {"ok": True}
+            elif action == "search":
+                if not direct_cabin_computer_active(session["cabin_task_id"]):
+                    raise RuntimeError("大肥鱼已离开小屋电脑，不能搜索抖音")
+                query = validate_browse_topic(command.get("query", ""), cfg)
+                if not query:
+                    raise RuntimeError("搜索词不能为空")
+                if session["search_count"] >= 2:
+                    result = {"ok": True, "query": query, "searchLimitReached": True,
+                              "searchesRemaining": 0, "reason": "search-limit"}
+                elif query in session["search_terms"]:
+                    result = {"ok": True, "query": query, "duplicate": True,
+                              "searchesRemaining": 2 - session["search_count"],
+                              "reason": "already-searched"}
+                else:
+                    found = collect_search_videos(page, query, limit=SEARCH_MAX_LIMIT,
+                                                  timeout_seconds=45,
+                                                  entry=(cfg.get("browse_topics") or {}).get(
+                                                      "search_entry", DEFAULT_SEARCH_ENTRY))
+                    if not direct_cabin_computer_active(session["cabin_task_id"]):
+                        raise RuntimeError("大肥鱼已离开小屋电脑，搜索已中断")
+                    reason = str(found.get("reason") or "")
+                    if reason == "blocked":
+                        raise RuntimeError("抖音搜索遇到登录或安全验证，本轮停止搜索")
+                    items = found.get("items") or []
+                    session["candidates"] = [Video(item["url"], item.get("title", ""),
+                                                   item.get("author", "")) for item in items]
+                    session["candidates"].sort(key=lambda video: not bool(video.title.strip()))
+                    session["search_count"] += 1
+                    session["search_terms"].append(query)
+                    result = {"ok": True, "query": query, "querySource": "self",
+                              "found": bool(items), "reason": "" if items else reason or "no-results",
+                              "searchesRemaining": 2 - session["search_count"]}
+            elif action == "watch":
+                index = command.get("index")
+                seconds = command.get("seconds")
+                cabin_task_id = session["cabin_task_id"]
+                if command.get("cabinTaskId") != cabin_task_id:
+                    raise RuntimeError("小屋电脑活动编号不匹配")
+                if not cabin_task_id or not direct_cabin_computer_active(cabin_task_id):
+                    raise RuntimeError("大肥鱼已离开小屋电脑，不能继续刷抖音")
+                if not isinstance(index, int) or not 0 <= index < len(session["candidates"]):
+                    raise RuntimeError("请选择当前候选列表中的视频序号")
+                if not isinstance(seconds, int) or not 8 <= seconds <= 20:
+                    raise RuntimeError("单条观看时长须为 8 到 20 秒")
+                video = session["candidates"][index]
+                page.goto(video.url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(3000)
+                authenticated(page)
+                if not direct_cabin_computer_active(cabin_task_id):
+                    raise RuntimeError("大肥鱼已离开小屋电脑，不能继续刷抖音")
+                first = playback_time(page)
+                if first is None and kick_video_playback(page):
+                    page.wait_for_timeout(1000)
+                    first = playback_time(page)
+                if first is None:
+                    result = {"ok": True, "played": False, "url": video.url,
+                              "diagnostics": playback_diagnostics(page)}
+                else:
+                    capture_started = start_video_audio_capture(page, seconds=min(seconds, 12))
+                    frame = capture_video_frame(page)
+                    watched = 0.0
+                    last = first
+                    for _ in range(seconds):
+                        page.wait_for_timeout(1000)
+                        if not direct_cabin_computer_active(cabin_task_id):
+                            raise RuntimeError("大肥鱼已离开小屋电脑，浏览已中断")
+                        current = playback_time(page)
+                        if current is None:
+                            break
+                        delta = current - last
+                        if 0 < delta <= 2:
+                            watched += delta
+                        last = current
+                    if watched >= 8:
+                        analysis = analyze_video_content(
+                            [frame] if frame else [],
+                            finish_video_audio_capture(page) if capture_started else "")
+                        row = {"url": video.url, "title": video.title or page.title().removesuffix(" - 抖音"),
+                               "author": video.author, "watched_seconds": round(watched, 1),
+                               "observed_at": datetime.now(SINGAPORE).isoformat(timespec="minutes"),
+                               "content_summary": analysis.get("summary", ""),
+                               "transcript": analysis.get("transcript", ""), "tags": analysis.get("tags", [])}
+                        save_watch_history(SHARED_INTEREST_PATH, [row])
+                        session["watched"].append(row)
+                        result = {"ok": True, "played": True, "video": row}
+                    else:
+                        result = {"ok": True, "played": False, "url": video.url,
+                                  "watched_seconds": round(watched, 1)}
+            elif action == "end":
+                result = {"ok": True, "watched": session["watched"]}
+                direct_cabin_stop_if_active(session["cabin_task_id"])
+                session = None
+                restore = open_inbox_conversation(page, cfg, selectors)
+            else:
+                raise RuntimeError("未知的浏览操作")
+        if session:
+            session["last_command"] = time_module.monotonic()
+            if action in ("start", "search", "feed"):
+                result["candidates"] = [{"index": i, "title": v.title, "author": v.author, "url": v.url}
+                                        for i, v in enumerate(session["candidates"][:20])]
+    except Exception as exc:
+        result = {"ok": False, "error": str(exc) or exc.__class__.__name__}
+    finally:
+        request_id = str(command.get("id") or "")
+        if re.fullmatch(r"[0-9a-f]{32}", request_id):
+            response = ROOT / f"direct-browse-response-{request_id}.json"
+            temporary = response.with_suffix(".tmp")
+            temporary.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, response)
+        active.unlink(missing_ok=True)
+    return session, restore
+
+
 def run_inbox(inspect_only: bool) -> int:
     cfg = load_config()
     require_recipient_verification(cfg, read_json(VERIFICATION_PATH, {}))
@@ -3036,7 +3274,7 @@ def run_inbox(inspect_only: bool) -> int:
     prepare_browser_temp()
     with sync_playwright() as playwright, browser_profile_lock():
         context = playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR), channel="msedge", headless=False,
+            str(PROFILE_DIR), executable_path=edge_executable_path(), headless=False,
             viewport={"width": 1365, "height": 900}
         )
         try:
@@ -3084,7 +3322,7 @@ def run_inbox_listener() -> int:
             prepare_browser_temp()
             with sync_playwright() as playwright, browser_profile_lock():
                 context = playwright.chromium.launch_persistent_context(
-                    str(PROFILE_DIR), channel="msedge", headless=False,
+                    str(PROFILE_DIR), executable_path=edge_executable_path(), headless=False,
                     viewport={"width": 1365, "height": 900}
                 )
                 page = context.pages[0] if context.pages else context.new_page()
@@ -3096,9 +3334,17 @@ def run_inbox_listener() -> int:
                 process_inbox_page(page, editor, cfg, selectors, state, merge_window=merge_window)
                 next_inbox_check = time_module.monotonic() + 5
                 next_inbox_refresh = time_module.monotonic() + INBOUND_REFRESH_SECONDS
+                direct_session = None
                 print("Persistent Douyin inbox listener is active.")
                 while True:
                     write_listener_heartbeat(busy=False)
+                    direct_session, restored = service_direct_browse_command(page, cfg, selectors, direct_session)
+                    if restored:
+                        editor, conversation_url = restored
+                        next_inbox_refresh = time_module.monotonic() + INBOUND_REFRESH_SECONDS
+                    if direct_session:
+                        page.wait_for_timeout(500)
+                        continue
                     if time_module.monotonic() >= next_schedule_check:
                         daily_state = read_json(DAILY_BROWSE_STATE_PATH, {})
                         flush_daily_report(cfg, daily_state)
@@ -3106,11 +3352,6 @@ def run_inbox_listener() -> int:
                             maintenance_due = True
                             break
                         next_schedule_check = time_module.monotonic() + 15
-                    browse_session_result = service_browse_request(page, cfg, selectors)
-                    if browse_session_result:
-                        editor, conversation_url = browse_session_result
-                        next_inbox_refresh = time_module.monotonic() + INBOUND_REFRESH_SECONDS
-                        continue
                     # An already-open conversation does not reliably receive newly pushed rows, so
                     # re-open it on a timer: this is what actually pulls the message in. Without it
                     # the only path that fetched new messages was the 15-minute scheduled run,
@@ -3220,6 +3461,8 @@ def main() -> int:
     if args.send and (args.inspect_inbox or args.poll_inbox):
         parser.error("--inspect-inbox never sends; --poll-inbox is separately gated by inbound configuration")
     try:
+        if (args.browse or args.request_browse) and load_config().get("direct_browse", {}).get("enabled"):
+            raise RuntimeError("后台抖音浏览已停用；请由大肥鱼在小屋电脑前逐步操作")
         if args.scheduled:
             return run_scheduled()
         if args.inspect_inbox:
@@ -3250,3 +3493,4 @@ if __name__ == "__main__":
     LOCAL_TEMP_DIR.mkdir(parents=True, exist_ok=True)
     tempfile.tempdir = str(LOCAL_TEMP_DIR)
     raise SystemExit(main())
+

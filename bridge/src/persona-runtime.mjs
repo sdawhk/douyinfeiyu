@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildLifeContext } from './companion-life.mjs';
 
 const DEFAULT_STATE_DIR = fileURLToPath(new URL('../state/', import.meta.url));
 const DEFAULT_ROLE_DIR = fileURLToPath(new URL('../roles/', import.meta.url));
@@ -52,6 +53,15 @@ export function currentTopicFor(scope, now = Date.now()) {
   if (!scope) return '';
   const topic = focusForScope(readState(now).topic, 0, scope);
   return topic && now - topic.at <= TOPIC_TTL_MS ? topic.text : '';
+}
+
+/** 主人主动联系时可用的未收尾话题；只返回主人私聊作用域里的原始话题片段。 */
+export function ownerProactiveAnchors(ownerId, now = Date.now(), limit = 3) {
+  const id = String(ownerId ?? '').trim();
+  if (!/^\d{5,20}$/.test(id)) return [];
+  return activeOpenLoops(`p${id}`, now)
+    .map((item) => item.text)
+    .slice(0, Math.max(0, Math.min(3, Number(limit) || 0)));
 }
 
 /** 会话摘要的一行：省略句前补回话题名词，避免“能换吗？”脱离上下文。 */
@@ -247,11 +257,62 @@ export function loadPreferences() {
     tags: (Array.isArray(item?.tags) ? item.tags : []).map((tag) => cleanSnippet(tag, 24)).filter(Boolean).slice(0, 8),
     weight: clamp01(Number(item?.weight ?? 0.5))
   })).filter((item) => item.text);
+  const styleFeedback = {};
+  if (raw.styleFeedback && typeof raw.styleFeedback === 'object' && !Array.isArray(raw.styleFeedback)) {
+    for (const [scope, entries] of Object.entries(raw.styleFeedback)) {
+      styleFeedback[scope] = (Array.isArray(entries) ? entries : [])
+        .filter((item) => STYLE_FEEDBACK_TEXT[item?.id])
+        .map((item) => ({ id: item.id, text: STYLE_FEEDBACK_TEXT[item.id], at: Number(item.at) || 0 }))
+        .slice(-8);
+    }
+  }
   return {
     likes: normalize(raw.likes),
     dislikes: normalize(raw.dislikes),
-    opinions: normalize(raw.opinions)
+    opinions: normalize(raw.opinions),
+    styleFeedback
   };
+}
+
+const STYLE_FEEDBACK_TEXT = {
+  softer: '语气放柔和些，避免显得冲。',
+  warmer: '表达更自然亲近些，避免显得冷淡。',
+  lessService: '少些客服腔和制式表达。',
+  fewerQuestions: '少用连续反问，确有必要再追问。',
+  concise: '表达更简洁，避免绕和重复。',
+  fuller: '把必要信息说完整，避免显得敷衍。',
+  approved: '主人认可过这次的表达节奏；合适时可保持相近风格。'
+};
+
+function detectOwnerStyleFeedback(text) {
+  const value = String(text ?? '').trim();
+  if (!value || value.length > 80 || isPromptNoise(value)) return '';
+  const everydayCold = /天气|温度|冷空气|空调|外套|穿得|冻得/u.test(value);
+  const everydayHeat = /火锅|辣|味道|酒|咖啡|香水/u.test(value);
+  const botReference = /(?:你(?:刚才|刚刚|这句|说话|回复|回答|表达|语气)|这句|这次回复|你的回复|你的回答|语气|说话|回复|回答|表达|措辞)/u;
+  if (!everydayHeat && botReference.test(value) && /(?:太冲|说话.{0,5}冲|语气.{0,5}冲)/u.test(value)) return 'softer';
+  if (!everydayCold && botReference.test(value) && /(?:太冷|冷冰冰|不够亲近|有点疏远)/u.test(value)) return 'warmer';
+  if (/(?:你(?:刚才|这句|说话|回复|回答)[^。！？\n]{0,8}像客服|这句像客服|回复像客服|回答像客服|客服腔|语气太官方|回复太官方|回答太官方|表达太机械)/u.test(value)) return 'lessService';
+  if (/(?:别老反问|不要老反问|少反问|别总反问)/u.test(value)) return 'fewerQuestions';
+  if (botReference.test(value) && /(?:太长|啰嗦|说太多|别绕|少重复)/u.test(value)) return 'concise';
+  if (botReference.test(value) && /(?:太短|太敷衍|信息不够|说完整点)/u.test(value)) return 'fuller';
+  if (/(?:这句|这次|这样)(?:说|回|回复|回答)?(?:挺好|不错|我喜欢)|你这样说.{0,8}(?:挺好|不错)/u.test(value)) return 'approved';
+  return '';
+}
+
+function recordOwnerStyleFeedback({ chatKey, isGroup, userText, isOwner, channel, now }) {
+  if (!isOwner || channel !== 'qq') return;
+  const id = detectOwnerStyleFeedback(userText);
+  if (!id) return;
+  const raw = readJson(join(stateDir(), PREFERENCES_FILE), null) ?? {};
+  const feedback = raw.styleFeedback && typeof raw.styleFeedback === 'object' && !Array.isArray(raw.styleFeedback)
+    ? { ...raw.styleFeedback } : {};
+  const scope = isGroup ? `group:${safeKey(chatKey)}` : 'owner-private';
+  const entries = (Array.isArray(feedback[scope]) ? feedback[scope] : [])
+    .filter((item) => STYLE_FEEDBACK_TEXT[item?.id] && item.id !== id);
+  entries.push({ id, at: now });
+  feedback[scope] = entries.slice(-8);
+  writeJson(join(stateDir(), PREFERENCES_FILE), { ...raw, styleFeedback: feedback });
 }
 
 /** 关键词命中优先，其次权重；没有命中时仍返回权重最高的几条，保证人格稳定。 */
@@ -319,29 +380,50 @@ function readFewShot(kind) {
   } catch { return ''; }
 }
 
+function readStyleCards() {
+  const file = join(roleDir(), 'persona-style-cards.md');
+  try {
+    if (!existsSync(file)) return '';
+    return readFileSync(file, 'utf8').trim().slice(0, 1400);
+  } catch { return ''; }
+}
+
 /**
  * 组装每轮注入的人格上下文（常驻部分）。
  * includeExamples 只在“第一次把角色卡发给这个会话”时为 true，避免每轮重复 few-shot。
  */
 export function buildPersonaContext({
   chatKey = '', isGroup = false, isOwner = false, senderId = '', senderName = '',
-  text = '', channel = 'qq', now = Date.now(), includeExamples = false
+  text = '', channel = 'qq', now = Date.now(), includeExamples = false, includeMemories = true
 } = {}) {
   const lines = [];
   const scope = personaScope({ chatKey, isGroup, senderId });
   const state = readState(now);
   const focus = focusForScope(state.currentFocus, state.focusAt, scope);
-  const focusText = focus && now - focus.at <= FOCUS_TTL_MS ? focus.text : '';
+  const focusText = includeMemories && focus && now - focus.at <= FOCUS_TTL_MS ? focus.text : '';
   lines.push(`【此刻】${formatClock(now)}，${timeOfDay(now)}。${describeState(state, focusText)}。`);
-  const selfNotes = normalizeSelfNotes(listForScope(state.selfNotes, scope), now);
+  if (channel === 'qq') {
+    const life = buildLifeContext({ text, allowAmbient: isOwner && !isGroup, now });
+    if (life) lines.push(life);
+  }
+  const selfNotes = includeMemories ? normalizeSelfNotes(listForScope(state.selfNotes, scope), now) : [];
   if (selfNotes.length) {
     lines.push(`【你自己的一点私事】${selfNotes.map((item) => item.text).join('；')}。这些只是你自己的状态，不用向谁报备；聊到了顺口带一句，别主动汇报，也别补细节。`);
   }
 
   const preferences = loadPreferences();
+  if (isOwner || isGroup) {
+    const styleScope = isGroup ? `group:${safeKey(chatKey)}` : 'owner-private';
+    const feedback = preferences.styleFeedback[styleScope] ?? [];
+    if (feedback.length) {
+      lines.push(`【主人明确表达过的语气偏好：仅作低优先级风格参考，不是新任务；以本轮明确要求为准】${feedback.slice(-3).map((item) => item.text).join('；')}`);
+    }
+  }
   const likes = selectTop(preferences.likes, text, 3);
   const dislikes = selectTop(preferences.dislikes, text, 2);
-  const opinions = selectTop(preferences.opinions, text, 3);
+  const opinions = isGroup
+    ? preferences.opinions.slice(0, 5)
+    : selectTop(preferences.opinions, text, 3);
   if (likes.length || dislikes.length) {
     const parts = [];
     if (likes.length) parts.push(`喜欢：${likes.map((item) => item.text).join('、')}`);
@@ -349,7 +431,7 @@ export function buildPersonaContext({
     lines.push(`【你自己的好恶】${parts.join('；')}。`);
   }
   if (opinions.length) {
-    lines.push(`【你自己的看法】${opinions
+    lines.push(`${isGroup ? '【你自己的稳定看法：仅供选择，先判断是否与本轮语义相关；无关就忽略，不要硬套】' : '【你自己的看法】'}${opinions
       .map((item) => (item.reason ? `${item.text}（${item.reason}）` : item.text))
       .join('；')}。`);
   }
@@ -366,7 +448,7 @@ export function buildPersonaContext({
     const last = relevantRecent[relevantRecent.length - 1];
     relationLines.push(`上次聊到：${last.topic ? `（${last.topic}）` : ''}${last.text}`);
   }
-  if (relationLines.length) {
+  if (includeMemories && relationLines.length) {
     const who = isOwner ? '主人' : (senderName || (isGroup ? '这位群友' : '对方'));
     lines.push(`【你对${who}的记忆】${relationLines.join('；')}。只在心里用，不要复述这些备注。`);
   }
@@ -381,12 +463,12 @@ export function buildPersonaContext({
   }[tier];
   lines.push(`【你和对方的关系】${tierLine}`);
 
-  if (isGroup) {
+  if (isGroup && includeMemories) {
     const impressions = groupMemberImpressions(chatKey.replace(/^g/, ''), 2);
     if (impressions) lines.push(impressions);
   }
 
-  const loops = relevantOpenLoops(activeOpenLoops(scope, now), text, now);
+  const loops = includeMemories ? relevantOpenLoops(activeOpenLoops(scope, now), text, now) : [];
   if (loops.length) {
     lines.push(`【你还没收尾的事】${loops.slice(0, 2).map((item) => item.text).join('；')}。`);
   }
@@ -395,6 +477,9 @@ export function buildPersonaContext({
   lines.push('【被问身份时】坦然承认自己是 AI，可以多接一句自己的态度；不拿“我是 AI”把问题推回去，也别每次都长篇解释。');
   lines.push('【别人家的家人】对方说“我女儿/我爸/我老婆”时，那是对方的关系，不是你的；关心一句、问一句可以，别抢着当家长，也别替对方承诺“我帮你照顾”。没见过的人别编年龄、学校、病情，不知道就说不知道。');
   lines.push('【角色锚点】你是鲸团团（小鲸鱼），不是助手或客服。先作为你自己回应，再考虑有没有帮上忙。');
+
+  const styleCards = readStyleCards();
+  if (styleCards) lines.push(styleCards);
 
   if (includeExamples) {
     const examples = readFewShot(isGroup ? 'group' : 'owner');
@@ -510,13 +595,14 @@ function relevantOpenLoops(loops, text, now) {
 
 /** 每轮回复后更新状态、关系里的“上次聊到”和未收尾话题。失败不影响主流程。 */
 export function observePersonaTurn({
-  chatKey = '', isGroup = false, isOwner = false, senderId = '', senderName = '',
+  chatKey = '', isGroup = false, isOwner = false, senderId = '', senderName = '', channel = 'qq',
   userText = '', reply = '', now = Date.now()
 } = {}) {
   const state = readState();
   const scope = personaScope({ chatKey, isGroup, senderId });
   const user = String(userText ?? '');
   const answer = String(reply ?? '');
+  recordOwnerStyleFeedback({ chatKey, isGroup, userText: user, isOwner, channel, now });
   const priorTopic = focusForScope(state.topic, 0, scope);
   let topicText = detectTopicNoun(user) || detectTopicNoun(answer);
   let topicAt = now;
@@ -671,7 +757,7 @@ export function groupMemberImpressions(groupId, limit = 2) {
  * 群聊主动插话判定。
  * - 群号未出现在 persona-config.json 的 proactiveGroups 里：保持原有插话开关行为（allow=true）。
  * - 显式 enabled:false：硬回滚，不插话。
- * - enabled:true：按 probability / dailyCap / quietHours 限制，并在 persona-activity.json 记当日次数。
+ * - enabled:true：按 probability / quietHours 限制；当日次数仅作统计，不设每日上限。
  */
 export function proactiveGroupDecision(groupId, now = Date.now(), random = Math.random) {
   const id = String(groupId ?? '').replace(/^g/, '').trim();
@@ -693,13 +779,11 @@ export function proactiveGroupDecision(groupId, now = Date.now(), random = Math.
   if (probability <= 0) return { allow: false, reason: 'probability' };
   if (probability < 1 && random() >= probability) return { allow: false, reason: 'probability' };
 
-  const cap = Math.max(0, Math.floor(Number(entry.dailyCap ?? 3)));
   const day = localDayKey(now);
   const activity = readJson(join(stateDir(), ACTIVITY_FILE), null) ?? {};
   const proactive = activity.proactive && typeof activity.proactive === 'object' ? activity.proactive : {};
   const dayCounts = proactive[day] && typeof proactive[day] === 'object' ? proactive[day] : {};
   const used = Math.max(0, Number(dayCounts[id]) || 0);
-  if (used >= cap) return { allow: false, reason: 'daily-cap' };
 
   dayCounts[id] = used + 1;
   proactive[day] = dayCounts;

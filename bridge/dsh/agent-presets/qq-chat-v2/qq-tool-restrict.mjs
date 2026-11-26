@@ -75,6 +75,14 @@ export function apply(ctx) {
   ctx.tools.guard((exec) => {
     const name = exec?.name
     if (typeof name !== 'string' || name.length === 0) return
+    const sessionId = String(exec.agent?.session?.id ?? '')
+    if (sessionId.startsWith('session-qq-browse-')) {
+      if (name === 'mcp__snowluma__douyin_direct_browse' || name === 'mcp__router__search_and_activate') return
+      return '后台浏览只允许抖音浏览工具；QQ 新消息由主桥接接收。没有观看内容可直接输出 [SILENT] 结束。'
+    }
+    if (sessionId.startsWith('session-qq-managed-') && /^(?:mcp__snowluma__|mcp__snowluma-host__)qq_(?:get_prompt|get_unread_messages|get_recent_messages|get_group_history|wait_for_messages|mark_read|set_wake_config)$/.test(name)) {
+      return '本轮消息已由主桥接投递，后续消息会另起一轮。不要重复接收或等待；请只回应本轮，发送后直接结束。'
+    }
     if (SAFE_EXACT.has(name)) return
     if (SAFE_PREFIXES.some((prefix) => name.startsWith(prefix))) return
     return `工具 "${name}" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具与无害模型侧工具）`

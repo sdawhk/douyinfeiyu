@@ -29,7 +29,7 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.deepEqual(before.settings.replyControl, { privateEnabled: true, groupEnabled: true, disabledPrivate: [], disabledGroups: [] });
     assert.equal(before.settings.qzoneSocial.previewOnly, true);
     assert.deepEqual(before.settings.ownerCardLike, { enabled: true, time: '10:00' });
-    assert.deepEqual(before.settings.messageBatch, { enabled: true, idleMs: 5000, maxMs: 15000 });
+    assert.deepEqual(before.settings.messageBatch, { enabled: true, idleMs: 5000, privateIdleMs: 1000, maxMs: 15000 });
     assert.equal(JSON.stringify(before).includes('private-token'), false);
     assert.equal(JSON.stringify(before).includes('azure-private-key'), false);
     assert.equal(JSON.stringify(before).includes('tts-private-password'), false);
@@ -42,12 +42,14 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.deepEqual(before.settings.singing.allowedQQs, []);
     assert.deepEqual(before.settings.voiceClone, { enabled: false, mode: 'requested',
       endpoint: 'http://127.0.0.1:9882', refAudio: '', refText: '' });
+    assert.deepEqual(before.settings.voiceStudio, { enabled: false, mode: 'requested',
+      endpoint: 'http://127.0.0.1:3900', model: 'omnivoice', voiceId: '' });
     const next = structuredClone(before.settings);
     next.groupReplyCooldownMs = 12_000;
     next.voiceReplyProbability = 35;
     next.edgeTts.mode = 'probability';
     next.replyControl = { privateEnabled: false, groupEnabled: true, disabledPrivate: ['123456789'], disabledGroups: ['839367702'] };
-    next.messageBatch = { enabled: true, idleMs: 4000, maxMs: 12000 };
+    next.messageBatch = { enabled: true, idleMs: 4000, privateIdleMs: 800, maxMs: 12000 };
     next.groupInterjectionDisabled = ['839367702'];
     next.dailyQzone.minIntervalMs = 7_200_000;
     next.ownerCardLike = { enabled: true, time: '21:30' };
@@ -57,6 +59,8 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     next.autoSticker = false;
     next.voiceClone = { enabled: false, mode: 'requested', endpoint: 'http://127.0.0.1:9882',
       refAudio: 'D:\\voices\\reference.wav', refText: '你好，我是小鲸鱼。' };
+    next.voiceStudio = { enabled: true, mode: 'requested', endpoint: 'http://127.0.0.1:3900',
+      model: 'omnivoice', voiceId: '86ee630c' };
     next.pokeInteraction.replies = '戳到啦\n在呢';
     next.singing.allowedQQs = ['1234567890', '1234567890', ' 2345678901 '];
     const after = saveSettingsDocument(before.version, next, file);
@@ -76,6 +80,7 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.equal(saved.pokeInteraction.pokeBack, true);
     assert.equal(saved.autoSticker, false);
     assert.deepEqual(saved.voiceClone, next.voiceClone);
+    assert.deepEqual(saved.voiceStudio, next.voiceStudio);
     assert.equal(saved.pokeInteraction.replies, '戳到啦\n在呢');
     assert.equal(saved.azureTts.key, 'azure-private-key');
     assert.equal(saved.xfyunTts.apiPassword, 'tts-private-password');
@@ -96,6 +101,7 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.throws(() => validateSettings({ ...next, voiceReplyProbability: 101 }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, replyControl: { ...next.replyControl, disabledGroups: ['invalid'] } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, messageBatch: { enabled: true, idleMs: 5000, maxMs: 4000 } }), { status: 400 });
+    assert.throws(() => validateSettings({ ...next, messageBatch: { enabled: true, idleMs: 5000, privateIdleMs: 6000, maxMs: 5000 } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, stickerCooldown: { ...next.stickerCooldown, privateMs: -1 } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, pokeInteraction: { ...next.pokeInteraction, replies: '' } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, qzoneSocial: { ...next.qzoneSocial, allowedFriends: ['not-a-qq'] } }), { status: 400 });
@@ -103,6 +109,7 @@ test('admin settings preserve unrelated secrets and reject stale saves', () => {
     assert.throws(() => validateSettings({ ...next, qzoneSocial: { ...next.qzoneSocial, commentThreshold: next.qzoneSocial.likeThreshold - 1 } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, ownerCardLike: { ...next.ownerCardLike, time: '25:00' } }), { status: 400 });
     assert.throws(() => validateSettings({ ...next, voiceClone: { ...next.voiceClone, endpoint: 'https://example.com' } }), { status: 400 });
+    assert.throws(() => validateSettings({ ...next, voiceStudio: { ...next.voiceStudio, endpoint: 'http://example.com:3900' } }), { status: 400 });
   } finally {
     unlinkSync(file);
     try { unlinkSync(`${file}.bak`); } catch { /* no backup was written before a failed save */ }

@@ -20,3 +20,5 @@
 `bridge.config.dafeiyu.example.json` 展示了本机使用的 `panelSources.diaryDir` 与 `panelSources.ownerMemoryFile`。桥仅为 `xiaojingyu` 只读展示近 30 天日记和主人私聊记忆，过滤已纠正、过期或低置信度的记忆；持续权限和群聊记忆不进入游戏。相册尚未接入。
 
 游戏记忆页的修改保存在 `game/ui/dock.gd`。它基于原项目 `V1.0.0` 标签：从该标签取得完整 `game/` 源码，把此文件覆盖到 `game/ui/dock.gd`，使用 Godot 4.7.2 导入并导出 Windows 游戏。游戏可执行文件及 `data/` 不纳入 Git。当前本机运行的是单独构建的 `CabinWorld-memory.exe`，原 `CabinWorld.exe` 保留作回退。
+
+QQ 侧现已通过 `bridge/src/companion-life.mjs` 只读接入小屋的已完成动作流水，供日常回复回忆、既有主人主动联系评估和日记使用。游戏自主活动与消费规则不变，具体边界、路径和验证见 [QQ 与小屋生活接入](../../docs/QQ与小屋生活接入.md)。

@@ -25,7 +25,8 @@ rem     the fresh token while the DSH process remains running.
 rem ASCII-only on purpose.
 
 set "ROOT=D:\deepseek"
-set "NODE=%ROOT%\snowluma\app\node.exe"
+rem The bundled SnowLuma node.exe is low-integrity and cannot inject into QQ.
+set "NODE=C:\Program Files\nodejs\node.exe"
 set "LOGDIR=%ROOT%\logs"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 
@@ -36,7 +37,7 @@ netstat -ano | findstr /R /C:":5099 .*LISTENING" >nul 2>&1
 if errorlevel 1 (
   echo [%date% %time%] starting SnowLuma >> "%LOGDIR%\autostart.log"
   set "SNOWLUMA_HOOK_AUTOLOAD=1"
-  start "SnowLuma" /MIN /D "%ROOT%\snowluma\app" "%NODE%" "%ROOT%\snowluma\app\index.mjs"
+  start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-process-launcher.vbs" "%ROOT%\snowluma\app" "%NODE%" "%ROOT%\snowluma\app\index.mjs"
 ) else (
   echo [%date% %time%] SnowLuma already up, skip >> "%LOGDIR%\autostart.log"
 )
@@ -45,7 +46,7 @@ rem ---- 2. multi-key model proxy (reads keys.json, auto-rotates on quota failur
 netstat -ano | findstr /R /C:":18901 .*LISTENING" >nul 2>&1
 if errorlevel 1 (
   echo [%date% %time%] starting model-pool >> "%LOGDIR%\autostart.log"
-  start "ModelPool" /MIN /D "%ROOT%" "%ROOT%\model-pool-proxy.bat"
+  start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%" "%ROOT%\model-pool-proxy.bat"
 ) else (
   echo [%date% %time%] model-pool already up, skip >> "%LOGDIR%\autostart.log"
 )
@@ -55,7 +56,21 @@ rem Editable conversation model router (separate from the keys admin on 18901).
 netstat -ano | findstr /R /C:":18903 .*LISTENING" >nul 2>&1
 if errorlevel 1 (
   echo [%date% %time%] starting model router >> "%LOGDIR%\autostart.log"
-  start "ModelRouter" /MIN /D "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
+  start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
+)
+
+rem ---- 2c. loopback forward proxy on 12450 ----
+rem The user-level HTTP_PROXY/HTTPS_PROXY/ALL_PROXY env points at 12450, but
+rem the user's proxy client is not always running. dsh installs that env as
+rem its process-wide outbound dispatcher, so a dead 12450 breaks every
+rem upstream model call. This forwarder occupies 12450 and dials out
+rem directly, keeping the model lane alive until the env is cleaned up.
+netstat -ano | findstr /R /C:":12450 .*LISTENING" >nul 2>&1
+if errorlevel 1 (
+  echo [%date% %time%] starting 12450 forwarder >> "%LOGDIR%\autostart.log"
+  start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-process-launcher.vbs" "%ROOT%\state" "%NODE%" "%ROOT%\state\proxy-forwarder.mjs"
+) else (
+  echo [%date% %time%] 12450 forwarder already up, skip >> "%LOGDIR%\autostart.log"
 )
 
 rem ---- 3. dsh watchdog (token captured to dshweb.out by dsh-run.ps1) ----
@@ -66,7 +81,7 @@ rem ---- 4. bridge watchdog (it waits for dsh, then patches token + runs bot) --
 tasklist /FI "WINDOWTITLE eq QQBridge*" 2>nul | find /I "cmd.exe" >nul 2>&1
 if errorlevel 1 (
   echo [%date% %time%] starting bridge watchdog >> "%LOGDIR%\autostart.log"
-  start "QQBridge" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\bridge-watchdog.bat"
+  start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\bridge-watchdog.bat"
 ) else (
   echo [%date% %time%] bridge watchdog already up, skip >> "%LOGDIR%\autostart.log"
 )
@@ -74,14 +89,14 @@ if errorlevel 1 (
 rem ---- 4b. AstrBot plugin sidecar ----
 if exist "%ROOT%\state\astrbot-sidecar\AstrBot\data\cmd_config.json" (
   netstat -ano | findstr /R /C:"127.0.0.1:6199 .*LISTENING" >nul 2>&1
-  if errorlevel 1 start "QQAstrBot" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\astrbot-sidecar-watchdog.bat"
+  if errorlevel 1 start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\astrbot-sidecar-watchdog.bat"
 )
 
 rem ---- 5. local image library ----
 netstat -ano | findstr /R /C:":18902 .*LISTENING" >nul 2>&1
 if errorlevel 1 (
   echo [%date% %time%] starting image library >> "%LOGDIR%\autostart.log"
-  start "ImageLibrary" /MIN /D "%ROOT%" "%NODE%" --use-env-proxy "%ROOT%\repo\bridge\src\image-library-server.mjs"
+  start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-process-launcher.vbs" "%ROOT%" "%NODE%" --use-env-proxy "%ROOT%\repo\bridge\src\image-library-server.mjs"
 ) else (
   echo [%date% %time%] image library already up, skip >> "%LOGDIR%\autostart.log"
 )

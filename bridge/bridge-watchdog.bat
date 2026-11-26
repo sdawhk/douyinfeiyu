@@ -9,7 +9,7 @@ set /a RESTARTS=0
 
 rem Tool API supplies the QQ MCP tools and reconnects independently.
 netstat -ano | findstr /R /C:":3100 .*LISTENING" >nul 2>&1
-if errorlevel 1 start "QQTools" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\tool-service-watchdog.bat"
+if errorlevel 1 start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\tool-service-watchdog.bat"
 
 :loop
 rem Port 3101 is held by the active bot. A second watchdog must not start another QQ listener.

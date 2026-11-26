@@ -1,0 +1,12 @@
+{
+  "name": "dafeiyu-qq-bot-repo",
+  "private": true,
+  "description": "大肥鱼 QQ 机器人工作仓库：postinstall 只做本机 git 钩子配置，没有第三方依赖。",
+  "scripts": {
+    "postinstall": "node scripts/setup-hooks.mjs",
+    "hooks": "node scripts/setup-hooks.mjs",
+    "auto-commit": "node scripts/auto-commit.mjs",
+    "auto-commit:dry": "node scripts/auto-commit.mjs --dry-run",
+    "sync-cabin": "node integrations/cabin-world/sync-from-run.mjs"
+  }
+}

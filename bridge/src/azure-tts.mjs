@@ -30,6 +30,9 @@ export async function synthesizeAzureSpeech(text, config, fetchImpl = fetch) {
 }
 
 export function wantsVoiceReply(input, mode = 'requested', probability = 20, random = Math.random) {
-  return /(?:用语音|语音(?:说|背|朗读|念|复述|回复|回答)|(?:给我)?(?:发|来|录)(?:个|句|条|段)?语音|(?:说|念|朗读|背诵).{0,20}(?:给我听|出来))/i.test(String(input ?? ''))
+  const text = String(input ?? '').toLowerCase().replace(/[\s，。！？、,.!?：:；;“”"'‘’（）()【】\[\]<>《》]/g, '');
+  const directCue = /^(?:语音|声音|音频|语音一下|发语音|发个语音|来段语音|来个语音)$/i.test(text);
+  const voiceIntent = /(?:用|换成|改用|以).{0,8}(?:语音|声音|音频|音色).{0,8}(?:说|讲|读|念|回|回复|回答|告诉|解释|播报)|(?:语音|声音|音频)(?:回复|回答|说|讲|读|念|播报|复述)(?:我|一下|一遍|出来)?|(?:给我|帮我)?(?:发|录|来|说|回|生成|做|整)(?:一个|一段|一条|一句|个|段|条|句)?(?:语音|声音|音频)|(?:说|讲|读|念|朗读|背|背诵|复述|播报).{0,12}(?:给我听|让我听|听听|一遍|出来|出声|开口|用语音|用声音)|(?:读|念|朗读|背|背诵).{0,12}(?:一下|一遍|出来|给我听)|(?:别|不要|不想)(?:再)?(?:打字|发文字)(?:了)?|(?:开口|出声)(?:说|讲|读|念|回答|回复)?/i.test(text);
+  return directCue || voiceIntent
     || mode === 'always' || (mode === 'probability' && random() * 100 < probability);
 }

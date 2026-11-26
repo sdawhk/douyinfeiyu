@@ -28,3 +28,8 @@ tag-watch-state.json
 
 # 外部工具在本目录留下的 8 位随机名临时文件（内容固定 4 字节，无扩展名）
 /[0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_]
+
+# 视频搬运 worker 的运行期锁与心跳（每几秒重写一次，入库会一直显示“有改动”）
+.video-worker.lock
+video-worker-heartbeat.json
+douyin-video-response-*.json

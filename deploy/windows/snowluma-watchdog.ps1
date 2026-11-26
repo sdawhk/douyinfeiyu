@@ -1,6 +1,9 @@
 $ErrorActionPreference = 'Stop'
 $appDir = 'D:\deepseek\snowluma\app'
-$node = Join-Path $appDir 'node.exe'
+# Use the normal-integrity system Node runtime. The bundled node.exe is marked
+# Low Mandatory Level, so Windows blocks it from injecting into the medium-
+# integrity QQ desktop process even though both run as the same user.
+$node = 'C:\Program Files\nodejs\node.exe'
 $entry = Join-Path $appDir 'index.mjs'
 $logPath = 'D:\deepseek\logs\snowluma-watchdog.log'
 $heartbeatPath = 'D:\deepseek\state\snowluma-watchdog-heartbeat.txt'

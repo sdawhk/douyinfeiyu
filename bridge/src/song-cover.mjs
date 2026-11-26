@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inspectMp3Duration } from './song-library.mjs';
 import { childEnv } from './proxy-env.mjs';
+import { SONG_SOURCE_UNAVAILABLE, songSourceError } from './song-source-errors.mjs';
 
 const exec = promisify(execFile);
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -24,6 +25,17 @@ export function parseExistingSongCommand(text, { botNickname = '', botSelf = '',
   const mention = input.match(/^@([^\s@]+)\s+/);
   if (mention && (hasBotMention || mention[1] === botNickname || mention[1] === botSelf || mention[1] === `QQ${botSelf}`)) {
     input = input.slice(mention[0].length).trim();
+  }
+  // QQ 的 @ 提及有时会被桥接拼到正文末尾，避免它污染歌名（如“夜曲@鲸小团”）。
+  const trailingMention = input.match(/@([^\s@]+)$/u);
+  if (trailingMention && (trailingMention[1] === botNickname || trailingMention[1] === botSelf
+      || trailingMention[1] === `QQ${botSelf}` || hasBotMention)) {
+    input = input.slice(0, trailingMention.index).trim();
+  }
+  const directPick = input.match(/^(?:(?:请|麻烦)\s*)?(?:(?:给我|帮我|给大家|帮大家)\s*)?点(?:一首|首)\s*(.+)$/u);
+  if (directPick) {
+    const song = directPick[1].trim().replace(/^[《「]([\s\S]*?)[》」]$/u, '$1').trim();
+    if (song && song.length <= 80) return { mode: 'ai', song, candidate: 1 };
   }
   const command = input.match(/^\/?(搜歌|原唱|翻唱|唱歌)(?:\s+|：|:)([\s\S]*)$/);
   if (command) {
@@ -139,8 +151,18 @@ export function isExactSongMatch(query, title) {
     .test(normalizeSongText(title));
 }
 
-const NOT_VOCAL_SONG = /伴奏|纯音乐|無人聲|无人声|卡拉\s*ok|karaoke|instrumental|off[\s-]?vocal|\bktv\b|导唱|導唱|翻弹|翻彈|钢琴演奏|鋼琴演奏/i;
+const NOT_VOCAL_SONG = /伴奏|纯音乐|無人聲|无人声|卡拉\s*ok|karaoke|instrumental|off[\s-]?vocal|\bktv\b|导唱|導唱|翻弹|翻彈|钢琴演奏|鋼琴演奏|总谱|總譜|鼓谱|鼓譜|吉他谱|吉他譜|简谱|簡譜|五线谱|五線譜|曲谱|曲譜|乐谱|樂譜|谱子|譜子|扒谱|扒譜|分轨|分軌|stems?\b/i;
 const NOT_SONG_VIDEO = /短剧|短劇|全集|电视剧|電視劇|电影解说|電影解說|剧情解说|劇情解說|广播剧|廣播劇|有声书|有聲書|解说|解說|教程|教学|教學|reaction|歌单|歌單|串烧|串燒|合集/i;
+
+export function isVocalSongSource(query, title) {
+  const text = normalizeSongText(title);
+  if (NOT_VOCAL_SONG.test(text) || /純音樂|オルゴール|八音盒|music[\s-]*box/i.test(text)) return false;
+  // 乐器词可能本来就在歌名中（如 Piano Man）；只检查歌名之外的版本说明。
+  const version = text.replace(normalizeSongText(query), '');
+  const instrumental = /\bpiano\b|ピアノ|(?:钢琴|鋼琴)(?:独奏|獨奏|演奏|版)|小提琴独奏|violin\s+(?:solo|cover)/i.test(version);
+  const singing = /弹唱|彈唱|弾き語り|演唱|合唱|歌ってみた|\bvocals?\b|\bsinging\b/i.test(text);
+  return !instrumental || singing;
+}
 
 function reliableSongResults(query, entries, limit) {
   const keywords = songKeywords(query);
@@ -151,7 +173,7 @@ function reliableSongResults(query, entries, limit) {
     const hits = keywords.filter((word) => title.includes(word)).length;
     if (!hits || (keywords.includes('司凤') && hits !== keywords.length)
         || (wantsDj && !/(?:dj|remix|电音|電音|电摇|電搖)/i.test(title))
-        || NOT_VOCAL_SONG.test(title) || NOT_SONG_VIDEO.test(title)
+        || !isVocalSongSource(query, title) || NOT_SONG_VIDEO.test(title)
         || (entry.duration != null && (entry.duration < 45 || entry.duration > 900))) return null;
     const score = hits * 10 + (isExactSongMatch(query, title) ? 30 : 0)
       + (/(?:dj|remix)/i.test(query) && /(?:dj|remix)/i.test(title) ? 5 : 0)
@@ -168,8 +190,12 @@ function allowedVideoUrl(value) {
   try {
     const url = new URL(value);
     const host = url.hostname.toLowerCase();
-    return url.protocol === 'https:' && (
-      (host === 'www.bilibili.com' && /^\/video\/BV[\w]+\/?$/.test(url.pathname))
+    // B 站搜索页给的是 BV，yt-dlp 给的是 av，且常带 http://，两种都要认，
+    // 否则 yt-dlp 这条路的结果会被整批过滤掉（2026-11-26 点歌失败的原因之一）。
+    const bilibili = ['www.bilibili.com', 'bilibili.com', 'm.bilibili.com'].includes(host)
+      && /^\/video\/(?:bv[\w]+|av\d+)\/?$/i.test(url.pathname);
+    return (url.protocol === 'https:' || url.protocol === 'http:') && (
+      bilibili
       || (['www.youtube.com', 'youtube.com'].includes(host) && url.pathname === '/watch')
       || (host === 'youtu.be' && /^\/[\w-]+$/.test(url.pathname))
     );
@@ -196,6 +222,42 @@ async function run(file, args, timeout = 120_000) {
   }
 }
 
+// B 站搜索接口有 wbi 风控：不带 cookie 时同一 IP 会交替返回 412 / 200。
+// 先访问一次首页拿到 buvid3 等 cookie 再请求，实测可以稳定 200。
+// cookie 缓存 30 分钟，正常路径（首次就 200）不会多花一次请求。
+const BILI_COOKIE_TTL_MS = 30 * 60_000;
+let biliCookieCache = { at: 0, cookie: '' };
+
+function biliCookieValid() {
+  return Boolean(biliCookieCache.cookie) && Date.now() - biliCookieCache.at < BILI_COOKIE_TTL_MS;
+}
+
+async function refreshBiliCookie(fetchImpl) {
+  try {
+    const response = await fetchImpl('https://www.bilibili.com/', {
+      headers: { 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(10_000),
+    });
+    const lines = typeof response?.headers?.getSetCookie === 'function' ? response.headers.getSetCookie() : [];
+    const cookie = (Array.isArray(lines) ? lines : [])
+      .map((line) => String(line).split(';')[0].trim()).filter(Boolean).join('; ');
+    if (cookie) biliCookieCache = { at: Date.now(), cookie };
+    return cookie;
+  } catch { return ''; }
+}
+
+async function fetchBiliSearchApi(fetchImpl, keyword, cookie) {
+  const url = `https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=${encodeURIComponent(keyword)}&page=1`;
+  const headers = { 'user-agent': USER_AGENT, referer: 'https://www.bilibili.com/' };
+  if (cookie) headers.cookie = cookie;
+  const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const body = await response.json();
+  if (body.code !== 0) throw new Error(`code=${body.code}`);
+  return (body.data?.result ?? []).filter((item) => /^BV[\w]+$/.test(String(item.bvid ?? '')))
+    .map((item) => ({ title: cleanTitle(item.title), url: `https://www.bilibili.com/video/${item.bvid}`,
+      duration: parseClock(item.duration), source: 'bilibili' })).filter((item) => item.title);
+}
+
 export async function searchExistingSongs(query, { fetchImpl = fetch, runImpl = run, limit = 5 } = {}) {
   const song = String(query ?? '').trim().slice(0, 80);
   if (!song) throw new Error('请提供歌名');
@@ -209,25 +271,32 @@ export async function searchExistingSongs(query, { fetchImpl = fetch, runImpl = 
     else if (results.length && !partialMatches.length) partialMatches = results;
   };
   try {
-    const url = `https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=${encodeURIComponent(searchSong)}&page=1`;
-    const response = await fetchImpl(url, { headers: { 'user-agent': USER_AGENT, referer: 'https://www.bilibili.com/' }, signal: AbortSignal.timeout(20_000) });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const body = await response.json();
-    if (body.code !== 0) throw new Error(`code=${body.code}`);
-    const results = (body.data?.result ?? []).filter((item) => /^BV[\w]+$/.test(String(item.bvid ?? '')))
-      .map((item) => ({ title: cleanTitle(item.title), url: `https://www.bilibili.com/video/${item.bvid}`,
-        duration: parseClock(item.duration), source: 'bilibili' })).filter((item) => item.title);
+    let results;
+    try {
+      results = await fetchBiliSearchApi(fetchImpl, searchSong, biliCookieValid() ? biliCookieCache.cookie : '');
+    } catch (firstError) {
+      const cookie = await refreshBiliCookie(fetchImpl);
+      if (!cookie) throw firstError;
+      // 412 多半是缺 buvid3，补上 cookie 再来一次；只有这一次重试，避免被当成刷接口。
+      results = await fetchBiliSearchApi(fetchImpl, searchSong, cookie);
+    }
     rememberResults(reliableSongResults(song, results, limit));
   } catch (error) { errors.push(`B站接口：${error.message}`); }
-  for (const [prefix, source] of [[`bilisearch${Math.max(limit * 3, 10)}:`, 'bilibili'], [`ytsearch${Math.max(limit * 3, 10)}:`, 'youtube']]) {
+  // B 站走 yt-dlp 时必须解析每个条目（--flat-playlist 只给 id/url，没有标题可用）。
+  for (const plan of [
+    { prefix: `bilisearch${Math.min(Math.max(limit * 2, 5), 8)}:`, source: 'bilibili', flat: false },
+    { prefix: `ytsearch${Math.max(limit * 3, 10)}:`, source: 'youtube', flat: true },
+  ]) {
     try {
-      const raw = await runImpl(YTDLP, [...YTDLP_ARGS, '--no-warnings', '--ignore-errors', '--flat-playlist', '-J', `${prefix}${searchSong}`], 120_000);
+      const args = [...YTDLP_ARGS, '--no-warnings', '--ignore-errors',
+        ...(plan.flat ? ['--flat-playlist'] : []), '-J', `${plan.prefix}${searchSong}`];
+      const raw = await runImpl(YTDLP, args, plan.flat ? 120_000 : 90_000);
       const entries = JSON.parse(raw).entries ?? [];
       const results = entries.filter(Boolean).map((item) => ({ title: cleanTitle(item.fulltitle || item.title),
         url: String(item.webpage_url || item.url || ''), duration: item.duration == null ? null : Number(item.duration),
-        source })).filter((item) => item.title && allowedVideoUrl(item.url));
+        source: plan.source })).filter((item) => item.title && allowedVideoUrl(item.url));
       rememberResults(reliableSongResults(song, results, limit));
-    } catch (error) { errors.push(`${source}：${error.message}`); }
+    } catch (error) { errors.push(`${plan.source}：${error.message}`); }
   }
   if (exactBySource.length) {
     const merged = [];
@@ -307,7 +376,8 @@ export async function makeExistingSongSegments(query, { chunkSeconds = 60, fetch
   if (!existsSync(ffmpeg)) throw new Error(`缺少 ffmpeg：${ffmpeg}`);
   if (!existsSync(ytdlp)) throw new Error(`缺少 yt-dlp 运行环境：${ytdlp}`);
   const results = await searchImpl(query, { fetchImpl, runImpl, limit: 8 });
-  const candidates = results.filter((item) => allowedVideoUrl(item.url) && isExactSongMatch(query, item.title));
+  const candidates = results.filter((item) => allowedVideoUrl(item.url) && isExactSongMatch(query, item.title)
+    && isVocalSongSource(query, item.title));
   if (!candidates.length) throw new Error('没有找到与所点歌名完全匹配的歌曲音源');
   await mkdir(WORK_ROOT, { recursive: true });
   const work = await mkdtemp(path.join(WORK_ROOT, 'song-full-'));
@@ -340,7 +410,7 @@ export async function makeExistingSongSegments(query, { chunkSeconds = 60, fetch
         console.warn(`[song-cover] full source candidate ${index + 1}/${candidates.length} failed:`, item.source, item.title, error?.message ?? error);
       }
     }
-    if (!selected) throw new Error(`所有 ${candidates.length} 个完全匹配音源都无法完整核验或下载`);
+    if (!selected) throw songSourceError(SONG_SOURCE_UNAVAILABLE, `所有 ${candidates.length} 个完全匹配音源都无法完整核验或下载`);
     const count = Math.ceil(duration / chunkSeconds);
     const tailSeconds = duration - (count - 1) * chunkSeconds;
     const secondLastSeconds = tailSeconds < 5 && count > 1

@@ -202,7 +202,10 @@ test('司凤版搜索接受倒序和括号标题，并兼容司风别字', async
     }
   });
   assert.deepEqual(found.map((item) => item.title), ['司凤版雨爱']);
-  assert.ok(calls.every((call) => call.includes('雨爱司凤版') || call.includes(encodeURIComponent('雨爱司凤版'))));
+  // 412 后会补抓一次 B 站首页 cookie，那一条不属于搜索请求，单独排除。
+  const searchCalls = calls.filter((call) => call !== 'https://www.bilibili.com/');
+  assert.ok(searchCalls.length > 0);
+  assert.ok(searchCalls.every((call) => call.includes('雨爱司凤版') || call.includes(encodeURIComponent('雨爱司凤版'))));
 });
 
 test('vocal preflight refuses instrumental stems and keeps clear singing', () => {
@@ -296,4 +299,53 @@ test('a continuation cuts the next 30 seconds from the same source', async () =>
   assert.equal(calls[1][calls[1].indexOf('-ss') + 1], '60');
   assert.equal(clip.startSeconds, 60);
   assert.equal(clip.url, 'https://www.youtube.com/watch?v=abc123');
+});
+
+test('B站 412 风控时补抓 cookie 重试，并在进程内复用', async () => {
+  const seenCookies = [];
+  let apiAttempts = 0;
+  const fetchImpl = async (url, init = {}) => {
+    if (url === 'https://www.bilibili.com/') {
+      const headers = new Headers();
+      headers.append('set-cookie', 'buvid3=TEST-BUVID3-1infoc; Path=/; Domain=.bilibili.com');
+      headers.append('set-cookie', 'b_nut=1700000000; Path=/; Domain=.bilibili.com');
+      return new Response('<html></html>', { status: 200, headers });
+    }
+    apiAttempts++;
+    seenCookies.push(String(init.headers?.cookie ?? ''));
+    // 第一次故意 412，带上 cookie 之后才给正常结果。
+    if (!init.headers?.cookie) return new Response('blocked', { status: 412 });
+    return Response.json({ code: 0, data: { result: [
+      { title: '<em>最长的电影</em> 周杰伦 无损', bvid: 'BV1AAA', duration: '3:56' }
+    ] } });
+  };
+  const runImpl = async () => JSON.stringify({ entries: [] });
+
+  const first = await searchExistingSongs('最长的电影 周杰伦', { fetchImpl, runImpl });
+  assert.equal(apiAttempts, 2, '412 后应该重试一次');
+  assert.equal(seenCookies[0], '', '首次不带 cookie');
+  assert.match(seenCookies[1], /buvid3=TEST-BUVID3-1infoc/);
+  assert.deepEqual(first.map((item) => item.url), ['https://www.bilibili.com/video/BV1AAA']);
+
+  // cookie 已缓存：下一次直接带上，不再先吃一个 412。
+  await searchExistingSongs('最长的电影 周杰伦', { fetchImpl, runImpl });
+  assert.equal(apiAttempts, 3);
+  assert.match(seenCookies[2], /buvid3=TEST-BUVID3-1infoc/);
+});
+
+test('yt-dlp 兜底接受 av 号和 http 链接（B站搜索结果的实际形态）', async () => {
+  const qq = '不存在的歌名XYZ';
+  const found = await searchExistingSongs(qq, {
+    fetchImpl: async () => new Response('blocked', { status: 412 }),
+    runImpl: async (_file, args) => {
+      if (!args.at(-1).startsWith('bilisearch')) return JSON.stringify({ entries: [] });
+      return JSON.stringify({ entries: [
+        { title: `${qq} 官方MV`, webpage_url: `http://www.bilibili.com/video/av117292738352739`, duration: 235 },
+        { title: `${qq} 伴奏`, webpage_url: 'http://www.bilibili.com/video/av999', duration: 235 },
+        { title: `${qq} 别处`, webpage_url: 'https://example.com/video/1', duration: 235 }
+      ] });
+    }
+  });
+  assert.deepEqual(found.map((item) => item.url), [`http://www.bilibili.com/video/av117292738352739`]);
+  assert.equal(found[0].source, 'bilibili');
 });

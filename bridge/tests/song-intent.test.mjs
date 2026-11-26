@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planSongIntake, shouldResolveSongIntent, parseNamedSongCommand, parseSongIntentReply, resolveSongIntent, buildSongCommand, formatSongNotFoundReply, formatSongFoundReply, isVagueSongName, isExplicitSongCommand, parseVagueSingRequest, pickVagueSong, formatVagueSongReply, formatVagueSongEmpty } from '../src/song-intent.mjs';
+import { planSongIntake, shouldResolveSongIntent, parseNamedSongCommand, parseSongIntentReply, resolveSongIntent, buildSongCommand, formatSongNotFoundReply, formatSongFoundReply, isVagueSongName, isExplicitSongCommand, parseVagueSingRequest, pickVagueSong, formatVagueSongReply, formatVagueSongEmpty, planSongIntentFallback } from '../src/song-intent.mjs';
 import { parseExistingSongCommand } from '../src/song-cover.mjs';
 
 const cover = (text) => parseExistingSongCommand(text);
@@ -46,7 +46,7 @@ test('模糊表达走模型并抽到 {action, songName}', async () => {
   });
   assert.equal(intent.intent, 'song_request');
   assert.equal(intent.action, 'replay');
-  assert.equal(intent.songName, '雨爱司凤版');
+  assert.equal(intent.songName, '雨爱 司凤版');
   assert.equal(buildSongCommand(intent), '再发一遍');
 
   const coverIntent = parseSongIntentReply('{"intent":"song_request","action":"cover","songName":"《七里香》","version":"","ack":"好，马上唱。"}');
@@ -55,7 +55,7 @@ test('模糊表达走模型并抽到 {action, songName}', async () => {
   assert.equal(buildSongCommand(coverIntent), '翻唱 七里香');
 
   const fullIntent = parseSongIntentReply('{"intent":"song_request","action":"full","songName":"雨爱","version":"司凤版"}');
-  assert.equal(buildSongCommand(fullIntent), '唱完整首 雨爱司凤版');
+  assert.equal(buildSongCommand(fullIntent), '唱完整首 雨爱 司凤版');
 
   const anotherVersion = parseSongIntentReply('{"intent":"song_request","action":"search","songName":"雨爱","version":"","ack":"好的，换个版本找找。"}');
   assert.equal(buildSongCommand(anotherVersion), '搜歌 雨爱');
@@ -174,4 +174,27 @@ test('泛指唱歌的说明与兜底文案', () => {
   assert.match(formatVagueSongReply({ title: '夜曲', smallLibrary: true, random: () => 0 }), /就这几首/);
   assert.match(formatVagueSongReply({ title: '', random: () => 0 }), /《这首》/);
   assert.match(formatVagueSongEmpty(), /点一首/);
+});
+
+test('意图模型不可用时不拒绝点歌：有歌名就继续做，没歌名才追问', () => {
+  // 真实事故复现：模型池上游断掉时，「唱一首最长的电影，周杰伦的」被整条拒绝。
+  const asked = '唱一首最长的电影，周杰伦的';
+  const parsed = cover(asked);
+  assert.equal(planSongIntake(asked, { parsedCover: parsed }).path, 'model');
+  const fallback = planSongIntentFallback({ text: asked, parsedCover: parsed });
+  assert.equal(fallback.command, '翻唱 最长的电影');
+  assert.equal(fallback.songName, '最长的电影');
+
+  // 明确命令同样能兜住。
+  assert.equal(planSongIntentFallback({ text: '唱 夜曲', parsedCover: cover('唱 夜曲') }).command, '翻唱 夜曲');
+  assert.equal(planSongIntentFallback({ text: '给我唱首雨爱吧', parsedCover: cover('给我唱首雨爱吧') }).command, '翻唱 雨爱');
+  // 带口语助词的歌名要修掉。
+  assert.equal(planSongIntentFallback({ text: '唱一首夜曲的', parsedCover: cover('唱一首夜曲的') }).songName, '夜曲');
+
+  // 纯风格、指代、评价不能猜成歌名，只能追问。
+  for (const text of ['来首抒情的', '唱刚才那首', '唱得挺好啊']) {
+    const result = planSongIntentFallback({ text, parsedCover: cover(text) });
+    assert.equal(result.command, undefined, text);
+    assert.match(result.reply, /哪首/, text);
+  }
 });

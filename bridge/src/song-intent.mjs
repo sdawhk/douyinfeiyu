@@ -12,8 +12,6 @@
 //
 // 本模块只做判定与文本拼装，不接触音频、不发消息，便于单测。
 
-const CONTEXT_REFERENCE_RE = /(?:刚才|刚刚|上一首|那首|这首歌|这个版本|那个版本|换一首|换个版本|换一个版本|再来一遍|再放一遍|再发一遍|重发)/u;
-
 // 只在「确实像在点歌」的说法上才走模型，避免纯闲聊提到“歌”也付一次模型调用的延迟。
 const MODEL_MARKER_RE = /(?:来一首|来首|点歌|点唱|翻唱|原唱|搜歌|唱一首|唱一下|唱首|唱给我|给我唱|帮我唱|想听你唱|听你唱|想听(?!你|您|说|解释|讲|听|看|问)|发整首|唱整首|唱完整首|接着唱|再来一段|下一段|续唱|用语音唱|换一首|换个版本|换一个版本|换一种|再放一遍|再发一遍|重发刚才|刚才那首|刚刚那首|上一首|想听那个|想听那首|想听这首|想听这个|点《)/u;
 
@@ -33,6 +31,8 @@ export const SONG_INTENT_SYSTEM_PROMPT = [
   '{"intent":"song_request或not_song","action":"cover|original|search|replay|continuation|full|clarify","songName":"","version":"","ack":""}',
   '规则：',
   '- 只有当前消息确实在要求机器人现在唱歌/放歌/找歌时 intent=song_request。讨论歌曲、评价好不好听、问歌词或歌手、说自己会唱歌、转述别人的话，都算 not_song。',
+  '- 尤其注意聊天语境：歌曲或翻唱发出后，“唱挺好”“唱得挺好”“唱得不错”“这首好听”等是评价，不是要求再唱；“唱挺好”也不能把“挺好”当歌名。',
+  '- 只有祈使/请求语气明确指向现在要执行点歌时才判 song_request；仅出现“唱/歌”字样、短句像歌名，都不足以触发制作。',
   '- action：cover=用机器人音色翻唱（默认）；original=要听原唱；search=只想看候选音源，或要求“换一版/换个版本/换一个音源”；full=要整首；replay=重发刚才那首；continuation=接着唱下一段；clarify=想听歌但没给歌名、只说了风格或情绪。',
   '- “换一个版本/换一版/换个音源”用 search：桥接现有能力只能列出其他候选，由用户再指定 #序号，不能凭空换一版。',
   '- songName 只写歌名本身：去掉书名号、版本词和候选序号。用【最近对话】或【最近一首歌】补全“刚才那首/上一首/再来一遍/换个版本”等指代；不要编造没出现过的歌名。',
@@ -73,7 +73,9 @@ export function parseSongIntentReply(raw) {
   const version = typeof data.version === 'string'
     ? data.version.normalize('NFKC').replace(/[《》「」“”]/g, '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 12) : '';
   let songName = cleanSongName(data.songName);
-  if (songName && version && !songName.includes(version)) songName = `${songName}${version}`;
+  // 歌名和版本必须用空格隔开：「最长的电影周杰伦版」这种连写串在 B 站标题里根本不存在，
+  // 搜索会因为整串匹配不上而判定“没有找到歌曲”，点歌直接失败（2026-11-26 实测）。
+  if (songName && version && !songName.includes(version)) songName = `${songName} ${version}`;
   if (action === 'clarify') songName = '';
   if (!songName && action !== 'replay' && action !== 'continuation' && action !== 'clarify') action = 'clarify';
   return { intent, action, songName, version, ack: cleanAck(data.ack) };
@@ -110,6 +112,46 @@ export function isVagueSongName(song) {
   if (/^(?:那首|那个|这首|这个|刚才那首|刚刚那首|上一首|前面那首|刚才的|你说的|你说的那首|那首歌)$/u.test(name)) return true;
   if (/^[\p{Script=Han}]{1,8}的$/u.test(name)) return true;
   return /^(?:抒情|欢快|伤感|温柔|轻快|慢歌|快歌|摇滚|民谣|流行|情歌|儿歌|古风|国风|dj)/iu.test(name);
+}
+
+// ---- 意图模型不可用时的降级 ----
+// 背景：意图模型跑在本机模型池（18901），池子上游一旦断（端口漂移/额度耗尽），
+// resolveSongIntent 只能返回 null。此前调用方把 null 一律当成「点歌识别不可用」
+// 直接回一句拒绝，于是「唱一首最长的电影」这种歌名写得清清楚楚的请求也被挡回去，
+// 用户看到的就是「大肥鱼说他唱不了」。
+// 这里把降级做成分级：能确定性解析出歌名就继续制歌，只有纯风格/指代才追问。
+
+// 评价类说法不能当歌名（「唱得挺好」会被 parseExistingSongCommand 剥成「得挺好」）。
+const EVALUATIVE_SONG_RE = /(?:唱得|唱挺好|唱的好|唱的不|好听|难听|不错|还行|厉害|牛啊|绝了)/u;
+
+function cleanFallbackSong(value) {
+  let song = String(value ?? '').normalize('NFKC').trim();
+  if (!song) return '';
+  // 「最长的电影，周杰伦的」→ 去掉逗号后面补的歌手说明
+  song = song.replace(/[，,、;；]\s*[^，,、;；]{1,16}$/u, '').trim();
+  song = song.replace(/(?:吧|呗|呀|啊|嘛|哦|呢|哈)$/u, '').trim();
+  song = song.replace(/[《》「」“”"']/g, '').trim();
+  // 「夜曲的」→「夜曲」；只有一个字时保留，避免把歌名削空
+  if (song.length > 2 && song.endsWith('的')) song = song.slice(0, -1).trim();
+  if (!song || song.length > 40) return '';
+  return song;
+}
+
+/** 降级时给用户的一句自然话；不说「服务不可用」，也不假装已经开工。 */
+export const SONG_INTENT_OFFLINE_REPLY = '哪首？歌名说全我就做，比如“唱 夜曲”。';
+
+/**
+ * 意图模型不可用时的兜底决策：
+ *   { command } 有确定歌名，继续走确定性翻唱链路
+ *   { reply }   只有风格/指代/评价，用自然追问收住，不做推测性制歌
+ */
+export function planSongIntentFallback({ text = '', parsedCover = null } = {}) {
+  // 只按清洗后的歌名判模糊：「唱一首夜曲的」洗成「夜曲」可用，
+  // 「来首抒情的」洗成「抒情」仍属风格词，继续追问。
+  const raw = cleanFallbackSong(parsedCover?.song);
+  const usable = raw && !isVagueSongName(raw) && !EVALUATIVE_SONG_RE.test(String(text ?? ''));
+  if (usable) return { command: `翻唱 ${raw}`.slice(0, 120), songName: raw };
+  return { reply: SONG_INTENT_OFFLINE_REPLY };
 }
 
 // ---- 泛指唱歌：「唱首歌 / 来一首 / 唱一个」这类没给歌名的请求 ----
@@ -196,7 +238,7 @@ export function shouldResolveSongIntent(text, { hasLastSong = false } = {}) {
 
 /**
  * 入口决策：
- * fast  = 现有确定性链路，直接执行
+ * fast  = 明确命令直接执行
  * vague = 没给歌名的泛指唱歌请求，直接从已有成品里随机发
  * model = 交给意图模型做判定和抽取
  * none  = 普通聊天，继续走原来的模型对话
@@ -208,10 +250,8 @@ export function planSongIntake(text, { parsedCover = null, hasLastSong = false }
   if (isExplicitSongCommand(value)) return { path: 'fast' };
   if (parsedCover) {
     if (!parsedCover.song) return { path: 'fast' };
-    if (isVagueSongName(parsedCover.song) || CONTEXT_REFERENCE_RE.test(value)) {
-      return shouldResolveSongIntent(value, { hasLastSong }) ? { path: 'model' } : { path: 'fast' };
-    }
-    return { path: 'fast' };
+    // 裸口语（如“唱挺好 / 唱夜曲 / 点一首夜曲”）先看当前语境，禁止解析器直接开制歌任务。
+    return { path: 'model' };
   }
   if (shouldResolveSongIntent(value, { hasLastSong })) return { path: 'model' };
   return { path: 'none' };

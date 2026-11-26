@@ -114,7 +114,7 @@ test('request file is queued and the response round-trip works', async () => {
     const payload = JSON.parse(readFileSync(join(paths.queueDir, queued[0]), 'utf8'));
     assert.equal(payload.id, id);
     assert.deepEqual(payload.urls, ['https://v.douyin.com/abc123/']);
-    assert.equal(payload.maxVideoMB, 95);
+    assert.equal(payload.maxMB, 95);
     // 模拟 worker 写响应，然后等待方应该读到并清掉响应文件。
     const sleep = () => new Promise((resolve) => setTimeout(resolve, 30));
     setTimeout(() => {

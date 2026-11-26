@@ -51,3 +51,7 @@ config.json
 *.bak.*
 # 带时间戳的备份，如 start-bot.bat.bak-20261105
 *.bak-*
+
+# 抖音逐步浏览的本机进程间请求和回执
+/douyin_personal_share/direct-browse-request*.json
+/douyin_personal_share/direct-browse-response-*.json

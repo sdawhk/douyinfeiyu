@@ -221,7 +221,7 @@ test('状态迁移为 v2，旧字段被忽略', () => {
   assert.deepEqual(state.entries, [{ time: '14:05', chars: 26 }]);
   assert.equal(state.autoCount, 0);
   assert.equal(state.chatTurns, 0);
-  assert.deepEqual(state.used, { douyinAt: 0, songAt: 0, chatAt: 0 });
+  assert.deepEqual(state.used, { douyinAt: 0, songAt: 0, cabinAt: 0, chatAt: 0 });
 });
 
 test('23:30 兜底只在当天 0 条时触发，且当天只做一次', () => {
@@ -269,7 +269,7 @@ test('事实层按日期和 sinceAt 过滤，不读群聊，不输出链接和�
   assert.equal(whole.douyin[0].title, '早上的视频');
   const prompt = factsToPromptText(whole);
   assert.doesNotMatch(prompt, /不该出现的作者|douyin\.com|#治愈/);
-  assert.match(prompt, /主动问候/);
+  assert.match(prompt, /主动联系/);
   assert.ok(collectSourcePhrases(whole).includes('你今天想写日记吗？'));
 
   const since = collectDiaryFacts({ dayKey: '2026-11-06', ownerId: '1668389572', sinceAt: at(17),

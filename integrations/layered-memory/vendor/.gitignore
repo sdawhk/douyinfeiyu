@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Runtime data — never commit. A fresh clone bootstraps these on first use.
+data/
+state/
+patrol/
+logs/
+*.lock

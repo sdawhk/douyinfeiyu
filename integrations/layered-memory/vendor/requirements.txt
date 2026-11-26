@@ -1,0 +1,11 @@
+# Core runtime dependencies.
+#
+# The memory model itself is standard-library only. `filelock` is needed for
+# cross-process locking on the data files; `requests` is needed only when an
+# embedding or distillation endpoint is configured.
+
+filelock>=3.13
+
+# Optional: only required if you point OLLAMA_EMBED_URL or
+# DISTILLATION_BASE_URL at an HTTP service.
+requests>=2.31

@@ -74,6 +74,21 @@ test('group turns identify each speaker and keep self-descriptions with that spe
   assert.doesNotMatch(first, /2427256325|QQ 456/);
 });
 
+test('allowed group interjections may join relevant conversation but can still stay silent', () => {
+  const prompt = groupTurnPrompt({ groupId: '123', botSelf, senderId: '456',
+    senderName: '群友甲', text: '这家店真不错', canInterject: true });
+  assert.match(prompt, /只代表可以评估，不代表必须回复/);
+  assert.match(prompt, /正在聊的话题/);
+  assert.match(prompt, /只输出 \[SILENT\]/);
+  assert.match(prompt, /认同并说出具体理由/);
+  assert.match(prompt, /部分认同、补充边界/);
+  assert.match(prompt, /不认同并给出理由/);
+  assert.match(prompt, /先核实\/追问/);
+  assert.match(prompt, /没有有用补充时就沉默/);
+  assert.match(prompt, /不要为了显得独立而唱反调/);
+  assert.match(prompt, /不要编经历当论据/);
+});
+
 test('unaddressed group images stay silent while direct mentions and replies to the bot are processed', () => {
   assert.equal(shouldSkipUnaddressedGroupMedia({ isGroup: true, text: '', mediaCount: 1, references: {}, botSelf }), true);
   assert.equal(shouldSkipUnaddressedGroupMedia({ isGroup: true, text: '', mediaCount: 1,

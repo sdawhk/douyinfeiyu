@@ -1,0 +1,32 @@
+#!/bin/sh
+# 提交前检查：小屋世界桥的「运行目录」和「工作区副本」是否已经漂移。
+#
+# 桥代码只有在发布包里改才会生效，所以工作区那份经常落后。
+# 有漂移就拦住提交，提示先跑同步脚本；运行目录不存在（换机器/没装游戏）则直接放行。
+#
+# 紧急跳过：git commit --no-verify
+
+ROOT=$(git rev-parse --show-toplevel)
+SCRIPT="$ROOT/integrations/cabin-world/sync-from-run.mjs"
+
+[ -f "$SCRIPT" ] || exit 0
+command -v node >/dev/null 2>&1 || { echo "[pre-commit] 没找到 node，跳过桥代码漂移检查"; exit 0; }
+
+node "$SCRIPT" --check
+code=$?
+
+if [ "$code" -eq 1 ]; then
+  echo ""
+  echo "[pre-commit] 桥代码没同步：上面带 + / ~ 的文件运行目录里已经改了，工作区还是旧的。"
+  echo "            先执行  node integrations/cabin-world/sync-from-run.mjs"
+  echo "            再 git add integrations/cabin-world 一起提交。"
+  echo "            确认要跳过：git commit --no-verify"
+  exit 1
+fi
+
+if [ "$code" -eq 2 ]; then
+  echo "[pre-commit] 运行目录不存在，跳过桥代码漂移检查。"
+  exit 0
+fi
+
+exit 0

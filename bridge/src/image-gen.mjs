@@ -8,6 +8,9 @@ import { inspectDrawPrompt, shouldBlockImageStorage } from './image-content-poli
 import { sha256Of, writeImageMeta } from './image-gen-meta.mjs';
 import { measureComposition, measureHeadBodyRatio, planOutpaintOffsets } from './image-composition.mjs';
 import { outpaintImage, OUTPAINT_MODEL, OUTPAINT_COST_CNY } from './image-outpaint.mjs';
+import { ensureMonochrome } from './image-monochrome.mjs';
+import { RENDER_STYLES, RENDER_STYLE_NAMES, RENDER_STYLE_VERSION, normalizeRenderStyle, assertRenderStyleNotes, applyRenderStyleLayers, renderStyleNegativeTerms } from './image-render-style.mjs';
+export { RENDER_STYLES, RENDER_STYLE_NAMES, RENDER_STYLE_VERSION, normalizeRenderStyle } from './image-render-style.mjs';
 
 // ── 分层提示词模板（2026-11 针对 qwen-image-3.0 重写）────────────────────────
 // 九层可独立替换，拼装顺序固定：quality → character → faceStyle → composition → hairstyle → vibe → expression → clothing → lighting → background。
@@ -69,7 +72,7 @@ export function strengthenProportionPrompt(parts = {}) {
   const suffix = `【严格比例】${PROPORTION_RETRY_LOCK}`;
   const room = PROMPT_BUDGET.positive.max - measurePromptChars({ positive: `${base}；` }).positive;
   const positive = room > 0 ? `${base}；${Array.from(suffix).slice(0, room).join('')}` : base;
-  return { positive, negative: String(parts.negative ?? ''), descriptionTrimmed: parts.descriptionTrimmed === true };
+  return { ...parts, positive, negative: String(parts.negative ?? ''), descriptionTrimmed: parts.descriptionTrimmed === true };
 }
 
 export const PROMPT_LAYER_LABELS = {
@@ -653,7 +656,7 @@ export function pickReferenceImages(config = {}, framing) {
 // ── 出图决策：景别/参考图/分层/负向只在一个地方定稿 ────────────────────────
 // 调用方只交原始参数，这里先把请求级覆盖合进配置再归一化一次；
 // 之后 provider 链、promptLayers、negative、参考图、meta 全部读同一份结果。
-const DRAW_OVERRIDE_FIELDS = ['framing', 'outfit', 'tail', 'expression', 'vibe', 'hairstyle', 'stylePreset'];
+const DRAW_OVERRIDE_FIELDS = ['framing', 'outfit', 'tail', 'expression', 'vibe', 'hairstyle', 'stylePreset', 'renderStyle'];
 
 /** '' 与 'auto' 都算未传，不能覆盖配置。 */
 function hasDrawOverride(value) {
@@ -667,6 +670,7 @@ export function applyRequestOverrides(rawConfig = {}, request = {}) {
   for (const field of DRAW_OVERRIDE_FIELDS) {
     if (hasDrawOverride(request[field])) raw[field] = request[field];
   }
+  if (hasDrawOverride(request.renderStyle)) raw.renderStyleSource = 'request';
   // 显式换景别必须重新判定来源，不能继承上游配置里的 auto。
   if (hasDrawOverride(request.framing)) raw.framingSource = 'explicit';
   if (hasDrawOverride(request.size)) {
@@ -702,6 +706,10 @@ function referenceLabel(item) {
 export function resolveDrawPlan({ request = {}, config = {} } = {}) {
   const framing = normalizeFraming(config.framing);
   const plan = {
+    renderStyle: config.renderStyle || 'legacy',
+    renderStyleSource: config.renderStyleSource || 'default',
+    renderStyleVersion: RENDER_STYLE_VERSION,
+    effectiveFaceStyle: config.effectiveFaceStyle || config.faceStyle,
     framing,
     framingSource: config.framingSource === 'explicit' ? 'explicit' : 'auto',
     referenceImages: [],
@@ -1293,7 +1301,7 @@ export function normalizeImageGenChain(raw = {}) {
   const chain = entries.map((entry) => {
     const entryProvider = entry.provider || raw.provider || DEFAULT_PROVIDER;
     const provider = normalizeProvider(entryProvider);
-    const merged = { ...raw, ...entry, provider: entryProvider };
+    const merged = { ...raw, ...entry, provider: entryProvider, renderStyle: base.renderStyle, renderStyleSource: base.renderStyleSource };
     delete merged.chain;
     // 同 provider 的链项（如智谱免费档 → 付费档）沿用主配置的 Key/baseUrl；
     // 跨 provider 的链项只认自己声明的字段，没声明就用该 provider 的默认值。
@@ -1348,7 +1356,10 @@ export async function generateImage(request = {}, dependencies = {}) {
   // 唯一决策点：景别、参考图、分层、负向、尺寸只在这里算一次。
   const plan = resolveDrawPlan({ request, config });
   logger(`[imagegen] plan framing=${plan.framing}(${plan.framingSource}) refs=${plan.referenceImages.length}`
-    + ` files=[${plan.referenceFiles.join(',')}] outfit=${config.outfit} preset=${config.stylePreset} size=${plan.size}`);
+    + ` files=[${plan.referenceFiles.join(',')}] outfit=${config.outfit} preset=${config.stylePreset} renderStyle=${plan.renderStyle} size=${plan.size}`);
+  if (plan.renderStyle !== 'legacy' && request.prompt) {
+    throw new Error('新画风请使用 description，不能用整段 prompt 绕过画风分层');
+  }
   // 表情优先级：显式 request.expression → 对话语境 request.contextText → 配置（默认温柔浅笑）。
   const expressionChoice = resolveExpression({ expression: request.expression, context: request.contextText });
   // 调用方已自行判定来源（显式传参/语境推断/默认）时以调用方为准，仅用于元数据回看。
@@ -1370,12 +1381,15 @@ export async function generateImage(request = {}, dependencies = {}) {
   if (styleLayered && (hairLayer !== plan.promptLayers.hairstyle || expressionChoice.name !== config.expression)) {
     const layers = { ...plan.promptLayers, hairstyle: hairLayer };
     if (expressionChoice.name !== config.expression) layers.expression = expressionLayerFor(expressionChoice.name);
-    stylePrompt = assemblePromptLayers(layers);
+    stylePrompt = assemblePromptLayers(applyRenderStyleLayers(layers, {
+      renderStyle: plan.renderStyle, framing: plan.framing, backgroundDetail: config.backgroundDetail,
+      styleNotes: config.styleNotes, fabricText: FABRICS[CLOTHING_POOL[config.outfit]?.fabric]?.text
+    }));
   }
   const promptParts = request.prompt
     ? asPromptParts(request.prompt)
     : buildPromptParts(request.description, stylePrompt, plan.negativePrompt,
-      plan.promptLayers.character || config.characterPrompt, { logger });
+      plan.promptLayers.character || config.characterPrompt, { logger, renderStyle: plan.renderStyle });
   // 发出前先量一次实际字符数并断言；超限直接失败，不再让接口静默截断。
   const promptChars = assertPromptBudget(promptParts);
   logger(`[imagegen] prompt-chars positive=${promptChars.positive} negative=${promptChars.negative}`);
@@ -1429,6 +1443,16 @@ export async function generateImage(request = {}, dependencies = {}) {
   let providerMeta = {};
   let failure = null;
   const attempts = [];
+  // 只记实际请求中的提示词，不记录 headers、密钥或参考图 base64。
+  const providerPrompts = [];
+  const onRequest = (candidate, init) => {
+    if (!init.body) return;
+    const body = JSON.parse(init.body);
+    const positive = body.prompt ?? body.input?.messages?.[0]?.content?.find((item) => item.text)?.text ?? '';
+    const negative = body.negative_prompt ?? body.parameters?.negative_prompt ?? '';
+    providerPrompts.push({ provider: candidate.provider, model: body.model,
+      positive, negative, promptChars: measurePromptChars({ positive, negative }), seedSent: Object.hasOwn(body, 'seed') });
+  };
   let referenceSkipped = 0;
 
   for (let index = 0; index < chain.length; index += 1) {
@@ -1454,7 +1478,7 @@ export async function generateImage(request = {}, dependencies = {}) {
     logger(`[imagegen] start provider=${candidate.provider} tier=${candidate.tier} model=${candidate.model}`
       + ` size=${candidate.size} refs=${references.length} seed=${seed} chat=${seat}`);
     try {
-      const response = await fetchProviderImage(candidate, promptParts, { seed, references }, fetchImpl, sleep);
+      const response = await fetchProviderImage(candidate, promptParts, { seed, references, onRequest }, fetchImpl, sleep);
       ({ buffer, contentType, ...providerMeta } = await readProviderImage(response, candidate, fetchImpl, candidate.timeoutMs));
       if (!buffer?.length) throw new Error('provider returned empty image');
       chosen = candidate;
@@ -1521,9 +1545,12 @@ export async function generateImage(request = {}, dependencies = {}) {
   // 头身比 > maxHeads 就带强化约束重画一次；仍超标只标 proportion-outlier 写进 meta，不再重试。
   const proportionConfig = config.proportionCheck || normalizeProportionCheckConfig();
   const proportionImpl = dependencies.measureHeadBodyRatio || measureHeadBodyRatio;
-  let proportion = proportionImpl(buffer);
+  const proportionApplicable = plan.renderStyle !== 'mono_manga';
+  let proportion = proportionApplicable ? proportionImpl(buffer) : null;
   const proportionRecord = {
-    enabled: proportionConfig.enabled,
+    enabled: proportionConfig.enabled && proportionApplicable,
+    applicable: proportionApplicable,
+    ...(proportionApplicable ? {} : { reason: 'monochrome-skin-detector-not-applicable' }),
     maxHeads: proportionConfig.maxHeads,
     first: proportion,
     retried: false,
@@ -1535,7 +1562,7 @@ export async function generateImage(request = {}, dependencies = {}) {
     logger(`[imagegen] proportion-retry heads=${proportion.headBodyRatio} max=${proportionConfig.maxHeads}`
       + ` prompt-chars positive=${measurePromptChars(retryParts).positive} negative=${measurePromptChars(retryParts).negative}`);
     try {
-      const response = await fetchProviderImage(chosen, retryParts, { seed, references }, fetchImpl, sleep);
+      const response = await fetchProviderImage(chosen, retryParts, { seed, references, onRequest }, fetchImpl, sleep);
       const retry = await readProviderImage(response, chosen, fetchImpl, chosen.timeoutMs);
       const retryBuffer = retry.buffer;
       if (!retryBuffer?.length) throw new Error('proportion retry returned empty image');
@@ -1680,6 +1707,18 @@ export async function generateImage(request = {}, dependencies = {}) {
     }
   }
 
+  let colorProcessing = null;
+  if (plan.renderStyle === 'mono_manga') {
+    try {
+      const processed = await (dependencies.ensureMonochrome || ensureMonochrome)(buffer, { maxOutputBytes });
+      buffer = processed.buffer;
+      mime = processed.mime;
+      colorProcessing = { applied: true, method: processed.method };
+    } catch (error) {
+      logger(`[imagegen] fail reason=render-style-processing ${String(error.message).slice(0, 120)}`);
+      return { ok: false, reason: 'render-style-processing', error: String(error.message), attempts, ms: Date.now() - started };
+    }
+  }
   let filePath = '';
   try {
     const dir = join(stateDir, localDayKey(now));
@@ -1704,6 +1743,12 @@ export async function generateImage(request = {}, dependencies = {}) {
     prompt,
     negativePrompt: promptParts.negative,
     promptChars,
+    providerPrompts,
+    renderStyle: plan.renderStyle,
+    renderStyleSource: plan.renderStyleSource,
+    renderStyleVersion: plan.renderStyleVersion,
+    effectiveFaceStyle: plan.effectiveFaceStyle,
+    colorProcessing,
     description: String(request.description ?? ''),
     descriptionTrimmed: promptParts.descriptionTrimmed === true,
     droppedLayers: Array.isArray(promptParts.droppedLayers) ? promptParts.droppedLayers : [],
@@ -1764,7 +1809,7 @@ export async function generateImage(request = {}, dependencies = {}) {
     + ` bytes=${buffer.length} mime=${mime} seed=${seed} refs=${references.length} moderation=pass`
     + ` composition=${composition ? `${(composition.personRatio * 100).toFixed(2)}%` : 'unmeasurable'}`
     + ` heads=${proportion ? proportion.headBodyRatio : 'unmeasurable'}`
-    + ` proportion=${proportionRecord.triggered ? (proportionRecord.outlier ? 'outlier' : 'retried-ok') : 'ok'}`
+    + ` proportion=${!proportionApplicable ? 'not-applicable' : proportionRecord.triggered ? (proportionRecord.outlier ? 'outlier' : 'retried-ok') : 'ok'}`
     + ` outpaint=${outpaintRecord.triggered ? (outpaintRecord.ok ? 'applied' : 'failed') : (outpaintRecord.reason || 'skipped')}`
     + ` file=${filePath} meta=${metaPath || '-'}`);
   return {
@@ -1871,7 +1916,9 @@ function normalizePromptLayers(raw, preset, options = {}) {
   // 两段固定约束：只取参考图身份、以及可验收的硬条件。
   layers.keepUnchanged = nearShot ? NEAR_SHOT_REFERENCE : REFERENCE_IDENTITY_ONLY;
   layers.acceptance = nearShot ? NEAR_SHOT_ACCEPTANCE : ACCEPTANCE_TEXT;
-  return layers;
+  return applyRenderStyleLayers(layers, {
+    ...options, fabricText: FABRICS[CLOTHING_POOL[options.outfit]?.fabric]?.text
+  });
 }
 
 /** 把 config.json / 控制台里的原始值收敛成内部配置。 */
@@ -1884,7 +1931,19 @@ export function normalizeImageGenConfig(input = {}) {
   const profileFields = profile && typeof profile === 'object'
     ? Object.fromEntries(Object.entries(profile).filter(([, value]) => value !== '' && value !== undefined && value !== null))
     : null;
-  const raw = profileFields ? { ...input, ...profileFields } : input;
+  const raw = profileFields ? { ...input, ...profileFields, renderStyle: input.renderStyle, renderStyleSource: input.renderStyleSource } : input;
+  const renderStyle = normalizeRenderStyle(raw.renderStyle);
+  const renderStyleSource = ['request', 'config', 'default'].includes(raw.renderStyleSource)
+    ? raw.renderStyleSource : (raw.renderStyle ? 'config' : 'default');
+  // 保存原始覆盖，避免重复归一化或切回 legacy 时继承黑白转换后的角色/负向。
+  const renderStyleBase = raw.renderStyleBase || {
+    promptLayers: raw.promptLayers, characterPrompt: raw.characterPrompt,
+    negativePrompt: raw.negativePrompt, stylePrompt: raw.stylePrompt
+  };
+  const layerInput = { ...raw, ...renderStyleBase };
+  if (renderStyle !== 'legacy' && renderStyleBase.stylePrompt && !renderStyleBase.promptLayers) {
+    throw new Error('renderStyle 与整段 stylePrompt 冲突，请移除 stylePrompt 或切回 legacy');
+  }
   const provider = normalizeProvider(raw.provider);
   const defaults = PROVIDER_DEFAULTS[provider];
   const width = clampInt(raw.width, 256, 1536, 1024);
@@ -1919,21 +1978,22 @@ export function normalizeImageGenConfig(input = {}) {
   const sceneFraming = normalizeSceneFraming(raw.sceneFraming);
   const backgroundDetail = normalizeBackgroundDetail(raw.backgroundDetail);
   const styleNotes = String(raw.styleNotes ?? '').trim();
+  assertRenderStyleNotes(renderStyle, styleNotes);
   // 方形画幅塞全身会显小、背景被挤掉：全身/七分身默认改竖幅 2:3，
   // wide_scene 改 16:9 横幅（1536×864），显式非方形尺寸则原样保留。
   const portrait = framing !== 'closeup' && width === height;
   const wide = sceneFraming === 'wide_scene' && width === height;
   const finalWidth = wide ? 1536 : (portrait ? 1024 : width);
   const finalHeight = wide ? 864 : (portrait ? 1536 : height);
-  const promptLayers = normalizePromptLayers(raw, preset, {
+  const promptLayers = normalizePromptLayers(layerInput, preset, {
     outfit, tail: tailMode, expression, vibe, hairstyleName, clothingMotif, framing,
     faceStyle: faceStyleChoice.name === 'none' ? 'none' : faceStyleChoice.name,
-    sceneFraming, backgroundDetail, styleNotes
+    sceneFraming, backgroundDetail, styleNotes, renderStyle
   });
   const timeoutMs = clampInt(raw.timeoutMs, 10_000, 300_000, 120_000);
   // Key 只从配置或环境变量读，永不回显；apiKeyEnv 便于把密钥留在环境里。
   const apiKey = String(raw.apiKey || (raw.apiKeyEnv ? process.env[String(raw.apiKeyEnv)] || '' : ''));
-  const baseNegative = String(raw.negativePrompt || preset.negativePrompt);
+  const baseNegative = String(renderStyleBase.negativePrompt || preset.negativePrompt);
   const tailNegative = TAIL_NEGATIVE[tailMode] || [];
   // 默认参考图：数组优先（全身锚点在前、脸部特写在后），单值字段兜底。
   const defaultReferenceImages = (Array.isArray(raw.defaultReferenceImages)
@@ -1952,11 +2012,11 @@ export function normalizeImageGenConfig(input = {}) {
     .map((term) => term.trim())
     .filter(Boolean)
     .filter((term) => !(nearShotNegative && NEAR_SHOT_DROP_NEGATIVE.has(term)));
-  const negativePrompt = mergeNegativeTerms(
+  const negativePrompt = mergeNegativeTerms(renderStyleNegativeTerms(mergeNegativeTerms(
     FRAMING_NEGATIVE[framing] || [],
     baseNegativeTerms.join('、'),
     nearShotNegative ? [] : tailNegative
-  ).join('、');
+  ), renderStyle), RENDER_STYLES[renderStyle].negative || []).join('、');
   return {
     enabled: raw.enabled !== false,
     provider,
@@ -1968,6 +2028,10 @@ export function normalizeImageGenConfig(input = {}) {
     width: finalWidth,
     height: finalHeight,
     size: `${finalWidth}x${finalHeight}`,
+    renderStyle,
+    renderStyleSource,
+    ...(renderStyle !== 'legacy' || raw.renderStyleBase ? { renderStyleBase } : {}),
+    effectiveFaceStyle: renderStyle === 'legacy' ? faceStyle : renderStyle,
     stylePreset: preset.name,
     styleRotate: raw.styleRotate === true,
     outfit,
@@ -1992,8 +2056,8 @@ export function normalizeImageGenConfig(input = {}) {
     // 显式 stylePrompt 仍然优先（控制台临时覆盖）；否则由分层模板拼装。
     // 同时给了 promptLayers 时以分层为准，避免旧 stylePrompt 与归一化后的层不一致，
     // 导致出图时判定为“非分层模板”而不再按发型/表情重拼。
-    stylePrompt: String(raw.stylePrompt && !(raw.promptLayers && typeof raw.promptLayers === 'object')
-      ? raw.stylePrompt
+    stylePrompt: String(renderStyle === 'legacy' && renderStyleBase.stylePrompt && !(renderStyleBase.promptLayers && typeof renderStyleBase.promptLayers === 'object')
+      ? renderStyleBase.stylePrompt
       : assemblePromptLayers(promptLayers)),
     negativePrompt,
     // 正常出图一律带参考图：没有传参考图时用角色锚点兜底，连锚点都读不到就拒绝出图。
@@ -2119,11 +2183,16 @@ export function buildPromptParts(description, stylePrompt = DEFAULT_STYLE_PROMPT
   const withCharacter = (text) => (characterBlock ? `${characterBlock}；${text}` : text);
   const logger = typeof options.logger === 'function' ? options.logger : ((line) => console.warn(line));
   let base = withCharacter(style);
+  // 新画风先为动作场景留预算，不能模板占到 770 字才发现场景只剩 9 字。
+  const renderStyle = normalizeRenderStyle(options.renderStyle);
+  const reserved = renderStyle === 'legacy' ? 0 : Math.min(Array.from(content).length, 200) + 1;
+  const baseLimit = PROMPT_BUDGET.positive.max - reserved;
   // 超限降级：身份层、比例句、表情层、服装层一个字不动，只按顺序丢最不承重的背景、光影层。
   // 都不够时，下面的“只吃剩余预算”逻辑才开始裁用户描述句。
   const droppedLayers = [];
-  for (const layerName of PROMPT_DEGRADE_ORDER) {
-    if (measurePromptChars({ positive: base }).positive <= PROMPT_BUDGET.positive.max) break;
+  const degradeOrder = renderStyle === 'legacy' ? PROMPT_DEGRADE_ORDER : ['background', 'lighting', 'acceptance'];
+  for (const layerName of degradeOrder) {
+    if (measurePromptChars({ positive: base }).positive <= baseLimit) break;
     const next = withCharacter(stripPromptLayers(style, [...droppedLayers, layerName]));
     if (next === base) continue; // 这层不存在（自定义 stylePrompt），跳过。
     droppedLayers.push(layerName);
@@ -2153,6 +2222,7 @@ export function buildPrompt(description, stylePrompt = DEFAULT_STYLE_PROMPT, neg
 
 /** 画图失败时的统一对外文案：不静默兜底，也不含糊其辞。 */
 export function drawFailureReply(result = {}) {
+  if (result.reason === 'render-style-processing') return '黑白画风后处理失败，这次没有保存或发送图片。';
   if (result.reason === 'moderation') {
     const detail = String(result.analysis?.safetyReason || '').trim();
     return `这张没过内容审核${detail ? `（${detail}）` : '（涉及露点或裸露）'}，已拦下，没有保存也没有发送。`;
@@ -2204,7 +2274,8 @@ function compactNegativeForArk(negative) {
 
 function buildArkRequest(config, parts, options) {
   const references = Array.isArray(options.references) ? options.references : [];
-  const negative = compactNegativeForArk(parts.negative);
+  const renderStyle = normalizeRenderStyle(config.renderStyle);
+  const negative = mergeNegativeTerms(compactNegativeForArk(parts.negative), RENDER_STYLES[renderStyle].negative || []).join('、');
   // Seedream 4.x / 5.0 lite 支持组图开关；5.0 pro/flash 不支持，传了会 400。
   const supportsSequential = !/seedream-5-0-(pro|flash)/.test(String(config.model || ''));
   return {
@@ -2643,6 +2714,7 @@ async function fetchProviderImage(config, prompt, options, fetchImpl, sleep) {
     throw error;
   }
   const { url, init } = buildImageRequest(config, prompt, options);
+  options.onRequest?.(config, init);
   const startedAt = Date.now();
   const maxAttempts = 1 + Math.max(0, Number(config.maxRetries) || 0);
   let lastError = null;

@@ -10,6 +10,7 @@ import { synthesizeXfyunSpeech } from './xfyun-tts.mjs';
 import { synthesizeEdgeSpeech } from './edge-tts.mjs';
 import { synthesizeEdgeSpeechLocal, edgeTtsLocalReady } from './edge-tts-local.mjs';
 import { synthesizeVoiceClone } from './voice-clone-tts.mjs';
+import { synthesizeVoiceStudio } from './voice-studio-tts.mjs';
 import { generateSong, downloadSong } from './singing.mjs';
 import { applyLiuyingSpeech, applyLiuyingVoice } from './rvc-singing.mjs';
 import { resolveSingingPitchPlan } from './rvc-pitch.mjs';
@@ -497,6 +498,18 @@ async function handle(req, res) {
     try {
       const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
       const file = await synthesizeVoiceClone('你好，我是小鲸鱼。现在可以用自己的声音说话啦。', config.voiceClone);
+      const audio = Buffer.from(file.slice('base64://'.length), 'base64');
+      res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': audio.length,
+        'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end(audio);
+    } catch (error) { return json(res, 400, { error: error.message }); }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/settings/voice-studio-test') {
+    if (!requireLocalOrigin(req)) return json(res, 403, { error: '仅允许本机设置页面测试 VoiceStudio 音色' });
+    try {
+      const config = JSON.parse(readFileSync(fileURLToPath(new URL('../config.json', import.meta.url)), 'utf8'));
+      const file = await synthesizeVoiceStudio('你好，这里是 VoiceStudio 银狼音色测试。听得清楚吗？', config.voiceStudio);
       const audio = Buffer.from(file.slice('base64://'.length), 'base64');
       res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': audio.length,
         'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });

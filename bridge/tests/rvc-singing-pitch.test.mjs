@@ -2,14 +2,35 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { buildSingingMixFilter, buildTransposeFilter, SINGING_MIX_FILTER } from '../src/rvc-singing.mjs';
+import { buildSingingMixFilter, buildTransposeFilter, renderLiuyingSegmentFromStems, SINGING_MIX_FILTER } from '../src/rvc-singing.mjs';
+import { inspectMp3Duration } from '../src/song-library.mjs';
 import { analyzePitchSamples, decodeAudioSamples } from '../src/rvc-pitch.mjs';
 
 const FFMPEG = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
   '../../../state/singing-rvc/ffmpeg/bin/ffmpeg.exe');
 const SAMPLE_RATE = 8000;
+
+test('整首已验证有歌声时，纯音乐前奏保留时长与伴奏，不要求凭空生成歌声', { skip: !existsSync(FFMPEG) }, async () => {
+  const work = mkdtempSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '.intro-fixture-'));
+  try {
+    const vocals = path.join(work, 'vocals.wav');
+    const accompaniment = path.join(work, 'accompaniment.wav');
+    execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+      '-i', 'anullsrc=r=44100:cl=stereo', '-t', '2', vocals], { windowsHide: true });
+    execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+      '-i', 'sine=frequency=440:sample_rate=44100:duration=2', '-ac', '2', accompaniment], { windowsHide: true });
+    const audio = await renderLiuyingSegmentFromStems({ work, vocals, accompaniment, validatedVocals: true, pitchShift: 5 },
+      { startSeconds: 0, seconds: 2, tag: 'intro', logger: { info() {} } });
+    assert.ok(Math.abs(inspectMp3Duration(audio) - 2) < 0.1);
+    const output = path.join(work, 'intro.mp3');
+    writeFileSync(output, audio);
+    const samples = await decodeAudioSamples(output, { ffmpegPath: FFMPEG, sampleRate: SAMPLE_RATE });
+    assert.ok(samples.some((x) => Math.abs(x) > 0.001), '保留可听伴奏，不输出空白文件');
+    assert.ok(Math.abs(analyzePitchSamples(samples).medianHz - 440 * 2 ** (5 / 12)) < 6);
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
 
 test('shift=0 keeps the mix filter byte-for-byte identical to the pre-change baseline', () => {
   assert.equal(buildSingingMixFilter(0), SINGING_MIX_FILTER);

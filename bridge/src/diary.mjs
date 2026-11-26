@@ -517,6 +517,7 @@ export function scoreDiaryMaterial({
   };
   if (Number(facts.songSentCount) > 0) add(2, 'song');
   if (Number(facts.douyinCount) > 0) add(Math.min(3, Number(facts.douyinCount)), 'douyin');
+  if (Number(facts.cabinCount) > 0) add(Math.min(2, Number(facts.cabinCount)), 'cabin');
   if (Math.max(Number(facts.chat?.count) || 0, Number(chatTurns) || 0) >= 6) add(2, 'chat');
   if (affinityChanged) add(1, 'affinity');
   const gap = lastEntryAt > 0 ? now.getTime() - lastEntryAt : Number.POSITIVE_INFINITY;
@@ -562,6 +563,7 @@ export function normalizeDiaryState(raw = {}, now = new Date()) {
     used: {
       douyinAt: Math.max(0, Number(used.douyinAt) || 0),
       songAt: Math.max(0, Number(used.songAt) || 0),
+      cabinAt: Math.max(0, Number(used.cabinAt) || 0),
       chatAt: Math.max(0, Number(used.chatAt) || 0)
     }
   };

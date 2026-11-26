@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { childEnv } from './proxy-env.mjs';
 import { resolveFfmpegPath } from './animated-image.mjs';
 import { detectPitchShiftFromAudio, singingPitchOptions } from './rvc-pitch.mjs';
+import { NO_AUDIBLE_VOCALS, STEM_SEPARATION_FAILED, songSourceError } from './song-source-errors.mjs';
 
 const exec = promisify(execFile);
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -127,7 +128,11 @@ async function separateStems(normalized, work, stage = 'demucs-separation') {
   const vocals = path.join(demucsOut, DEMUCS_MODEL, 'song', 'vocals.wav');
   const accompaniment = path.join(demucsOut, DEMUCS_MODEL, 'song', 'no_vocals.wav');
   console.info(`[rvc] stage started stage=${stage} model=${DEMUCS_MODEL} device=cpu file=${path.basename(normalized)}`);
-  await run(pythonExecutable(), ['-m', 'demucs', '-n', DEMUCS_MODEL, '--two-stems=vocals', '-d', 'cpu', '-o', demucsOut, normalized], 1_800_000, stage);
+  try {
+    await run(pythonExecutable(), ['-m', 'demucs', '-n', DEMUCS_MODEL, '--two-stems=vocals', '-d', 'cpu', '-o', demucsOut, normalized], 1_800_000, stage);
+  } catch (cause) {
+    throw songSourceError(STEM_SEPARATION_FAILED, '人声分离程序执行失败', { stage, cause });
+  }
   const [vocalDb, accompanimentDb] = await Promise.all([meanVolumeDb(vocals), meanVolumeDb(accompaniment)]);
   console.log(`[song-cover] stem levels vocals=${vocalDb.toFixed(1)}dB accompaniment=${accompanimentDb.toFixed(1)}dB`);
   return { vocals, accompaniment, vocalDb, accompanimentDb };
@@ -169,10 +174,12 @@ export async function applyLiuyingVoiceDetailed(audio, { pitch = 0, pitchMode = 
     await writeFile(source, input, { flag: 'wx' });
     stage = 'normalize-input';
     await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', source, '-ar', '44100', '-ac', '2', normalized], 180_000, stage);
+    stage = 'demucs-separation';
     const stems = await separateStems(normalized, work);
     const { vocals, accompaniment, vocalDb, accompanimentDb } = stems;
+    stage = 'vocal-validation';
     if (!hasAudibleVocals(vocalDb, accompanimentDb)) {
-      throw new Error('这一段几乎没有清晰人声，已停止转换；请换有人声的歌曲版本或指定其他候选');
+      throw songSourceError(NO_AUDIBLE_VOCALS, '这一段几乎没有清晰人声，已停止转换；请换有人声的歌曲版本或指定其他候选', { scope: 'clip', vocalDb, accompanimentDb });
     }
     const auto = pitchMode === 'auto';
     let shift = Number.isInteger(pitchShift) ? pitchShift : pitch;
@@ -207,9 +214,10 @@ export async function applyLiuyingVoice(audio, options = {}) {
  * 整首点歌：分离整首人声/伴奏一次，检测一次 shift，返回可逐段复用的会话。
  * 检测失败（过短/静音/异常）只会得到 shift=0，仍旧照原样出歌。
  */
-export async function prepareLiuyingSongStems(audio, { pitchConfig = {}, logger = console } = {}) {
+export async function prepareLiuyingSongStems(audio, { pitchConfig = {}, pitchShift = null, logger = console } = {}) {
   const input = Buffer.from(audio);
   if (!input.length || input.length > MAX_SONG_BYTES) throw new Error('整首歌曲为空或超过 64 MB，无法进行流萤音色转换');
+  if (pitchShift != null && (!Number.isInteger(pitchShift) || pitchShift < -12 || pitchShift > 12)) throw new Error('流萤变调范围须在 -12 到 12 之间');
   const status = await rvcSingingStatus();
   if (!status.ready) throw new Error(`流萤 RVC 环境尚未就绪：${status.missing.join('、')}`);
   await mkdir(WORK_ROOT, { recursive: true });
@@ -221,16 +229,18 @@ export async function prepareLiuyingSongStems(audio, { pitchConfig = {}, logger 
     await writeFile(source, input, { flag: 'wx' });
     stage = 'normalize-input';
     await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', source, '-ar', '44100', '-ac', '2', normalized], 300_000, stage);
+    stage = 'demucs-separation';
     const { vocals, accompaniment, vocalDb, accompanimentDb } = await separateStems(normalized, work);
+    stage = 'vocal-validation';
     if (!hasAudibleVocals(vocalDb, accompanimentDb)) {
-      throw new Error('整首歌几乎没有清晰人声，已停止转换；请换有人声的歌曲版本或指定其他候选');
+      throw songSourceError(NO_AUDIBLE_VOCALS, '整首歌几乎没有清晰人声，已停止转换；请换有人声的歌曲版本或指定其他候选', { scope: 'whole', vocalDb, accompanimentDb });
     }
     stage = 'pitch-detection';
-    const detected = await detectPitchShiftFromAudio(vocals, { ffmpegPath: FFMPEG,
-      config: singingPitchOptions(pitchConfig), logger });
+    const detected = pitchShift == null ? await detectPitchShiftFromAudio(vocals, { ffmpegPath: FFMPEG,
+      config: singingPitchOptions(pitchConfig), logger }) : { shift: pitchShift, pitchInfo: null, reason: 'manual' };
     logger.info?.(`[rvc] whole-song pitch shift=${detected.shift} reason=${detected.reason}`);
     return {
-      work, vocals, accompaniment,
+      work, vocals, accompaniment, validatedVocals: true, vocalDb, accompanimentDb,
       pitchShift: detected.shift, pitchInfo: detected.pitchInfo, pitchReason: detected.reason,
       close: async () => { await rm(work, { recursive: true, force: true }); }
     };
@@ -253,6 +263,19 @@ export async function renderLiuyingSegmentFromStems(stems, { startSeconds, secon
     '-i', stems.accompaniment, '-ar', '44100', '-ac', '2', accompanimentSlice], 180_000, 'cut-segment-accompaniment');
   const shift = Number.isInteger(stems.pitchShift) ? stems.pitchShift : 0;
   logger.info?.(`[rvc] rendering segment tag=${tag} start=${startSeconds}s seconds=${seconds}s shift=${shift}`);
+  if (stems.validatedVocals === true) {
+    const [vocalDb, accompanimentDb] = await Promise.all([meanVolumeDb(vocalSlice), meanVolumeDb(accompanimentSlice)]);
+    if (!hasAudibleVocals(vocalDb, accompanimentDb)) {
+      // 整首有已验证歌声，局部纯音乐前奏/间奏保留时序与同一伴奏移调，不伪造人声。
+      const output = path.join(stems.work, `${tag}-instrumental.mp3`);
+      const transpose = buildTransposeFilter(shift);
+      await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', accompanimentSlice,
+        '-af', `${transpose ? `${transpose},` : ''}volume=0.38,alimiter=limit=0.9`,
+        '-ar', '48000', '-ac', '2', '-b:a', '192k', output], 180_000, 'preserve-instrumental-segment');
+      logger.info?.(`[rvc] instrumental passage preserved tag=${tag} start=${startSeconds}s seconds=${seconds}s shift=${shift}`);
+      return readFile(output);
+    }
+  }
   return convertAndMix({ vocals: vocalSlice, accompaniment: accompanimentSlice, shift, work: stems.work, tag });
 }
 

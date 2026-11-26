@@ -116,13 +116,13 @@ echo [2/5] Model proxy (multi-key)
 netstat -ano | findstr /R /C:":18901 .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
   echo       already running, skip
-  if defined START_BOT_DRYRUN echo [dry-run] would skip: start "ModelPool" /MIN /D "%ROOT%" "%ROOT%\model-pool-proxy.bat"
+  if defined START_BOT_DRYRUN echo [dry-run] would skip: start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%" "%ROOT%\model-pool-proxy.bat"
 ) else (
   echo       starting...
   if defined START_BOT_DRYRUN (
-    echo [dry-run] would run : start "ModelPool" /MIN /D "%ROOT%" "%ROOT%\model-pool-proxy.bat"
+    echo [dry-run] would run : start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%" "%ROOT%\model-pool-proxy.bat"
   ) else (
-    start "ModelPool" /MIN /D "%ROOT%" "%ROOT%\model-pool-proxy.bat"
+    start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%" "%ROOT%\model-pool-proxy.bat"
     timeout /t 2 /nobreak >nul
   )
 )
@@ -133,13 +133,13 @@ netstat -ano | findstr /R /C:":18903 .*LISTENING" >nul 2>&1
 if errorlevel 1 (
   echo       starting conversation model router...
   if defined START_BOT_DRYRUN (
-    echo [dry-run] would run : start "ModelRouter" /MIN /D "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
+    echo [dry-run] would run : start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
   ) else (
-    start "ModelRouter" /MIN /D "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
+    start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
     timeout /t 2 /nobreak >nul
   )
 ) else (
-  if defined START_BOT_DRYRUN echo [dry-run] would skip: start "ModelRouter" /MIN /D "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
+  if defined START_BOT_DRYRUN echo [dry-run] would skip: start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%" "%ROOT%\repo\deploy\windows\model-router.bat"
 )
 
 rem ---- 3. dsh web + persistent watchdog ----
@@ -161,13 +161,13 @@ echo [4/5] Bridge
 tasklist /FI "WINDOWTITLE eq QQBridge*" 2>nul | find /I "cmd.exe" >nul 2>&1
 if not errorlevel 1 (
   echo       bridge watchdog already running, skip
-  if defined START_BOT_DRYRUN echo [dry-run] would skip: start "QQBridge" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\bridge-watchdog.bat"
+  if defined START_BOT_DRYRUN echo [dry-run] would skip: start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\bridge-watchdog.bat"
 ) else (
   echo       starting bridge watchdog...
   if defined START_BOT_DRYRUN (
-    echo [dry-run] would run : start "QQBridge" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\bridge-watchdog.bat"
+    echo [dry-run] would run : start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\bridge-watchdog.bat"
   ) else (
-    start "QQBridge" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\bridge-watchdog.bat"
+    start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\bridge-watchdog.bat"
     timeout /t 3 /nobreak >nul
   )
 )
@@ -177,9 +177,9 @@ if exist "%ROOT%\state\astrbot-sidecar\AstrBot\data\cmd_config.json" (
   netstat -ano | findstr /R /C:"127.0.0.1:6199 .*LISTENING" >nul 2>&1
   if errorlevel 1 (
     if defined START_BOT_DRYRUN (
-      echo [dry-run] would run : start "QQAstrBot" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\astrbot-sidecar-watchdog.bat"
+      echo [dry-run] would run : start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\astrbot-sidecar-watchdog.bat"
     ) else (
-      start "QQAstrBot" /MIN /D "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\astrbot-sidecar-watchdog.bat"
+      start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-batch-launcher.vbs" "%ROOT%\repo\bridge" "%ROOT%\repo\bridge\astrbot-sidecar-watchdog.bat"
     )
   )
 )
@@ -193,13 +193,13 @@ if not defined NODE (
   netstat -ano | findstr /R /C:":18902 .*LISTENING" >nul 2>&1
   if not errorlevel 1 (
     echo       already running, skip
-    if defined START_BOT_DRYRUN echo [dry-run] would skip: start "ImageLibrary" /MIN /D "%ROOT%" "!NODE!" !NODE_PROXY_FLAG! "%ROOT%\repo\bridge\src\image-library-server.mjs"
+    if defined START_BOT_DRYRUN echo [dry-run] would skip: start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-process-launcher.vbs" "%ROOT%" "!NODE!" !NODE_PROXY_FLAG! "%ROOT%\repo\bridge\src\image-library-server.mjs"
   ) else (
     echo       starting local image library...
     if defined START_BOT_DRYRUN (
-      echo [dry-run] would run : start "ImageLibrary" /MIN /D "%ROOT%" "!NODE!" !NODE_PROXY_FLAG! "%ROOT%\repo\bridge\src\image-library-server.mjs"
+      echo [dry-run] would run : start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-process-launcher.vbs" "%ROOT%" "!NODE!" !NODE_PROXY_FLAG! "%ROOT%\repo\bridge\src\image-library-server.mjs"
     ) else (
-      start "ImageLibrary" /MIN /D "%ROOT%" "!NODE!" !NODE_PROXY_FLAG! "%ROOT%\repo\bridge\src\image-library-server.mjs"
+      start "" /B "%SystemRoot%\System32\wscript.exe" //B //NoLogo "%ROOT%\repo\deploy\windows\hidden-process-launcher.vbs" "%ROOT%" "!NODE!" !NODE_PROXY_FLAG! "%ROOT%\repo\bridge\src\image-library-server.mjs"
       timeout /t 2 /nobreak >nul
     )
   )

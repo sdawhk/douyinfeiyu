@@ -5,11 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { cabinBridgePath, cabinLogPath } from './companion-life.mjs';
 
-const BRIDGE_JSON = process.env.CABIN_BRIDGE_JSON
-  || 'C:\\Users\\admin\\Desktop\\小屋世界-v0.1\\data\\bridge.json';
-const CABIN_LOG_JSONL = process.env.CABIN_LOG_JSONL
-  || path.join(path.dirname(BRIDGE_JSON), 'world', 'cabin-log.jsonl');
+const BRIDGE_JSON = cabinBridgePath();
+const CABIN_LOG_JSONL = cabinLogPath();
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BRIDGE_CONFIG = process.env.CABIN_BRIDGE_CONFIG || path.join(ROOT, 'config.json');
 const TOOL_TIMEOUT_MS = 150_000;

@@ -396,6 +396,36 @@ EMOTION_AUTO = os.environ.get("DSH_VOICE_EMOTION_AUTO", "1") not in ("0", "false
 EMOTION_STATE_PATH = os.environ.get(
     "DSH_VOICE_EMOTION_STATE", os.environ.get("DSH_EMOTION_STATE", "/AstrBot/data/dsh_emotion_state.json")
 )
+OUTBOUND_VOICE_PATH = os.environ.get("DSH_VOICE_OUTBOUND_PATH", r"D:\deepseek\state\recent-outbound-voice.json")
+
+
+def _remember_outbound_voice(event: AstrMessageEvent, text: str) -> None:
+    """Persist the latest successfully sent private voice for owner follow-ups."""
+    if event.get_group_id():
+        return
+    recipient = str(event.get_user_id() or "").strip()
+    if not recipient.isdigit():
+        return
+    try:
+        state = {}
+        try:
+            with open(OUTBOUND_VOICE_PATH, encoding="utf-8") as handle:
+                loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    state = loaded
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        now = time.time()
+        state = {key: value for key, value in state.items()
+                 if isinstance(value, dict) and now - float(value.get("at", 0)) <= 3600}
+        state[recipient] = {"at": now, "text": str(text)[:240]}
+        temp_path = OUTBOUND_VOICE_PATH + ".tmp"
+        os.makedirs(os.path.dirname(OUTBOUND_VOICE_PATH), exist_ok=True)
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False)
+        os.replace(temp_path, OUTBOUND_VOICE_PATH)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[voice] 私聊语音上下文保存失败：%s", str(exc)[:180])
 EMOTION_THRESHOLD = max(1, min(3, int(os.environ.get("DSH_VOICE_EMOTION_THRESHOLD", "3"))))
 EMOTION_NAMES = {
     x.strip() for x in os.environ.get(
@@ -1138,12 +1168,14 @@ class Main(star.Star):
                     "[voice] QQ 发送回执超时，按已送达处理（不重发、不播报）：%s",
                     detail[:300],
                 )
+                _remember_outbound_voice(event, clean)
                 return False, RECEIPT_TIMEOUT
             logger.warning("[voice] QQ 语音发送失败(%s)：%s", type(exc).__name__, detail[:300])
             return False, "这次声音没送出去，等一下再试试"
         task = asyncio.create_task(_cleanup_old())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        _remember_outbound_voice(event, clean)
         return True, ""
 
     # ------------------------------------------------ 路径 1：规范工具调用
@@ -1175,7 +1207,7 @@ class Main(star.Star):
             # [patch:receipt-silent] 回执超时按**已送达**处理。语音多半已经进群了，
             # 这时候让模型去说「没发出去」就是在群里报假警。
             logger.info("[voice] 工具调用：回执超时，按已送达收口")
-            return "语音已经发出去了。请只回一句很短的话，不要重复语音里的内容。"
+            return f"语音已经发出去了。你发出的文本是“{clean}”。这是你自己的语音，后续有人追问时不要把说话人弄反；只简短接话，不要重复念原文。"
         if not ok:
             _last_call[sid] = 0.0  # 失败不占冷却
             logger.error("[voice] 工具调用失败：%s", err)
@@ -1198,7 +1230,7 @@ class Main(star.Star):
                 "也不要让用户换个说法或重试 —— 直接把原本想说的那句话用普通文字"
                 "短句发出来，就像一开始就没打算发语音。"
             )
-        return "语音已经发出去了。请只回一句很短的话，不要重复语音里的内容。"
+        return f"语音已经发出去了。你发出的文本是“{clean}”。这是你自己的语音，后续有人追问时不要把说话人弄反；只简短接话，不要重复念原文。"
 
     # ------------------------------------------------ 路径 2：兜底钩子
 

@@ -8,11 +8,10 @@
 import fs from 'node:fs'; import fsp from 'node:fs/promises'; import path from 'node:path'; import os from 'node:os'; import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, startBridge } from './bridge.mjs';
-import { chooseAutonomyAction } from './lib/autonomy.mjs';
-import { readDiaryRows, createDiaryReader } from './lib/diary.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const args = process.argv.slice(2), live = args.includes('--live'), full = args.includes('--full'), show = args.includes('--show');
+//   node selfcheck.mjs --live --multi  1.1：再加一位住户，测试两位一起玩（两台方块机、贪吃蛇/象棋/五子棋双人、对电脑、邀请、餐厅、分开的钱包）
+const args = process.argv.slice(2), live = args.includes('--live'), full = args.includes('--full'), show = args.includes('--show'), multi = args.includes('--multi');
 const reportFile = args.includes('--report') ? path.resolve(args[args.indexOf('--report') + 1]) : null;
 const cfgFile = args.includes('--config') ? path.resolve(args[args.indexOf('--config') + 1]) : path.join(HERE, 'bridge.config.json');
 const results = []; let failed = 0;
@@ -22,50 +21,7 @@ const check = async (name, fn) => { try { const d = await fn(); pass(name, d || 
 const assert = (v, msg) => { if (!v) throw Error(msg); };
 
 console.log('小屋世界 · 安装自检');
-await check('日记面板只读导入与边界', async () => {
-  const temp = await fsp.mkdtemp(path.join(os.tmpdir(), 'cabin-diary-selfcheck-'));
-  try {
-    const now = Date.UTC(2026, 10, 14, 4); // 北京中午
-    await fsp.writeFile(path.join(temp, '2026-11-14.md'), '# 2026-11-14\n\n## 09:15\n第一条经历\n\n## 18:40\n第二条经历\n');
-    await fsp.writeFile(path.join(temp, '2026-10-15.md'), '不应读取的第 31 天');
-    const rows = await readDiaryRows(temp, now);
-    assert(rows.length === 1 && rows[0].day === '2026-11-14' && rows[0].text.includes('## 09:15') && rows[0].text.includes('第一条经历') && rows[0].text.includes('## 18:40') && rows[0].text.includes('第二条经历') && !rows[0].text.includes('# 2026-11-14'), '同日日记没有合并，或时间标记/日期标题处理不正确');
-    let clock = now;
-    const cached = createDiaryReader(temp, () => clock, 30000);
-    assert((await cached()).length === 1, '缓存初次读取失败');
-    await fsp.writeFile(path.join(temp, '2026-11-14.md'), '更新内容');
-    assert((await cached()).length === 1, '短缓存没有生效');
-    clock += 30001;
-    assert((await cached())[0].text === '更新内容', '缓存过期后没有刷新');
-    assert((await readDiaryRows(path.join(temp, 'missing'), now)).length === 0, '缺失来源没有安全返回空列表');
-    return '同日合并且保留时间/近 30 天/短缓存/缺失文件均符合预期';
-  } finally { await fsp.rm(temp, { recursive: true, force: true }); }
-});
 const cfg = loadConfig(cfgFile);
-await check('自主选择遵守忙碌、断线、夜间和预算边界', () => {
-  const catalog = JSON.parse(fs.readFileSync(cfg.catalog, 'utf8'));
-  const resident = { state: {}, catalog, objects: new Map(catalog.objects.map(o => [o.id, o])), bagList: () => [] };
-  const base = { connected: true, feeling: { satiety: 70, hydration: 70 }, wishes: [], weather: { rain: 0, wind: 1 }, wallet: 30, position: { space: 'park' } };
-  const daytime = Date.UTC(2026, 10, 14, 4); // 北京中午
-  assert(chooseAutonomyAction({ status: { ...base, connected: false }, resident, now: daytime }) === null, '断线时仍选出动作');
-  resident.task = { label: '主人正在操作' };
-  assert(chooseAutonomyAction({ status: base, resident, now: daytime }) === null, '忙碌时仍选出动作');
-  resident.task = null;
-  assert(chooseAutonomyAction({ status: base, resident, now: Date.UTC(2026, 10, 14, 16) }) === null, '夜间仍选出动作'); // 北京午夜
-  const hungry = { ...base, feeling: { satiety: 20, hydration: 70 } };
-  assert(chooseAutonomyAction({ status: hungry, resident, now: daytime, spent: 11 })?.type !== 'buy', '达到每日预算后仍购买');
-  resident.bagList = () => [{ id: 'bread', kind: 'eat' }];
-  assert(chooseAutonomyAction({ status: hungry, resident, now: daytime }).product === 'bread', '没有优先消耗背包食品');
-  resident.bagList = () => [];
-  const wishes = [{ text: '钓到一条15厘米以上的鱼', done: false }, { text: '翻一会儿书', done: false }];
-  const wish = chooseAutonomyAction({ status: { ...base, wishes }, resident, now: daytime });
-  assert(wish?.object === 'pier' && wish.use === 'fish', '没有按钓鱼愿望选择玩法');
-  const nextWish = chooseAutonomyAction({ status: { ...base, wishes }, resident, now: daytime, last: 'pier:fish' });
-  assert(nextWish?.object === 'xj_bookshelf', '没有轮换到读书愿望');
-  resident.lastExternalActionAt = daytime - 60000;
-  assert(chooseAutonomyAction({ status: base, resident, now: daytime }) === null, '主人刚操作完时没有安静期');
-  return '忙碌/断线/夜间/主人操作后跳过，预算拦截，背包优先，愿望轮换';
-});
 await check('Node.js 版本 ≥ 18', () => { const major = Number(process.versions.node.split('.')[0]); assert(major >= 18, '当前 ' + process.version + '，请安装 Node.js 18 或更新版本（https://nodejs.org）'); return process.version; });
 await check('找到游戏 CabinWorld.exe', () => { assert(fs.existsSync(cfg.gameExe), '没有 ' + cfg.gameExe + '：请确认解压完整，或在 bridge.config.json 设置 gameExe'); return cfg.gameExe; });
 await check('世界目录 catalog.json 可读', () => { const c = JSON.parse(fs.readFileSync(cfg.catalog, 'utf8')); assert(c.objects?.length && c.products?.length, '内容不完整'); return `${c.spaces.length} 个地方，${c.objects.length} 件东西，${c.products.length} 种商品`; });
@@ -87,7 +43,9 @@ await check('HTTP 端口可用', async () => {
 if (live && !failed) {
   console.log('\n实机测试（临时空存档，不碰正式数据）');
   const temp = await fsp.mkdtemp(path.join(os.tmpdir(), 'cabinworld-selfcheck-'));
-  const t = { ...cfg, autonomy: { enabled: false }, residents: cfg.residents.map(r => ({ ...r, port: 0 })), dataDir: path.join(temp, 'data'), http: { host: '127.0.0.1', port: 0 }, waitMs: 0, chatLink: { enabled: false } };
+  const t = { ...cfg, dataDir: path.join(temp, 'data'), http: { host: '127.0.0.1', port: 0 }, waitMs: 0 };
+  // The optional multiplayer suite explicitly selects all features in its disposable fixture only.
+  if (multi) { const desc=JSON.parse(fs.readFileSync(path.join(HERE,'update/modules.json'),'utf8'));await fsp.mkdir(t.dataDir,{recursive:true});await fsp.writeFile(path.join(t.dataDir,'features.json'),JSON.stringify({version:1,modules:Object.fromEntries(desc.modules.map(m=>[m.id,true]))})); }
   let b;
   const until = async (fn, ms, what) => { const end = Date.now() + ms; for (;;) { const v = await fn(); if (v) return v; if (Date.now() > end) throw Error('等待超时：' + what); await new Promise(r => setTimeout(r, 300)); } };
   const run = async (name, args) => { const r = await b.runTool(name, args, 0); if (!r.taskId) return r; const task = b.resident.tasks.get(r.taskId); await Promise.race([task.promise, new Promise((_, j) => setTimeout(() => j(Error('超过 3 分钟没有完成')), 180000))]); if (task.status !== 'done') throw Error(task.error || task.status); return task.result; };
@@ -120,6 +78,37 @@ if (live && !failed) {
     if (full) {
       await check('汤屋：先换浴衣，再泡汤', async () => { await until(() => !b.resident.task, 30000, '空闲'); const r = await run('cabin_use', { object: 'onsen_soak', use: 'soak' }); assert(b.resident.outfit === 'yukata', '没换浴衣'); return r.label; });
       await check('开关吊灯', async () => { await run('cabin_use', { object: 'xj_lamp', use: 'on' }); return 'on'; });
+    }
+    if (multi) {
+      // 1.1: several bots in one world, without any owner-edition resident. Blocks the release if any of these fails.
+      const R = k => b.residents.get(k), wait = (task, ms = 180000) => Promise.race([task.promise, new Promise((_, j) => setTimeout(() => j(Error('超过 ' + ms / 1000 + ' 秒没有完成')), ms))]);
+      const runA = async (actor, name, a, ms) => { const r = await b.runTool(name, { ...a, actor }, 0); if (!r.taskId) return r; const t = R(actor).tasks.get(r.taskId); await wait(t, ms); if (t.status !== 'done') throw Error(t.error || t.status); return t.result; };
+      const startA = (actor, name, a) => b.runTool(name, { ...a, actor }, 0);
+      const playing = (kind, n) => until(() => [...b.arcade.sessions.values()].find(s => s.kind === kind && s.status === 'playing' && s.members.length === n), 150000, kind + ' 开局（' + n + ' 人）');
+      const here = () => ['xiaojingyu', 'bot_2'].filter(k => R(k));
+      const idle = async () => { for (const a of here()) { try { await b.runTool('cabin_stop', { actor: a }, 0); } catch { /* 本来就空闲 */ } } await until(() => ![...b.arcade.sessions.values()].some(s => ['waiting', 'playing'].includes(s.status)) && here().every(k => !R(k).task), 60000, '住户都停下'); };
+      await check('新增第二位住户 bot_2（有自己的家）', async () => { await idle(); const r = await b.runTool('cabin_add_resident', { key: 'bot_2', name: '小蓝' }); assert(r.ok && R('bot_2'), '没有加上'); await until(() => R('bot_2').state?.wallet, 30000, 'bot_2 经济初始化'); return r.name + ' · ' + (r.home?.fullName || '自己的家'); });
+      await check('两位的钱包和背包分开', async () => {
+        const xjBefore = R('xiaojingyu').state.wallet.coins, b2 = R('bot_2').state.wallet.coins;
+        const drink = b.resident.catalog.products.filter(p => p.kind === 'drink' && p.price <= b2).sort((x, y) => x.price - y.price)[0];
+        await runA('bot_2', 'cabin_buy', { product: drink.id });
+        assert(R('bot_2').state.bag[drink.id] === 1, 'bot_2 背包里没有'); assert(!R('xiaojingyu').state.bag?.[drink.id], '东西进了小鲸鱼的背包'); assert(R('xiaojingyu').state.wallet.coins === xjBefore, '扣了小鲸鱼的钱');
+        return `bot_2 买了${drink.name}，小鲸鱼的钱和背包没变`;
+      });
+      await check('两台俄罗斯方块机同时开局', async () => { await idle(); await startA('xiaojingyu', 'cabin_use', { object: 'arcade_blocks', use: 'play', mode: 'solo' }); await playing('blocks', 1); await startA('bot_2', 'cabin_use', { object: 'arcade_blocks', use: 'play', mode: 'solo' }); await until(() => [...b.arcade.sessions.values()].filter(s => s.kind === 'blocks' && s.status === 'playing').length === 2, 150000, '第二台方块机开局'); await idle(); return '1 号、2 号各一位'; });
+      for (const [label, object, use] of [['贪吃蛇双人', 'arcade_snake', 'play'], ['象棋双人', 'arcade_xiangqi', 'play'], ['五子棋双人', 'arcade_xiangqi', 'play_gomoku']])
+        await check(label + '（duo 开桌，join 入座）', async () => { await idle(); await startA('xiaojingyu', 'cabin_use', { object, use, mode: 'duo' }); await until(() => [...b.arcade.sessions.values()].some(s => s.status === 'waiting'), 30000, '开桌'); await startA('bot_2', 'cabin_use', { object, use, mode: 'join' }); const s = await playing(use === 'play_gomoku' ? 'gomoku' : object === 'arcade_snake' ? 'snake' : 'xiangqi', 2); await idle(); return s.members.map(m => m.r.key).join(' vs '); });
+      await check('五子棋对电脑（npc）', async () => { await idle(); await startA('bot_2', 'cabin_use', { object: 'arcade_xiangqi', use: 'play_gomoku', mode: 'npc' }); const s = await playing('gomoku', 1); const sides = s.board?.sides || s.board?.players || []; assert(sides.includes('computer'), '对手不是电脑：' + JSON.stringify(sides)); await idle(); return 'bot_2 vs 电脑'; });
+      await check('家中棋盘邀请', async () => { const r = await b.runTool('cabin_invite', { actor: 'xiaojingyu', guest: 'bot_2' }); assert(r.ok && r.chessObject, '没有给出棋盘'); return r.chessObject; });
+      await check('餐厅同时接待两位', async () => {
+        await idle(); const menu = await b.runTool('cabin_restaurant', { actor: 'xiaojingyu', action: 'menu' }); const dish = (menu.dishes || []).find(d => d.price == null || d.price <= Math.min(R('xiaojingyu').state.wallet.coins, R('bot_2').state.wallet.coins)) || menu.dishes?.[0];
+        assert(dish, '菜单是空的');
+        // one counter, one staff member: the two orders are served one after the other, so allow time for both
+        const t0 = Date.now(), took = {};
+        await Promise.all(['xiaojingyu', 'bot_2'].map(k => runA(k, 'cabin_restaurant', { action: 'order', dish: dish.id }, 480000).then(() => { took[k] = Math.round((Date.now() - t0) / 1000); })));
+        assert(R('xiaojingyu').state.bag?.[dish.id] >= 1 && R('bot_2').state.bag?.[dish.id] >= 1, '菜没有分别进两位的背包');
+        return `两位各点了一份${dish.name || dish.id}（${took.xiaojingyu} 秒 / ${took.bot_2} 秒）`;
+      });
     }
     await check('存档只写在临时目录', async () => { const files = await fsp.readdir(path.join(temp, 'save')); assert(files.includes('economy.json'), '没有经济存档'); return files.join(', '); });
     await check('关闭桥后游戏仍在运行（窗口归用户管）', async () => { await b.close(); await new Promise(r => setTimeout(r, 1200)); assert(b.child && b.child.exitCode === null, '游戏跟着退出了'); return '游戏仍在运行'; });

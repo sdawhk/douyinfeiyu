@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { RENDER_STYLE_NAMES } from './image-render-style.mjs';
 
 export const DRAW_PROMPT_MAX = 200;
 export const DRAW_STYLE_MAX = 120;
@@ -17,7 +18,7 @@ function localDayKey(timestamp) {
 }
 
 /** 校验工具参数；返回 {ok:true, request} 或 {ok:false, error}。 */
-export function normalizeDrawToolArgs({ prompt, size, style, chatKey } = {}) {
+export function normalizeDrawToolArgs({ prompt, size, style, chatKey, renderStyle } = {}) {
   const text = String(prompt ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
   const length = [...text].length;
   if (!length) return { ok: false, error: 'prompt 不能为空（1 到 200 字）', reply: '这次没画：描述是空的。' };
@@ -41,7 +42,11 @@ export function normalizeDrawToolArgs({ prompt, size, style, chatKey } = {}) {
     return { ok: false, error: 'chatKey 格式应为 private:QQ号 或 group:群号', reply: '这次没画：会话标识格式不对。' };
   }
 
-  return { ok: true, request: { prompt: text, size: chosenSize, style: styleText, chatKey: chat } };
+  const render = String(renderStyle ?? '').trim().toLowerCase();
+  if (render && !RENDER_STYLE_NAMES.includes(render)) {
+    return { ok: false, error: `renderStyle 只支持 ${RENDER_STYLE_NAMES.join(' / ')}`, reply: '这次没画：画风档位不支持。' };
+  }
+  return { ok: true, request: { prompt: text, size: chosenSize, style: styleText, chatKey: chat, ...(render ? { renderStyle: render } : {}) } };
 }
 
 /**
