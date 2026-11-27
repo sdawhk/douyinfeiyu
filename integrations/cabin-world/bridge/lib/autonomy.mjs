@@ -8,6 +8,8 @@ const NEED_LIMIT = 38, BUY_LIMIT = 8;
 // 刚吃过/喝过就别马上再来一次：饱腹增益不够大时，光看阈值会一个小时买四五次，
 // 上午就把一天的零花钱花光。真掉到 10 以下则不受冷却限制。
 const NEED_COOLDOWN_MS = 45 * 60000;
+// 饿渴单独一条快线：每 3 分钟看一次，不必等到十五分钟那一轮自主活动。
+const NEED_CHECK_MS = 3 * 60_000;
 // 低于这个温度就不买冰的：之前 12℃ 的天也照吃西瓜冰棍，日志里写着“冰得牙齿一酸”。
 const COLD_WEATHER_C = 18;
 // 高于这个温度就不买热的：夏天 30℃ 端一杯热咖啡同样不合理。
@@ -30,7 +32,7 @@ function fillingRank(product) {
   return MEAL_IDS.has(product.id) ? 3 : 2;
 }
 
-export function chooseAutonomyAction({ status, resident, now = Date.now(), spent = 0, last = '', blocked = [], skipNeeds = false }) {
+export function chooseAutonomyAction({ status, resident, now = Date.now(), spent = 0, last = '', blocked = [], skipNeeds = false, needsOnly = false }) {
   if (!status?.connected || !resident?.state || resident.task) return null;
   if (resident.lastExternalActionAt && now - resident.lastExternalActionAt < 3 * 60000) return null;
   const local = new Date(now + 8 * 3600000), hour = local.getUTCHours() + local.getUTCMinutes() / 60;
@@ -54,11 +56,12 @@ export function chooseAutonomyAction({ status, resident, now = Date.now(), spent
     ? (coldWeather ? (product.shelf === 'hotdrink' ? 3 : 2) : warmWeather ? (product.shelf === 'drink' ? 3 : 2) : 2)
     : fillingRank(product);
   const needEat = satiety <= NEED_LIMIT, needDrink = hydration <= NEED_LIMIT;
-  // 饿和渴同时低就按 15 分钟一个时段交替。原来是“饱腹度一低就只吃”，
-  // 结果 satiety 长期卡在 38 以下，hydration 掉到 0 也永远轮不到喝水。
+  // 饿了渴了谁更低先补谁：补上去自然就轮到另一个，不会像按时段交替那样
+  // 明明饿得慌还去买第二杯饮料。
   const needs = skipNeeds ? '' : needEat && needDrink
-    ? (Math.floor(now / TICK_MS) % 2 === 0 ? 'drink' : 'eat')
+    ? (satiety <= hydration ? 'eat' : 'drink')
     : needEat ? 'eat' : needDrink ? 'drink' : '';
+  if (needsOnly && !needs) return null;
   if (needs) {
     const bagList = resident.bagList();
     const inBag = bagList.filter(p => p.kind === needs && beats(p))[0]
@@ -83,6 +86,8 @@ export function chooseAutonomyAction({ status, resident, now = Date.now(), spent
     }
   }
 
+  if (needsOnly) return null;
+
   const wishes = (status.wishes || []).filter(w => !w.done);
   const wishChoices = [];
   if (wishes.some(w => /钓到|大鱼/.test(w.text))) wishChoices.push(['pier', 'fish']);
@@ -104,7 +109,7 @@ export function chooseAutonomyAction({ status, resident, now = Date.now(), spent
 }
 
 export function createAutonomy({ rows, host, intervalMs = 15 * 60000, firstDelayMs = 20000, log = () => {}, now = Date.now, logFile = '' }) {
-  let timer = null, lastAction = new Map(), spentToday = new Map(), lastNeedAt = new Map();
+  let timer = null, needTimer = null, lastAction = new Map(), spentToday = new Map(), lastNeedAt = new Map();
   const day = () => beijingDay(now());
   // 桥接目录里的商品表可能比游戏新：买一次报“没有这个东西”，就把这个 id 记下来，
   // 免得每次重启都对着同一件不存在的商品白跑一趟。
@@ -138,16 +143,17 @@ export function createAutonomy({ rows, host, intervalMs = 15 * 60000, firstDelay
     try { for (const line of fs.readFileSync(logFile, 'utf8').split(/\r?\n/)) { try { const e = JSON.parse(line); if (e.fish === key && e.source === 'autonomy' && beijingDay(e.ts) === today) amount += Number(e.spent) || 0; } catch { /* 略过损坏行 */ } } } catch { /* 日志尚不存在 */ }
     spentToday.set(key, { day: today, amount }); return amount;
   };
-  const act = async (row, attempt = 0) => {
+  const act = async (row, attempt = 0, needsOnly = false) => {
     if (!host.connected || !row.resident.state || row.resident.task) return;
     const status = row.resident.status(), spent = loadSpent(row.key);
     // 刚吃完/喝完还在冷却里，就跳过进食需求去挑件别的事做。
     // 以前是直接 return，结果它会站在小卖部收银台一动不动地等满 45 分钟。
     const lastMeal = Math.max(lastNeedAt.get(`${row.key}:eat`) || 0, lastNeedAt.get(`${row.key}:drink`) || 0);
     const satietyNow = Number(status.feeling?.satiety ?? 100), hydrationNow = Number(status.feeling?.hydration ?? 100);
-    const critical = satietyNow <= 10 || hydrationNow <= 10;
+    // 阈值跟 mood 的「饿得慌 / 渴得慌」对齐：到她觉得难受的程度就不再等冷却。
+    const critical = satietyNow <= 20 || hydrationNow <= 20;
     const cooling = !critical && now() - lastMeal < NEED_COOLDOWN_MS;
-    const choice = chooseAutonomyAction({ status, resident: row.resident, now: now(), spent, skipNeeds: cooling,
+    const choice = chooseAutonomyAction({ status, resident: row.resident, now: now(), spent, skipNeeds: cooling, needsOnly,
       last: lastAction.get(row.key) || '', blocked: [...blocked, ...skippedThisMonth()] });
     if (!choice) return;
     const resident = row.resident;
@@ -178,14 +184,28 @@ export function createAutonomy({ rows, host, intervalMs = 15 * 60000, firstDelay
         if (/没有这个东西|不存在|not found|unknown/i.test(error)) rememberBlocked(choice.product);
         else if (/暂未上架|未上架|时令/i.test(error)) rememberOutOfSeason(choice.product);
         else return;
-        if (attempt < 2) return act(row, attempt + 1);
+        if (attempt < 2) return act(row, attempt + 1, needsOnly);
       }
     }
   };
   const tick = () => { if (!host.connected) return; for (const row of rows) void act(row).catch(e => log(`自主活动异常：${e.message}`)); };
+  // 饿和渴不等十五分钟那一轮：单独每 3 分钟看一次，只处理吃喝，处理完就收工。
+  const needTick = () => {
+    if (!host.connected) return;
+    for (const row of rows) {
+      if (!row.resident.state) { log(`[need] ${row.name} 状态还没同步，跳过`); continue; }
+      if (row.resident.task) { log(`[need] ${row.name} 手上还有动作，跳过`); continue; }
+      void act(row, 0, true).catch(e => log(`进食检查异常：${e.message}`));
+    }
+  };
   return {
-    start() { if (timer) return; timer = setTimeout(() => { tick(); timer = setInterval(tick, intervalMs); }, firstDelayMs); timer.unref?.(); },
-    close() { clearTimeout(timer); clearInterval(timer); timer = null; },
+    start() {
+      if (timer) return;
+      timer = setTimeout(() => { tick(); timer = setInterval(tick, intervalMs); }, firstDelayMs); timer.unref?.();
+      needTimer = setInterval(needTick, NEED_CHECK_MS); needTimer.unref?.();
+      log(`饿渴快线已启动：每 ${Math.round(NEED_CHECK_MS / 60000)} 分钟检查一次`);
+    },
+    close() { clearTimeout(timer); clearInterval(timer); timer = null; clearInterval(needTimer); needTimer = null; },
     tick,
   };
 }
